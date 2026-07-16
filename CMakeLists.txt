@@ -1,97 +1,79 @@
 cmake_minimum_required(VERSION 3.20)
-project(seecpp VERSION 1.0.0 LANGUAGES CXX)
+project(seeml VERSION 1.1.0 LANGUAGES CXX)
 
 # ==============================================================================
 # Global Configuration
 # ==============================================================================
 
-# Enforce C++20 for std::expected, std::span, and modern memory features
-set(CMAKE_CXX_STANDARD 20)
+# C++23 for std::expected (matching the codebase's error-handling idiom).
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Treat warnings as errors to enforce strict memory safety
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    add_compile_options(-Wall -Wextra -Wpedantic -Werror)
+    add_compile_options(-Wall -Wextra -Werror)
 elseif(MSVC)
     add_compile_options(/W4 /WX)
 endif()
 
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+
 # ==============================================================================
-# Target 1: The Compiler (seecpp_compiler)
-# Heavyweight target used only during Ahead-of-Time compilation.
+# Target 1: SIR — the SeeML Intermediate Representation (+ shared utilities)
 # ==============================================================================
 
-add_library(seecpp_compiler STATIC
-    src/memory/offset_binder.cc
-    src/serialization/weight_packer.cc
-    src/backend/codegen_driver.cc
-)
-
-# Expose the public headers to consumers, but keep src/ private
-target_include_directories(seecpp_compiler
-    PUBLIC 
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
-    PRIVATE 
-        ${CMAKE_CURRENT_SOURCE_DIR}
+add_library(seeml_sir STATIC
+    source/sir/sir.cc
+    source/utility/logger/logger.cc
 )
 
 # ==============================================================================
-# Target 2: The Execution Engine (seecpp_runtime)
-# Ultra-lightweight target deployed to the edge/server. Zero compiler dependencies.
+# Target 2: The Update Compiler (seeml_update)
+# Heavyweight AOT target: compiles (source model, teacher, loss, LoRA spec)
+# into a .seeu Update Plan and emits the native update package.
 # ==============================================================================
 
-add_library(seecpp_runtime STATIC
-    src/runtime/runtime_engine.cc
-    src/runtime/avx512_kernels.cc
-    src/runtime/neon_kernels.cc
+add_library(seeml_update STATIC
+    source/update/smf.cc
+    source/update/update_passes.cc
+    source/update/update_compiler.cc
+    source/update/native_emitter.cc
+)
+target_link_libraries(seeml_update PUBLIC seeml_sir)
+
+# ==============================================================================
+# Target 3: The Update Runtime (seeml_update_rt)
+# Ultra-lightweight target deployed to the device: the training-loop VM,
+# reference kernels, dataset feeder. Zero compiler dependencies.
+# ==============================================================================
+
+add_library(seeml_update_rt STATIC
+    source/update_runtime/update_kernels.cc
+    source/update_runtime/dataset.cc
+    source/update_runtime/update_engine.cc
 )
 
-target_include_directories(seecpp_runtime
-    PUBLIC 
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:include>
-    PRIVATE 
-        ${CMAKE_CURRENT_SOURCE_DIR}
-)
+# ==============================================================================
+# Tools
+# ==============================================================================
 
-# --- Hardware-Specific SIMD Tuning ---
-# We surgically apply architecture flags ONLY to the kernel files. 
-# This prevents the compiler from accidentally auto-vectorizing generic 
-# setup code and causing illegal instruction faults on unsupported hardware.
-
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    # AVX-512 Kernels (x86_64)
-    set_source_files_properties(src/runtime/avx512_kernels.cc 
-        PROPERTIES COMPILE_FLAGS "-mavx512f -mavx512vl -mavx512bw -mavx512dq -O3"
-    )
-    
-    # NEON Kernels (ARM64)
-    # Note: On Apple Silicon (M1/M2/M3), NEON is enabled by default, 
-    # but explicit tagging is good practice for cross-compilation.
-    set_source_files_properties(src/runtime/neon_kernels.cc 
-        PROPERTIES COMPILE_FLAGS "-march=armv8-a+simd -O3"
-    )
-elseif(MSVC)
-    set_source_files_properties(src/runtime/avx512_kernels.cc 
-        PROPERTIES COMPILE_FLAGS "/arch:AVX512 /O2"
-    )
-endif()
+add_executable(seeml-update-compile tools/seeml_update_compile.cc)
+target_link_libraries(seeml-update-compile PRIVATE seeml_update)
 
 # ==============================================================================
-# Optional: End-to-End Integration Test
+# Tests
 # ==============================================================================
-# To build the test stub, run: cmake -DSEECPP_BUILD_TESTS=ON ..
 
-option(SEECPP_BUILD_TESTS "Build the end-to-end integration stub" OFF)
+enable_testing()
+add_executable(seeml_update_tests test/cpp/update/test_update_system.cc)
+target_link_libraries(seeml_update_tests PRIVATE seeml_update seeml_update_rt)
+add_test(NAME update_system COMMAND seeml_update_tests)
 
-if(SEECPP_BUILD_TESTS)
-    add_executable(seecpp_integration_test tests/main.cc)
-    
-    # The test needs both the compiler (to generate .see) and runtime (to execute it)
-    target_link_libraries(seecpp_integration_test PRIVATE 
-        seecpp_compiler 
-        seecpp_runtime
-    )
-endif()
+# ==============================================================================
+# Legacy inference-pipeline sources
+# ------------------------------------------------------------------------------
+# source/frontend, source/middle_end, and source/backend contain the original
+# ONNX-inference compiler skeleton. Several of those files were written against
+# earlier API sketches of the SIR and do not compile against source/sir/sir.h;
+# they are excluded from the build until reconciled.
+# ==============================================================================

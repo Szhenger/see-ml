@@ -177,6 +177,13 @@ class Block {
     Operation* appendOp(std::unique_ptr<Operation> op);
     std::unique_ptr<Operation> removeOp(Operation* op);
 
+    /// Inserts a sequence of operations immediately after `anchor`, preserving
+    /// their relative order. Required by graph-rewriting passes (e.g. LoRA
+    /// grafting) that must splice new computation between a producer and its
+    /// existing consumers. `anchor` must belong to this block.
+    void insertOpsAfter(Operation* anchor,
+                        std::vector<std::unique_ptr<Operation>> new_ops);
+
     bool validate() const;
     void walk(std::function<void(Operation*)> fn);
     void walkReverse(std::function<void(Operation*)> fn);

@@ -1,4 +1,4 @@
-#include "seecpp/sir/sir.h"
+#include "source/sir/sir.h"
 
 #include <atomic>
 #include <ostream>
@@ -188,6 +188,20 @@ Operation* Block::appendOp(std::unique_ptr<Operation> op) {
     op->setParentBlock(this);
     ops_.push_back(std::move(op));
     return ops_.back().get();
+}
+
+void Block::insertOpsAfter(Operation* anchor,
+                           std::vector<std::unique_ptr<Operation>> new_ops) {
+    auto it = std::find_if(ops_.begin(), ops_.end(),
+                           [anchor](const auto& p) { return p.get() == anchor; });
+    assert(it != ops_.end() && "insertOpsAfter: anchor not found in block");
+
+    for (auto& op : new_ops)
+        op->setParentBlock(this);
+
+    ops_.insert(std::next(it),
+                std::make_move_iterator(new_ops.begin()),
+                std::make_move_iterator(new_ops.end()));
 }
 
 std::unique_ptr<Operation> Block::removeOp(Operation* op) {
