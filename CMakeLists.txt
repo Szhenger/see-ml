@@ -68,12 +68,3 @@ enable_testing()
 add_executable(seeml_update_tests test/cpp/update/test_update_system.cc)
 target_link_libraries(seeml_update_tests PRIVATE seeml_update seeml_update_rt)
 add_test(NAME update_system COMMAND seeml_update_tests)
-
-# ==============================================================================
-# Legacy inference-pipeline sources
-# ------------------------------------------------------------------------------
-# source/frontend, source/middle_end, and source/backend contain the original
-# ONNX-inference compiler skeleton. Several of those files were written against
-# earlier API sketches of the SIR and do not compile against source/sir/sir.h;
-# they are excluded from the build until reconciled.
-# ==============================================================================
