@@ -42,14 +42,15 @@ void Value::replaceAllUsesWith(Value* newVal) {
     assert(newVal && "replaceAllUsesWith called with null value");
     assert(newVal != this && "replaceAllUsesWith called with same value");
 
-    for (Operation* user : users_) {
+    // setOperand() rewires both user lists (removeUser on this, addUser on
+    // newVal), so iterate over a snapshot rather than the live vector.
+    const std::vector<Operation*> users_snapshot(users_.begin(), users_.end());
+    for (Operation* user : users_snapshot) {
         for (size_t i = 0; i < user->numOperands(); ++i) {
             if (user->operand(i) == this)
                 user->setOperand(i, newVal);
         }
     }
-    for (Operation* user : users_)
-        newVal->addUser(user);
     users_.clear();
 }
 

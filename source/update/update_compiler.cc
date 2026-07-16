@@ -58,7 +58,12 @@ std::expected<sir::Value*, std::string> BuildForward(
   auto resolve =
       [&](const std::string& name) -> std::expected<sir::Value*, std::string> {
     if (auto it = values.find(name); it != values.end()) return it->second;
-    return materialize_weight(name);
+    // Cache the materialized weight so a multiply-referenced (tied) tensor
+    // resolves to a single SIR value: one adapter, one rodata copy, and one
+    // emit-table entry instead of several entries patching the same range.
+    auto w = materialize_weight(name);
+    if (w) values[name] = *w;
+    return w;
   };
 
   for (const SmfOp& op : model.ops) {
@@ -71,6 +76,9 @@ std::expected<sir::Value*, std::string> BuildForward(
         if (!x) return std::unexpected(x.error());
         auto w = resolve(op.inputs[1]);
         if (!w) return std::unexpected(w.error());
+        if ((*x)->shape().dims.size() != 2 || (*w)->shape().dims.size() != 2)
+          return std::unexpected("UpdateCompiler: MatMul '" + op.name +
+                                 "' operands must be rank-2");
         const int64_t k_x = (*x)->shape().dims.at(1);
         const int64_t k_w = (*w)->shape().dims.at(0);
         if (k_x != k_w)
@@ -94,6 +102,10 @@ std::expected<sir::Value*, std::string> BuildForward(
         if (!x) return std::unexpected(x.error());
         auto b = resolve(op.inputs[1]);
         if (!b) return std::unexpected(b.error());
+        if ((*x)->shape().dims.empty() || (*b)->shape().dims.size() != 1 ||
+            (*b)->shape().dims[0] != (*x)->shape().dims.back())
+          return std::unexpected("UpdateCompiler: AddBias '" + op.name +
+                                 "' bias width does not match its input");
         sir::Operation* ab = block.appendOp("sc_high.add_bias");
         ab->addOperand(*x);
         ab->addOperand(*b);
@@ -102,7 +114,10 @@ std::expected<sir::Value*, std::string> BuildForward(
         break;
       }
       case SmfOpKind::kRelu: {
-        auto x = resolve(op.inputs.at(0));
+        if (op.inputs.size() != 1)
+          return std::unexpected("UpdateCompiler: Relu '" + op.name +
+                                 "' needs 1 input");
+        auto x = resolve(op.inputs[0]);
         if (!x) return std::unexpected(x.error());
         sir::Operation* r = block.appendOp("sc_high.relu");
         r->addOperand(*x);

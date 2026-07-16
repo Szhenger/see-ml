@@ -5,6 +5,19 @@
 
 namespace seeml::update_rt {
 
+namespace {
+
+// Overflow-checked u64 multiply for validating file-supplied sizes.
+bool MulU64(uint64_t a, uint64_t b, uint64_t* out) {
+  if (b != 0 && a > UINT64_MAX / b) return false;
+  *out = a * b;
+  return true;
+}
+
+constexpr uint64_t kSdsHeaderBytes = 40;
+
+}  // namespace
+
 uint64_t Dataset::label_bytes_per_sample() const {
   switch (label_kind_) {
     case 1: return sizeof(int32_t);
@@ -25,9 +38,12 @@ std::expected<Dataset, std::string> Dataset::FromMemory(
   d.inputs_ = std::move(inputs);
   d.labels_ = std::move(labels);
   if (num_samples == 0) return std::unexpected("Dataset: zero samples");
-  if (d.inputs_.size() != num_samples * input_dim)
+  uint64_t want_inputs = 0, want_labels = 0;
+  if (!MulU64(num_samples, input_dim, &want_inputs) ||
+      d.inputs_.size() != want_inputs)
     return std::unexpected("Dataset: input buffer size mismatch");
-  if (d.labels_.size() != num_samples * d.label_bytes_per_sample())
+  if (!MulU64(num_samples, d.label_bytes_per_sample(), &want_labels) ||
+      d.labels_.size() != want_labels)
     return std::unexpected("Dataset: label buffer size mismatch");
   return d;
 }
@@ -36,6 +52,14 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
     const std::string& path) {
   std::ifstream f(path, std::ios::binary);
   if (!f) return std::unexpected("Dataset: cannot open '" + path + "'");
+
+  // The file size bounds every allocation below: a corrupt header cannot ask
+  // for more sample data than the file actually holds.
+  f.seekg(0, std::ios::end);
+  const std::streamoff end_pos = f.tellg();
+  if (end_pos < 0) return std::unexpected("Dataset: cannot stat '" + path + "'");
+  const uint64_t file_size = static_cast<uint64_t>(end_pos);
+  f.seekg(0);
 
   auto read = [&](void* dst, size_t n) {
     f.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(n));
@@ -59,8 +83,22 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
   d.label_dim_ = label_dim;
   if (num_samples == 0 || input_dim == 0)
     return std::unexpected("Dataset: empty dataset");
+  if (label_kind > 2)
+    return std::unexpected("Dataset: unknown label kind");
+  if (label_kind == 2 &&
+      (label_dim == 0 || label_dim > UINT64_MAX / sizeof(float)))
+    return std::unexpected("Dataset: label dim out of range");
 
+  // Overflow-safe sizing, cross-checked against the actual file size before
+  // any allocation.
   const uint64_t lbytes = d.label_bytes_per_sample();
+  uint64_t input_bytes = 0, payload = 0;
+  if (!MulU64(input_dim, sizeof(float), &input_bytes) ||
+      input_bytes > UINT64_MAX - lbytes ||
+      !MulU64(num_samples, input_bytes + lbytes, &payload) ||
+      payload > file_size - kSdsHeaderBytes)
+    return std::unexpected("Dataset: sample section exceeds file size");
+
   d.inputs_.resize(num_samples * input_dim);
   d.labels_.resize(num_samples * lbytes);
   for (uint64_t i = 0; i < num_samples; ++i) {
@@ -70,6 +108,19 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
       return std::unexpected("Dataset: truncated labels");
   }
   return d;
+}
+
+std::expected<void, std::string> Dataset::ValidateClassLabels(
+    uint64_t num_classes) const {
+  if (label_kind_ != 1 || num_classes == 0) return {};
+  const auto* labels = reinterpret_cast<const int32_t*>(labels_.data());
+  for (uint64_t i = 0; i < num_samples_; ++i)
+    if (labels[i] < 0 || static_cast<uint64_t>(labels[i]) >= num_classes)
+      return std::unexpected(
+          "Dataset: class label " + std::to_string(labels[i]) + " at sample " +
+          std::to_string(i) + " outside [0, " + std::to_string(num_classes) +
+          ")");
+  return {};
 }
 
 std::expected<void, std::string> Dataset::SaveToFile(

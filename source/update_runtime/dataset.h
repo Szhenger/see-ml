@@ -1,6 +1,7 @@
 #ifndef SEEML_UPDATE_RUNTIME_DATASET_H_
 #define SEEML_UPDATE_RUNTIME_DATASET_H_
 
+#include <bit>
 #include <cstdint>
 #include <expected>
 #include <string>
@@ -25,6 +26,11 @@ namespace seeml::update_rt {
 
 inline constexpr uint32_t kSdsMagic = 0x31534453;  // "SDS1" little-endian
 
+// SDS is read/written by memcpy of host integers; the documented on-disk
+// contract is little-endian. Big-endian hosts need byte-swapping I/O.
+static_assert(std::endian::native == std::endian::little,
+              "SDS serialization assumes a little-endian host.");
+
 class Dataset {
  public:
   [[nodiscard]] static std::expected<Dataset, std::string> LoadFromFile(
@@ -41,6 +47,12 @@ class Dataset {
   uint64_t input_dim() const { return input_dim_; }
   uint32_t label_kind() const { return label_kind_; }
   uint64_t label_bytes_per_sample() const;
+
+  /// Checks every class-index label lies in [0, num_classes) — the training
+  /// kernels index rows of size num_classes with these values. No-op for
+  /// non-class label kinds or num_classes == 0.
+  [[nodiscard]] std::expected<void, std::string> ValidateClassLabels(
+      uint64_t num_classes) const;
 
   /// Copies the next `batch` samples (with wraparound) into the plan's I/O
   /// slots. `label_slot` may be null when the plan takes no labels

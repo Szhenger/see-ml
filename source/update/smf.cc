@@ -11,6 +11,13 @@ constexpr uint64_t kDataAlignment = 64;
 
 uint64_t AlignUp(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
 
+// Overflow-checked u64 multiply for validating file-supplied sizes.
+bool MulU64(uint64_t a, uint64_t b, uint64_t* out) {
+  if (b != 0 && a > UINT64_MAX / b) return false;
+  *out = a * b;
+  return true;
+}
+
 // --- Little-endian primitive readers over an in-memory buffer ----------------
 
 struct Reader {
@@ -94,8 +101,35 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     for (uint8_t d = 0; d < rank; ++d) t.dims.push_back(r.Read<int64_t>());
     t.data_offset = r.Read<uint64_t>();
     t.byte_size = r.Read<uint64_t>();
+
+    // Dims must be strictly positive — except a dynamic (-1) dim on non-const
+    // tensors, which the compiler binds to the compiled batch size — with a
+    // volume that cannot overflow the signed shape math downstream
+    // (sir::Shape::volume / byteSize).
+    uint64_t volume = 1;
+    bool dims_ok = !t.dims.empty();
+    for (int64_t dim : t.dims) {
+      if (dim == -1 && !t.is_const) continue;
+      if (dim <= 0 || !MulU64(volume, static_cast<uint64_t>(dim), &volume) ||
+          volume > static_cast<uint64_t>(INT64_MAX) / sizeof(float)) {
+        dims_ok = false;
+        break;
+      }
+    }
+    if (!dims_ok)
+      return std::unexpected("SMF: tensor '" + t.name + "' has invalid dims");
+
     if (t.is_const) {
-      if (t.data_offset + t.byte_size > bytes.size())
+      // The instruction stream sizes reads from dims while rodata packing and
+      // emit-table patching size from byte_size — they must agree exactly.
+      uint64_t expected_bytes = 0;
+      if (!MulU64(volume, sizeof(float), &expected_bytes) ||
+          t.byte_size != expected_bytes)
+        return std::unexpected("SMF: tensor '" + t.name +
+                               "' byte size disagrees with its dims");
+      // Overflow-safe range check: offset + size may wrap in u64.
+      if (t.data_offset > bytes.size() ||
+          t.byte_size > bytes.size() - t.data_offset)
         return std::unexpected("SMF: tensor '" + t.name +
                                "' data range exceeds file size");
       t.data.assign(bytes.begin() + static_cast<ptrdiff_t>(t.data_offset),

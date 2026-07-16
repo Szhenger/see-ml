@@ -1,6 +1,7 @@
 #ifndef SEEML_UPDATE_UPDATE_TYPES_H_
 #define SEEML_UPDATE_UPDATE_TYPES_H_
 
+#include <bit>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -71,6 +72,11 @@ struct UpdateConfig {
 
 inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 inline constexpr uint32_t kSeeuVersion = 1;
+
+// The plan is serialized by memcpy of host integers/structs; the documented
+// on-disk contract is little-endian. Big-endian hosts need byte-swapping I/O.
+static_assert(std::endian::native == std::endian::little,
+              ".seeu plan serialization assumes a little-endian host.");
 
 // A tensor reference is a 64-bit word: bit 63 selects the address space
 // (0 = mutable arena, 1 = read-only rodata), bits 0..62 are a byte offset.

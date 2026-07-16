@@ -97,7 +97,7 @@ def export_smf(model, path: str, input_name: str = "x"):
 
     b = _SmfBuilder(input_name, linears[0].in_features)
     prev, idx = input_name, 0
-    for m in model:
+    for pos, m in enumerate(model):
         if isinstance(m, nn.Linear):
             w = m.weight.detach().t().contiguous().float()  # [in, out]
             bias = m.bias.detach().float()
@@ -108,8 +108,9 @@ def export_smf(model, path: str, input_name: str = "x"):
             prev = f"zb{idx}"
             idx += 1
         elif isinstance(m, nn.ReLU):
-            b.add_op(2, f"relu{idx}", [prev], f"h{idx}")
-            prev = f"h{idx}"
+            # Name by module position: consecutive ReLUs must not collide.
+            b.add_op(2, f"relu{pos}", [prev], f"h{pos}")
+            prev = f"h{pos}"
         else:
             raise ValueError(f"export_smf: unsupported module {type(m).__name__}")
 

@@ -62,6 +62,7 @@ int main(int argc, char** argv) {
 
   UpdateConfig config;
   config.batch = std::strtoll(Arg(argc, argv, "--data-batch", "32"), nullptr, 10);
+  if (config.batch <= 0) return Fail("--data-batch must be a positive integer");
   config.default_steps =
       std::strtoull(Arg(argc, argv, "--steps", "1000"), nullptr, 10);
 
@@ -78,6 +79,7 @@ int main(int argc, char** argv) {
       std::strtof(Arg(argc, argv, "--temperature", "2.0"), nullptr);
 
   config.lora.rank = std::strtoll(Arg(argc, argv, "--lora-rank", "8"), nullptr, 10);
+  if (config.lora.rank <= 0) return Fail("--lora-rank must be a positive integer");
   config.lora.alpha = std::strtof(Arg(argc, argv, "--lora-alpha", "16"), nullptr);
   config.lora.seed =
       std::strtoull(Arg(argc, argv, "--lora-seed", "42"), nullptr, 10);

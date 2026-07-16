@@ -195,6 +195,9 @@ std::expected<EmitPaths, std::string> EmitNativePackage(
       return std::unexpected("NativeEmitter: cannot write plan file");
     f.write(reinterpret_cast<const char*>(plan.data()),
             static_cast<std::streamsize>(plan.size()));
+    if (!f)
+      return std::unexpected("NativeEmitter: short write to '" +
+                             paths.plan_file + "'");
   }
   if (auto r = WriteFile(paths.embedded_tu, EmbedPlanAsTU(plan)); !r)
     return std::unexpected(r.error());

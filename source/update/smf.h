@@ -1,6 +1,7 @@
 #ifndef SEEML_UPDATE_SMF_H_
 #define SEEML_UPDATE_SMF_H_
 
+#include <bit>
 #include <cstdint>
 #include <expected>
 #include <string>
@@ -35,6 +36,11 @@ namespace seeml::update {
 
 inline constexpr uint32_t kSmfMagic = 0x31464D53;  // "SMF1" little-endian
 inline constexpr uint32_t kSmfVersion = 1;
+
+// SMF is read/written by memcpy of host integers; the documented on-disk
+// contract is little-endian. Big-endian hosts need byte-swapping I/O.
+static_assert(std::endian::native == std::endian::little,
+              "SMF serialization assumes a little-endian host.");
 
 enum class SmfOpKind : uint8_t { kMatMul = 0, kAddBias = 1, kRelu = 2 };
 

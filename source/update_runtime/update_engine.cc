@@ -19,6 +19,131 @@ float BitsToF32(uint64_t bits) {
   return std::bit_cast<float>(static_cast<uint32_t>(bits));
 }
 
+// --- Overflow-safe validation of file-supplied offsets and sizes -------------
+
+bool MulOk(uint64_t a, uint64_t b, uint64_t* out) {
+  if (b != 0 && a > UINT64_MAX / b) return false;
+  *out = a * b;
+  return true;
+}
+
+bool RangeOk(uint64_t off, uint64_t bytes, uint64_t size) {
+  return off <= size && bytes <= size - off;
+}
+
+// Checks that every ref operand of `ins` lies fully inside its address space
+// (arena or rodata), with byte extents derived from the instruction's dims the
+// same way the kernels derive their loop bounds, and that writes only target
+// the mutable arena. Rejects unknown opcodes, which Execute() would silently
+// skip.
+std::expected<void, std::string> ValidateInstruction(
+    const up::UpdateInstruction& ins, uint64_t arena_size,
+    uint64_t rodata_size) {
+  auto ref_ok = [&](uint64_t ref, uint64_t elems, bool write) {
+    if (ref == up::kNullRef) return false;
+    if (write && up::IsRodataRef(ref)) return false;
+    uint64_t bytes = 0;
+    if (!MulOk(elems, sizeof(float), &bytes)) return false;  // i32 == f32 width
+    const uint64_t space = up::IsRodataRef(ref) ? rodata_size : arena_size;
+    return RangeOk(up::RefOffset(ref), bytes, space);
+  };
+  auto fail = [&] {
+    return std::unexpected("UpdateEngine: instruction operand out of bounds "
+                           "(opcode " +
+                           std::to_string(ins.opcode) + ")");
+  };
+
+  const uint64_t d0 = ins.out[0], d1 = ins.out[1], d2 = ins.out[2];
+  uint64_t mk = 0, kn = 0, mn = 0, nc = 0;
+  switch (static_cast<up::OpCode>(ins.opcode)) {
+    case up::OpCode::kNop:
+      return {};
+    case up::OpCode::kGemmNN:
+    case up::OpCode::kGemmNT:
+    case up::OpCode::kGemmTN:
+    case up::OpCode::kGemmAccNN:
+      // Every layout variant reads M*K (A) and K*N (B), writes M*N (C).
+      if (!MulOk(d0, d2, &mk) || !MulOk(d2, d1, &kn) || !MulOk(d0, d1, &mn))
+        return fail();
+      if (!ref_ok(ins.in[0], mk, false) || !ref_ok(ins.in[1], kn, false) ||
+          !ref_ok(ins.in[2], mn, true))
+        return fail();
+      return {};
+    case up::OpCode::kAddEW:
+    case up::OpCode::kReluBwd:
+      if (!ref_ok(ins.in[0], d0, false) || !ref_ok(ins.in[1], d0, false) ||
+          !ref_ok(ins.in[2], d0, true))
+        return fail();
+      return {};
+    case up::OpCode::kAddBias:
+      if (!MulOk(d0, d1, &mn)) return fail();
+      if (!ref_ok(ins.in[0], mn, false) || !ref_ok(ins.in[1], d1, false) ||
+          !ref_ok(ins.in[2], mn, true))
+        return fail();
+      return {};
+    case up::OpCode::kReluFwd:
+    case up::OpCode::kScale:
+    case up::OpCode::kCopy:
+      if (!ref_ok(ins.in[0], d0, false) || !ref_ok(ins.in[1], d0, true))
+        return fail();
+      return {};
+    case up::OpCode::kReduceRows:
+      if (!MulOk(d0, d1, &mn)) return fail();
+      if (!ref_ok(ins.in[0], mn, false) || !ref_ok(ins.in[1], d1, true))
+        return fail();
+      return {};
+    case up::OpCode::kSoftmaxXEntFwd:
+      if (!MulOk(d0, d1, &nc)) return fail();
+      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], d0, false) ||
+          !ref_ok(ins.in[2], 1, true) || !ref_ok(ins.in[3], nc, true))
+        return fail();
+      return {};
+    case up::OpCode::kSoftmaxXEntBwd:
+      if (!MulOk(d0, d1, &nc)) return fail();
+      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], d0, false) ||
+          !ref_ok(ins.in[2], 1, false) || !ref_ok(ins.in[3], nc, true))
+        return fail();
+      return {};
+    case up::OpCode::kMseFwd:
+      if (!ref_ok(ins.in[0], d0, false) || !ref_ok(ins.in[1], d0, false) ||
+          !ref_ok(ins.in[2], 1, true))
+        return fail();
+      return {};
+    case up::OpCode::kMseBwd:
+      if (!ref_ok(ins.in[0], d0, false) || !ref_ok(ins.in[1], d0, false) ||
+          !ref_ok(ins.in[2], 1, false) || !ref_ok(ins.in[3], d0, true))
+        return fail();
+      return {};
+    case up::OpCode::kKLDistillFwd:
+      if (!MulOk(d1 >> 32, d1 & 0xFFFFFFFFu, &nc)) return fail();
+      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], nc, false) ||
+          !ref_ok(ins.in[2], 1, true) || !ref_ok(ins.in[3], nc, true) ||
+          !ref_ok(ins.out[0], nc, true))
+        return fail();
+      return {};
+    case up::OpCode::kKLDistillBwd:
+      if (!MulOk(d0 >> 32, d0 & 0xFFFFFFFFu, &nc)) return fail();
+      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], nc, false) ||
+          !ref_ok(ins.in[2], 1, false) || !ref_ok(ins.in[3], nc, true))
+        return fail();
+      return {};
+    case up::OpCode::kSgdStep:
+      if (!ref_ok(ins.in[0], d0, true) || !ref_ok(ins.in[1], d0, false))
+        return fail();
+      return {};
+    case up::OpCode::kAdamWStep:
+      if (!ref_ok(ins.in[0], d0, true) || !ref_ok(ins.in[1], d0, false) ||
+          !ref_ok(ins.in[2], d0, true) || !ref_ok(ins.in[3], d0, true))
+        return fail();
+      return {};
+    case up::OpCode::kFill:
+      if (!ref_ok(ins.in[0], d0, true)) return fail();
+      return {};
+  }
+  return std::unexpected("UpdateEngine: unknown opcode " +
+                         std::to_string(ins.opcode));
+}
+
 }  // namespace
 
 UpdateEngine::~UpdateEngine() {
@@ -65,20 +190,28 @@ std::expected<void, std::string> UpdateEngine::Initialize() {
   if (header_.version != up::kSeeuVersion)
     return std::unexpected("UpdateEngine: unsupported plan version");
 
-  auto section_ok = [&](uint64_t off, uint64_t bytes) {
-    return off + bytes <= plan_size_;
-  };
-  const uint64_t train_bytes =
-      header_.train_instr_count * sizeof(up::UpdateInstruction);
-  const uint64_t merge_bytes =
-      header_.merge_instr_count * sizeof(up::UpdateInstruction);
-  const uint64_t emit_bytes = header_.emit_count * sizeof(up::EmitEntry);
-  if (!section_ok(header_.train_instr_offset, train_bytes) ||
-      !section_ok(header_.merge_instr_offset, merge_bytes) ||
-      !section_ok(header_.rodata_offset, header_.rodata_size) ||
-      !section_ok(header_.persist_init_offset, header_.persist_init_size) ||
-      !section_ok(header_.emit_table_offset, emit_bytes))
+  uint64_t train_bytes = 0, merge_bytes = 0, emit_bytes = 0;
+  if (!MulOk(header_.train_instr_count, sizeof(up::UpdateInstruction),
+             &train_bytes) ||
+      !MulOk(header_.merge_instr_count, sizeof(up::UpdateInstruction),
+             &merge_bytes) ||
+      !MulOk(header_.emit_count, sizeof(up::EmitEntry), &emit_bytes))
+    return std::unexpected("UpdateEngine: plan section size overflows");
+  if (!RangeOk(header_.train_instr_offset, train_bytes, plan_size_) ||
+      !RangeOk(header_.merge_instr_offset, merge_bytes, plan_size_) ||
+      !RangeOk(header_.rodata_offset, header_.rodata_size, plan_size_) ||
+      !RangeOk(header_.persist_init_offset, header_.persist_init_size,
+               plan_size_) ||
+      !RangeOk(header_.emit_table_offset, emit_bytes, plan_size_))
     return std::unexpected("UpdateEngine: plan section out of bounds");
+
+  // The arena is the target of the persistent image, the checkpoints, and
+  // every arena ref below — its size must dominate all of them.
+  if (header_.arena_size > UINT64_MAX - 63)
+    return std::unexpected("UpdateEngine: arena size overflows");
+  if (header_.persist_init_size > header_.arena_size ||
+      header_.persistent_size > header_.arena_size)
+    return std::unexpected("UpdateEngine: persistent segment exceeds arena");
 
   // Decode the instruction streams once; per-step execution touches only the
   // decoded vectors and the arena.
@@ -91,6 +224,49 @@ std::expected<void, std::string> UpdateEngine::Initialize() {
   emit_table_.resize(header_.emit_count);
   std::memcpy(emit_table_.data(), plan_ + header_.emit_table_offset,
               emit_bytes);
+
+  // Validate every operand ref of every instruction against the address
+  // space it targets — after this, Execute() can trust the programs blindly.
+  for (const up::UpdateInstruction& ins : train_program_)
+    if (auto r = ValidateInstruction(ins, header_.arena_size,
+                                     header_.rodata_size);
+        !r)
+      return r;
+  for (const up::UpdateInstruction& ins : merge_program_)
+    if (auto r = ValidateInstruction(ins, header_.arena_size,
+                                     header_.rodata_size);
+        !r)
+      return r;
+
+  // The emit table's arena side is fixed at compile time; its file side is
+  // validated against the actual model in CommitToModel().
+  for (const up::EmitEntry& e : emit_table_)
+    if (!RangeOk(e.arena_offset, e.byte_size, header_.arena_size))
+      return std::unexpected("UpdateEngine: emit entry outside the arena");
+
+  // The header's I/O slots are written by the data feeder each step.
+  uint64_t input_bytes = 0;
+  if (up::IsRodataRef(header_.input_ref) ||
+      !MulOk(header_.input_floats, sizeof(float), &input_bytes) ||
+      !RangeOk(up::RefOffset(header_.input_ref), input_bytes,
+               header_.arena_size))
+    return std::unexpected("UpdateEngine: plan input slot out of bounds");
+  if (header_.label_kind != 0 &&
+      (up::IsRodataRef(header_.label_ref) ||
+       !RangeOk(up::RefOffset(header_.label_ref), header_.label_bytes,
+                header_.arena_size)))
+    return std::unexpected("UpdateEngine: plan label slot out of bounds");
+  if (up::IsRodataRef(header_.loss_ref) ||
+      !RangeOk(up::RefOffset(header_.loss_ref), sizeof(float),
+               header_.arena_size))
+    return std::unexpected("UpdateEngine: plan loss slot out of bounds");
+
+  // Class count for validating class-index labels at Train() time (the
+  // softmax kernels index rows of this width with raw dataset labels).
+  num_classes_ = 0;
+  for (const up::UpdateInstruction& ins : train_program_)
+    if (static_cast<up::OpCode>(ins.opcode) == up::OpCode::kSoftmaxXEntFwd)
+      num_classes_ = ins.out[1];
 
   rodata_ = plan_ + header_.rodata_offset;
 
@@ -218,14 +394,31 @@ std::expected<TrainReport, std::string> UpdateEngine::Train(
     Dataset& data, uint64_t steps, const TrainOptions& options) {
   if (!arena_) return std::unexpected("UpdateEngine: no plan loaded");
   if (steps == 0) steps = header_.default_steps;
+  if (steps == 0)
+    return std::unexpected(
+        "UpdateEngine: no steps requested and the plan has no default");
 
-  const uint64_t expected_floats = header_.batch * data.input_dim();
-  if (expected_floats != header_.input_floats)
+  uint64_t expected_floats = 0;
+  if (!MulOk(header_.batch, data.input_dim(), &expected_floats) ||
+      expected_floats != header_.input_floats)
     return std::unexpected(
         "UpdateEngine: dataset input width does not match the compiled plan");
-  if (header_.label_kind != 0 && data.label_kind() != header_.label_kind)
-    return std::unexpected(
-        "UpdateEngine: dataset label kind does not match the compiled plan");
+  if (header_.label_kind != 0) {
+    if (data.label_kind() != header_.label_kind)
+      return std::unexpected(
+          "UpdateEngine: dataset label kind does not match the compiled plan");
+    // Same kind is not enough: FillBatch copies the dataset's per-sample
+    // width into the plan's fixed label slot, so the widths must agree too.
+    uint64_t batch_label_bytes = 0;
+    if (!MulOk(header_.batch, data.label_bytes_per_sample(),
+               &batch_label_bytes) ||
+        batch_label_bytes != header_.label_bytes)
+      return std::unexpected(
+          "UpdateEngine: dataset label width does not match the compiled plan");
+  }
+  if (header_.label_kind == 1)
+    if (auto r = data.ValidateClassLabels(num_classes_); !r)
+      return std::unexpected(r.error());
 
   if (options.resume && !options.checkpoint_path.empty()) {
     if (auto r = LoadCheckpoint(options.checkpoint_path); !r)
@@ -296,7 +489,7 @@ std::expected<void, std::string> UpdateEngine::CommitToModel(
 
   // Patch every merged weight's byte range — the delta application.
   for (const up::EmitEntry& e : emit_table_) {
-    if (e.smf_data_offset + e.byte_size > bytes.size())
+    if (!RangeOk(e.smf_data_offset, e.byte_size, bytes.size()))
       return std::unexpected(
           "UpdateEngine: emit entry exceeds the source model file — plan and "
           "model are out of sync");

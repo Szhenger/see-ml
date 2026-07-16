@@ -1,5 +1,6 @@
 #include "source/utility/logger/logger.h"
 
+#include <atomic>
 #include <chrono>
 #include <ctime>
 #include <iomanip>
@@ -11,16 +12,17 @@ namespace seecpp::utility {
 namespace {
 // Google Style: Hide internal static state in an anonymous namespace 
 // inside the implementation file rather than using static class members.
-LogLevel g_min_level = LogLevel::kInfo;
+// Atomic: SetLevel may race with Log's filter check on another thread.
+std::atomic<LogLevel> g_min_level{LogLevel::kInfo};
 std::mutex g_log_mutex;
 }  // namespace
 
 void Logger::SetLevel(LogLevel min_level) {
-    g_min_level = min_level;
+    g_min_level.store(min_level, std::memory_order_relaxed);
 }
 
 LogLevel Logger::Level() {
-    return g_min_level;
+    return g_min_level.load(std::memory_order_relaxed);
 }
 
 void Logger::Debug(std::string_view msg, const std::source_location loc) {
@@ -40,7 +42,7 @@ void Logger::Error(std::string_view msg, const std::source_location loc) {
 }
 
 void Logger::Log(LogLevel level, std::string_view msg, const std::source_location& loc) {
-    if (level < g_min_level) return;
+    if (level < g_min_level.load(std::memory_order_relaxed)) return;
 
     // Timestamp — thread-safe via localtime_r / localtime_s
     const auto now = std::chrono::system_clock::now();
