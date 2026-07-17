@@ -1,5 +1,5 @@
-#ifndef SEEML_UPDATE_UPDATE_TYPES_H_
-#define SEEML_UPDATE_UPDATE_TYPES_H_
+#ifndef SEEML_COMPILER_BACKEND_UPDATE_TYPES_H_
+#define SEEML_COMPILER_BACKEND_UPDATE_TYPES_H_
 
 #include <bit>
 #include <cstdint>
@@ -16,7 +16,7 @@
 //   - a LoRA specification (rank, alpha, RNG seed),
 // and produces an Update Plan: a fully AOT-compiled training + merge program
 // with every tensor bound to a fixed arena offset. The plan is executed by
-// the bare-metal UpdateEngine (source/update_runtime/) with zero dynamic
+// the bare-metal UpdateEngine (runtime/) with zero dynamic
 // allocations per training step.
 // =============================================================================
 
@@ -194,4 +194,4 @@ static_assert(sizeof(EmitEntry) == 24, "EmitEntry layout is part of the ABI.");
 
 }  // namespace seeml::update
 
-#endif  // SEEML_UPDATE_UPDATE_TYPES_H_
+#endif  // SEEML_COMPILER_BACKEND_UPDATE_TYPES_H_

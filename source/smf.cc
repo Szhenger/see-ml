@@ -1,4 +1,4 @@
-#include "source/update/smf.h"
+#include "source/smf.h"
 
 #include <cstring>
 #include <fstream>

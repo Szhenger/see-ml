@@ -1,5 +1,5 @@
-#ifndef SEEML_UPDATE_UPDATE_PASSES_H_
-#define SEEML_UPDATE_UPDATE_PASSES_H_
+#ifndef SEEML_COMPILER_TRAINER_UPDATE_PASSES_H_
+#define SEEML_COMPILER_TRAINER_UPDATE_PASSES_H_
 
 #include <expected>
 #include <memory>
@@ -7,8 +7,8 @@
 #include <unordered_map>
 #include <vector>
 
-#include "source/sir/sir.h"
-#include "source/update/update_types.h"
+#include "compiler/frontend/sir.h"
+#include "compiler/backend/update_types.h"
 
 // =============================================================================
 // The four SIR-to-SIR passes of the update compiler:
@@ -105,4 +105,4 @@ class MergeBuilder {
 
 }  // namespace seeml::update
 
-#endif  // SEEML_UPDATE_UPDATE_PASSES_H_
+#endif  // SEEML_COMPILER_TRAINER_UPDATE_PASSES_H_

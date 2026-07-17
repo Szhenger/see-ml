@@ -1,5 +1,5 @@
-#ifndef SEEML_UPDATE_RUNTIME_UPDATE_KERNELS_H_
-#define SEEML_UPDATE_RUNTIME_UPDATE_KERNELS_H_
+#ifndef SEEML_RUNTIME_UPDATE_KERNELS_H_
+#define SEEML_RUNTIME_UPDATE_KERNELS_H_
 
 #include <cstddef>
 #include <cstdint>
@@ -66,4 +66,4 @@ void Copy(const float* src, float* dst, size_t n);
 
 }  // namespace seeml::update_rt::kernels
 
-#endif  // SEEML_UPDATE_RUNTIME_UPDATE_KERNELS_H_
+#endif  // SEEML_RUNTIME_UPDATE_KERNELS_H_

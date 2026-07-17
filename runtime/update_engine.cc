@@ -1,4 +1,4 @@
-#include "source/update_runtime/update_engine.h"
+#include "runtime/update_engine.h"
 
 #include <bit>
 #include <cstdio>
@@ -6,7 +6,7 @@
 #include <cstring>
 #include <fstream>
 
-#include "source/update_runtime/update_kernels.h"
+#include "runtime/update_kernels.h"
 
 namespace seeml::update_rt {
 

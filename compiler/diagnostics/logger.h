@@ -1,5 +1,5 @@
-#ifndef SEECPP_UTILITY_LOGGER_H_
-#define SEECPP_UTILITY_LOGGER_H_
+#ifndef SEECPP_COMPILER_DIAGNOSTICS_LOGGER_H_
+#define SEECPP_COMPILER_DIAGNOSTICS_LOGGER_H_
 
 #include <cstdint>
 #include <source_location>
@@ -38,4 +38,4 @@ class Logger {
 
 }  // namespace seecpp::utility
 
-#endif  // SEECPP_UTILITY_LOGGER_H_
+#endif  // SEECPP_COMPILER_DIAGNOSTICS_LOGGER_H_

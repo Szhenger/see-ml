@@ -1,5 +1,5 @@
-#ifndef SEEML_UPDATE_NATIVE_EMITTER_H_
-#define SEEML_UPDATE_NATIVE_EMITTER_H_
+#ifndef SEEML_COMPILER_BACKEND_NATIVE_EMITTER_H_
+#define SEEML_COMPILER_BACKEND_NATIVE_EMITTER_H_
 
 #include <cstdint>
 #include <expected>
@@ -38,4 +38,4 @@ struct EmitPaths {
 
 }  // namespace seeml::update
 
-#endif  // SEEML_UPDATE_NATIVE_EMITTER_H_
+#endif  // SEEML_COMPILER_BACKEND_NATIVE_EMITTER_H_

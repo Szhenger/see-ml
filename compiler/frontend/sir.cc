@@ -1,4 +1,4 @@
-#include "source/sir/sir.h"
+#include "compiler/frontend/sir.h"
 
 #include <atomic>
 #include <ostream>

@@ -1,13 +1,13 @@
-#ifndef SEEML_UPDATE_RUNTIME_UPDATE_ENGINE_H_
-#define SEEML_UPDATE_RUNTIME_UPDATE_ENGINE_H_
+#ifndef SEEML_RUNTIME_UPDATE_ENGINE_H_
+#define SEEML_RUNTIME_UPDATE_ENGINE_H_
 
 #include <cstdint>
 #include <expected>
 #include <string>
 #include <vector>
 
-#include "source/update/update_types.h"
-#include "source/update_runtime/dataset.h"
+#include "compiler/backend/update_types.h"
+#include "runtime/dataset.h"
 
 // =============================================================================
 // UpdateEngine — the bare-metal virtual machine that executes a compiled
@@ -107,4 +107,4 @@ class UpdateEngine {
 
 }  // namespace seeml::update_rt
 
-#endif  // SEEML_UPDATE_RUNTIME_UPDATE_ENGINE_H_
+#endif  // SEEML_RUNTIME_UPDATE_ENGINE_H_

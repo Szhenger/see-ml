@@ -1,4 +1,4 @@
-#include "source/utility/logger/logger.h"
+#include "compiler/diagnostics/logger.h"
 
 #include <atomic>
 #include <chrono>

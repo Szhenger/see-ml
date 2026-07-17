@@ -1,13 +1,13 @@
-#ifndef SEEML_UPDATE_UPDATE_COMPILER_H_
-#define SEEML_UPDATE_UPDATE_COMPILER_H_
+#ifndef SEEML_COMPILER_BACKEND_UPDATE_COMPILER_H_
+#define SEEML_COMPILER_BACKEND_UPDATE_COMPILER_H_
 
 #include <cstdint>
 #include <expected>
 #include <string>
 #include <vector>
 
-#include "source/update/smf.h"
-#include "source/update/update_types.h"
+#include "source/smf.h"
+#include "compiler/backend/update_types.h"
 
 // =============================================================================
 // UpdateCompiler — the AOT driver that turns
@@ -73,4 +73,4 @@ class UpdateCompiler {
 
 }  // namespace seeml::update
 
-#endif  // SEEML_UPDATE_UPDATE_COMPILER_H_
+#endif  // SEEML_COMPILER_BACKEND_UPDATE_COMPILER_H_

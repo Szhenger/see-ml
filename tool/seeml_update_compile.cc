@@ -26,9 +26,9 @@
 #include <sstream>
 #include <string>
 
-#include "source/update/native_emitter.h"
-#include "source/update/smf.h"
-#include "source/update/update_compiler.h"
+#include "compiler/backend/native_emitter.h"
+#include "source/smf.h"
+#include "compiler/backend/update_compiler.h"
 
 namespace {
 

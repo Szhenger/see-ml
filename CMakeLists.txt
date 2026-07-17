@@ -23,21 +23,23 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 # ==============================================================================
 
 add_library(seeml_sir STATIC
-    source/sir/sir.cc
-    source/utility/logger/logger.cc
+    compiler/frontend/sir.cc
+    compiler/diagnostics/logger.cc
 )
 
 # ==============================================================================
 # Target 2: The Update Compiler (seeml_update)
-# Heavyweight AOT target: compiles (source model, teacher, loss, LoRA spec)
-# into a .seeu Update Plan and emits the native update package.
+# Heavyweight AOT target: front end (SMF import), trainer (LoRA / autodiff /
+# optimizer / merge passes), back end (arena binding, lowering, plan assembly,
+# native packaging).
 # ==============================================================================
 
 add_library(seeml_update STATIC
-    source/update/smf.cc
-    source/update/update_passes.cc
-    source/update/update_compiler.cc
-    source/update/native_emitter.cc
+    source/smf.cc
+    compiler/frontend/forward_builder.cc
+    compiler/trainer/update_passes.cc
+    compiler/backend/update_compiler.cc
+    compiler/backend/native_emitter.cc
 )
 target_link_libraries(seeml_update PUBLIC seeml_sir)
 
@@ -48,16 +50,16 @@ target_link_libraries(seeml_update PUBLIC seeml_sir)
 # ==============================================================================
 
 add_library(seeml_update_rt STATIC
-    source/update_runtime/update_kernels.cc
-    source/update_runtime/dataset.cc
-    source/update_runtime/update_engine.cc
+    runtime/update_kernels.cc
+    runtime/dataset.cc
+    runtime/update_engine.cc
 )
 
 # ==============================================================================
 # Tools
 # ==============================================================================
 
-add_executable(seeml-update-compile tools/seeml_update_compile.cc)
+add_executable(seeml-update-compile tool/seeml_update_compile.cc)
 target_link_libraries(seeml-update-compile PRIVATE seeml_update)
 
 # ==============================================================================
@@ -65,6 +67,6 @@ target_link_libraries(seeml-update-compile PRIVATE seeml_update)
 # ==============================================================================
 
 enable_testing()
-add_executable(seeml_update_tests test/cpp/update/test_update_system.cc)
+add_executable(seeml_update_tests test/test_update_system.cc)
 target_link_libraries(seeml_update_tests PRIVATE seeml_update seeml_update_rt)
 add_test(NAME update_system COMMAND seeml_update_tests)

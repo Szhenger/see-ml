@@ -1,5 +1,5 @@
-#ifndef SEEML_UPDATE_SMF_H_
-#define SEEML_UPDATE_SMF_H_
+#ifndef SEEML_SOURCE_SMF_H_
+#define SEEML_SOURCE_SMF_H_
 
 #include <bit>
 #include <cstdint>
@@ -14,7 +14,7 @@
 // A minimal, dependency-free binary container for the feed-forward models the
 // update compiler operates on. It plays the role ONNX ingestion plays on the
 // inference side, without requiring protobuf at build time; the companion
-// exporter (tools/export_model.py) converts PyTorch modules into SMF.
+// exporter (tool/export_model.py) converts PyTorch modules into SMF.
 //
 // Layout (little-endian):
 //   u32 magic "SMF1"    u32 version
@@ -79,4 +79,4 @@ struct SmfModel {
 
 }  // namespace seeml::update
 
-#endif  // SEEML_UPDATE_SMF_H_
+#endif  // SEEML_SOURCE_SMF_H_

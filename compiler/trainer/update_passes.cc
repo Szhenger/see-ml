@@ -1,4 +1,4 @@
-#include "source/update/update_passes.h"
+#include "compiler/trainer/update_passes.h"
 
 #include <algorithm>
 #include <cmath>
@@ -6,7 +6,7 @@
 #include <string_view>
 #include <unordered_set>
 
-#include "source/utility/logger/logger.h"
+#include "compiler/diagnostics/logger.h"
 
 namespace seeml::update {
 

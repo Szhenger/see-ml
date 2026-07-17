@@ -1,5 +1,5 @@
-#ifndef SEECPP_SIR_SIR_H_
-#define SEECPP_SIR_SIR_H_
+#ifndef SEECPP_COMPILER_FRONTEND_SIR_H_
+#define SEECPP_COMPILER_FRONTEND_SIR_H_
 
 #include <vector>
 #include <string>
@@ -237,4 +237,4 @@ struct OpBuilder {
 
 } // namespace seecpp::sir
 
-#endif // SEECPP_SIR_SIR_H_
+#endif // SEECPP_COMPILER_FRONTEND_SIR_H_

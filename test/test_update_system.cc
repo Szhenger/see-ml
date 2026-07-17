@@ -24,10 +24,10 @@
 #include <string>
 #include <vector>
 
-#include "source/update/smf.h"
-#include "source/update/update_compiler.h"
-#include "source/update_runtime/dataset.h"
-#include "source/update_runtime/update_engine.h"
+#include "source/smf.h"
+#include "compiler/backend/update_compiler.h"
+#include "runtime/dataset.h"
+#include "runtime/update_engine.h"
 
 namespace {
 
