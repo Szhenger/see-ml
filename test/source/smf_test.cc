@@ -3,7 +3,9 @@
 // rejection of malformed files (the binary-format hardening surface).
 // =============================================================================
 
+#include <algorithm>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -192,6 +194,73 @@ TEST(Smf, LoadRejectsInvalidDims) {
       {.name = "w", .dims = {}, .is_const = true, .data = AsBytes({1.0f})});
   ASSERT_OK(SaveSmf(path, rank0));
   EXPECT_ERROR_CONTAINS(LoadSmf(path), "invalid dims");
+}
+
+TEST(Smf, LoadRejectsOverlappingDataRanges) {
+  ScopedTempDir dir;
+  SmfModel model = MakeMlp(4, 8, 2, 1);
+  const std::string path = dir.File("model.smf");
+  ASSERT_OK(SaveSmf(path, model));
+  ASSERT_OK_AND_ASSIGN(SmfModel saved, LoadSmf(path));
+  const SmfTensor* w1 = saved.FindTensor("w1");
+  const SmfTensor* b1 = saved.FindTensor("b1");
+  ASSERT_NE(w1, nullptr);
+  ASSERT_NE(b1, nullptr);
+
+  // Patch b1's metadata offset field to alias w1's blob. Both ranges stay
+  // individually inside the file, so only the disjointness check can fire.
+  // The field is the first occurrence of b1's offset below the data section.
+  std::vector<uint8_t> bytes = ReadAll(path);
+  uint64_t data_start = bytes.size();
+  for (const auto& t : saved.tensors)
+    if (t.is_const) data_start = std::min(data_start, t.data_offset);
+  const auto* needle = reinterpret_cast<const uint8_t*>(&b1->data_offset);
+  auto it = std::search(bytes.begin(),
+                        bytes.begin() + static_cast<ptrdiff_t>(data_start),
+                        needle, needle + sizeof(uint64_t));
+  ASSERT_TRUE(it != bytes.begin() + static_cast<ptrdiff_t>(data_start));
+  std::memcpy(&*it, &w1->data_offset, sizeof(uint64_t));
+  WriteAll(path, bytes);
+
+  EXPECT_ERROR_CONTAINS(LoadSmf(path), "overlap");
+}
+
+TEST(Smf, LoadRejectsUnknownOpKind) {
+  ScopedTempDir dir;
+  SmfModel model = MakeMlp(4, 8, 2, 1);
+  const std::string path = dir.File("model.smf");
+  ASSERT_OK(SaveSmf(path, model));
+
+  // An op record is: kind u8, then the u16-length-prefixed name. Locate op
+  // "mm1" by its length-prefixed name; the byte before the prefix is the kind.
+  std::vector<uint8_t> bytes = ReadAll(path);
+  const uint8_t needle[] = {3, 0, 'm', 'm', '1'};
+  auto it = std::search(bytes.begin(), bytes.end(), needle,
+                        needle + sizeof(needle));
+  ASSERT_TRUE(it != bytes.end());
+  *(it - 1) = 200;
+  WriteAll(path, bytes);
+
+  EXPECT_ERROR_CONTAINS(LoadSmf(path), "unknown kind");
+}
+
+TEST(Smf, SaveRejectsOversizedMetadata) {
+  ScopedTempDir dir;
+  const std::string path = dir.File("model.smf");
+
+  // The formats carry u16 string lengths and u8 rank/input counts; a silent
+  // cast would desynchronize every record after the oversized field.
+  SmfModel long_name = MakeMlp(4, 8, 2, 1);
+  long_name.tensors[1].name.assign(70000, 'n');
+  EXPECT_ERROR_CONTAINS(SaveSmf(path, long_name), "65535");
+
+  SmfModel deep_rank = MakeMlp(4, 8, 2, 1);
+  deep_rank.tensors[1].dims.assign(300, 1);
+  EXPECT_ERROR_CONTAINS(SaveSmf(path, deep_rank), "rank exceeds 255");
+
+  SmfModel wide_op = MakeMlp(4, 8, 2, 1);
+  wide_op.ops[0].inputs.assign(300, "x");
+  EXPECT_ERROR_CONTAINS(SaveSmf(path, wide_op), "more than 255 inputs");
 }
 
 TEST(Smf, SaveRejectsConstantTensorWithoutData) {

@@ -182,6 +182,21 @@ std::expected<void, std::string> UpdateEngine::LoadFromFile(
 }
 
 std::expected<void, std::string> UpdateEngine::Initialize() {
+  // Unload the previous plan before touching the new one. Every early return
+  // below must leave the engine in the clean "no plan loaded" state — never
+  // half-swapped, with the new header and programs but the previous arena —
+  // or Train() would execute refs validated against the new arena_size over
+  // an allocation of the old size.
+  std::free(arena_);
+  arena_ = nullptr;
+  rodata_ = nullptr;
+  train_program_.clear();
+  merge_program_.clear();
+  emit_table_.clear();
+  num_classes_ = 0;
+  step_ = 0;
+  merged_ = false;
+
   if (plan_size_ < sizeof(up::PlanHeader))
     return std::unexpected("UpdateEngine: plan smaller than its header");
   std::memcpy(&header_, plan_, sizeof(header_));
@@ -261,18 +276,45 @@ std::expected<void, std::string> UpdateEngine::Initialize() {
                header_.arena_size))
     return std::unexpected("UpdateEngine: plan loss slot out of bounds");
 
-  // Class count for validating class-index labels at Train() time (the
-  // softmax kernels index rows of this width with raw dataset labels).
+  // The softmax cross-entropy kernels index probs/dlogits rows with raw
+  // class labels — an out-of-range label is an out-of-bounds read (fwd) or
+  // write (bwd). ValidateInstruction() cannot bound label *values*, so bind
+  // every softmax-xent instruction to the header's label slot and a single
+  // class count here; Train() then validates the dataset's labels against
+  // exactly the buffer and width the kernels will index.
   num_classes_ = 0;
-  for (const up::UpdateInstruction& ins : train_program_)
-    if (static_cast<up::OpCode>(ins.opcode) == up::OpCode::kSoftmaxXEntFwd)
-      num_classes_ = ins.out[1];
+  for (const auto* program : {&train_program_, &merge_program_}) {
+    for (const up::UpdateInstruction& ins : *program) {
+      const auto op = static_cast<up::OpCode>(ins.opcode);
+      if (op != up::OpCode::kSoftmaxXEntFwd &&
+          op != up::OpCode::kSoftmaxXEntBwd)
+        continue;
+      if (header_.label_kind != 1)
+        return std::unexpected(
+            "UpdateEngine: softmax-xent instruction in a plan without "
+            "class-index labels");
+      if (ins.in[1] != header_.label_ref)
+        return std::unexpected(
+            "UpdateEngine: softmax-xent labels are not bound to the plan's "
+            "label slot");
+      // The kernel reads N labels; the feeder writes label_bytes per step.
+      // Labels beyond the feeder's write would be stale or uninitialized.
+      if (ins.out[0] > header_.label_bytes / sizeof(int32_t))
+        return std::unexpected(
+            "UpdateEngine: softmax-xent batch exceeds the plan's label slot");
+      const uint64_t classes = ins.out[1];
+      if (classes == 0 || (num_classes_ != 0 && classes != num_classes_))
+        return std::unexpected(
+            "UpdateEngine: inconsistent class count across softmax-xent "
+            "instructions");
+      num_classes_ = classes;
+    }
+  }
 
   rodata_ = plan_ + header_.rodata_offset;
 
   // The single allocation of the update: the pre-planned arena. Its size was
   // known at compile time — the device's resource contract.
-  std::free(arena_);
   const size_t arena_bytes = (header_.arena_size + 63) & ~size_t{63};
   arena_ = static_cast<uint8_t*>(std::aligned_alloc(64, arena_bytes));
   if (!arena_) return std::unexpected("UpdateEngine: arena allocation failed");

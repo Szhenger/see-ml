@@ -54,6 +54,24 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
   if (targets.empty())
     return std::unexpected("LoraGrafter: no eligible MatMul targets found");
 
+  // A frozen weight multiplied at more than one site (weight tying) would
+  // receive one independent adapter per site, but the merged model has only
+  // one copy of the weight to patch — CommitToModel() would apply one site's
+  // delta and discard the others' training. Until a shared adapter per
+  // frozen weight is supported, reject the graft instead of silently
+  // corrupting the update.
+  {
+    std::unordered_set<const sir::Value*> grafted;
+    for (sir::Operation* target : targets) {
+      const sir::Value* w = target->operand(1);
+      if (!grafted.insert(w).second)
+        return std::unexpected(
+            "LoraGrafter: weight '" + std::string(w->id()) +
+            "' feeds multiple MatMuls (weight tying); tied weights cannot be "
+            "merged site-independently and are not supported");
+    }
+  }
+
   std::vector<GraftedAdapter> adapters;
   const float scale = spec_.alpha / static_cast<float>(spec_.rank);
 

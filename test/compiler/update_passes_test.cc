@@ -141,6 +141,18 @@ TEST(LoraGrafter, RejectsNonPositiveRank) {
                         "rank must be positive");
 }
 
+TEST(LoraGrafter, RejectsTiedFrozenWeight) {
+  sir::Block block;
+  GraphBuild build;
+  SmfModel model = seeml::testing::MakeTiedMlp(4, 1);
+  build.input = block.addArgument(sir::DataType::F32, sir::Shape{kBatch, 4});
+  ASSERT_OK(BuildForward(block, model, "", build.input, kBatch, build));
+
+  // Both MatMuls multiply the same frozen weight Value; per-site adapters
+  // cannot be merged back into the single on-disk copy.
+  EXPECT_ERROR_CONTAINS(LoraGrafter(Spec()).Run(block), "weight tying");
+}
+
 TEST(LoraGrafter, RejectsWhenNoTargetMatches) {
   sir::Block block;
   GraphBuild build;

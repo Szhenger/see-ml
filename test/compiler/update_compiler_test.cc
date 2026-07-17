@@ -130,25 +130,16 @@ TEST(UpdateCompiler, CompilationIsDeterministic) {
   EXPECT_TRUE(a.plan == b.plan);
 }
 
-TEST(UpdateCompiler, TiedWeightMaterializesOnce) {
+TEST(UpdateCompiler, RejectsTiedWeights) {
   SmfModel model = MakeTiedMlp(4, 4);
   UpdateConfig config = BaseConfig(kBatch);
-  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
-                       UpdateCompiler(config).Compile(model));
 
-  // The tied tensor resolves to a single SIR value: each consuming MatMul
-  // still gets its own adapter, but both share one frozen rodata copy and
-  // their emit entries patch the same source byte range.
-  const PlanHeader h = HeaderOf(compiled);
-  ASSERT_EQ(compiled.adapters.size(), 2u);
-  EXPECT_EQ(compiled.adapters[0].weight_rodata_ref,
-            compiled.adapters[1].weight_rodata_ref);
-  ASSERT_EQ(h.emit_count, 2u);
-  std::vector<EmitEntry> emits(h.emit_count);
-  std::memcpy(emits.data(), compiled.plan.data() + h.emit_table_offset,
-              h.emit_count * sizeof(EmitEntry));
-  EXPECT_EQ(emits[0].smf_data_offset, emits[1].smf_data_offset);
-  EXPECT_EQ(emits[0].byte_size, emits[1].byte_size);
+  // A tied weight would receive one independent adapter per consuming
+  // MatMul, but the merged model holds a single copy of the weight — the
+  // commit would patch its byte range once per adapter, keeping one site's
+  // delta and silently discarding the others'. The graft refuses instead.
+  EXPECT_ERROR_CONTAINS(UpdateCompiler(config).Compile(model),
+                        "weight tying");
 }
 
 TEST(UpdateCompiler, MseLossUsesDenseLabels) {

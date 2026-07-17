@@ -57,6 +57,16 @@ std::expected<sir::Value*, std::string> BuildForward(
                                  "' inner dimensions disagree (" +
                                  std::to_string(k_x) + " vs " +
                                  std::to_string(k_w) + ")");
+        // The result shape below fixes the row count at `batch`, and the GEMM
+        // lowering sizes its reads from that claim — a left operand with any
+        // other row count (e.g. a constant tensor) would compile into a plan
+        // that reads past the operand's buffer at runtime.
+        const int64_t n_x = (*x)->shape().dims.at(0);
+        if (n_x != batch)
+          return std::unexpected(
+              "UpdateCompiler: MatMul '" + op.name + "' left operand has " +
+              std::to_string(n_x) + " row(s); the update plan is compiled "
+              "for batch " + std::to_string(batch));
         sir::Operation* mm = block.appendOp("sc_high.matmul");
         mm->addOperand(*x);
         mm->addOperand(*w);
