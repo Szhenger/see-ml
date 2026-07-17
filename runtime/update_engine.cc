@@ -5,13 +5,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 
-#ifndef _WIN32
-#include <fcntl.h>
-#include <unistd.h>
-#endif
-
+#include "runtime/checkpoint.h"
+#include "runtime/durable_io.h"
+#include "runtime/plan_validator.h"
 #include "runtime/update_kernels.h"
 #include "source/hash.h"
 
@@ -25,267 +22,6 @@ namespace {
 float BitsToF32(uint64_t bits) {
   return std::bit_cast<float>(static_cast<uint32_t>(bits));
 }
-
-
-// --- Durable file replacement -------------------------------------------------
-// Write-tmp + rename alone is atomic but NOT durable: after a power cut the
-// rename may survive while the data does not, leaving a truncated model on
-// exactly the class of device this runtime targets. POSIX durability needs
-// fsync on the file before the rename and fsync on the directory after it.
-//
-// Gather form: writes the spans back to back, so callers with a header +
-// payload (checkpoints) need not concatenate them into a temporary blob first.
-struct ByteSpan {
-  const uint8_t* data;
-  size_t size;
-};
-
-std::expected<void, std::string> WriteFileDurable(
-    const std::string& path, std::initializer_list<ByteSpan> parts) {
-  const std::string tmp = path + ".tmp";
-#ifndef _WIN32
-  const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-  if (fd < 0)
-    return std::unexpected("UpdateEngine: cannot write '" + tmp + "'");
-  for (const ByteSpan& part : parts) {
-    size_t written = 0;
-    while (written < part.size) {
-      const ssize_t n = ::write(fd, part.data + written, part.size - written);
-      if (n < 0) {
-        ::close(fd);
-        return std::unexpected("UpdateEngine: short write to '" + tmp + "'");
-      }
-      written += static_cast<size_t>(n);
-    }
-  }
-  if (::fsync(fd) != 0) {
-    ::close(fd);
-    return std::unexpected("UpdateEngine: fsync of '" + tmp + "' failed");
-  }
-  ::close(fd);
-  if (std::rename(tmp.c_str(), path.c_str()) != 0)
-    return std::unexpected("UpdateEngine: atomic rename to '" + path +
-                           "' failed");
-  // Persist the rename itself.
-  const size_t slash = path.find_last_of('/');
-  const std::string dir = slash == std::string::npos
-                              ? std::string(".")
-                              : path.substr(0, slash == 0 ? 1 : slash);
-  const int dfd = ::open(dir.c_str(), O_RDONLY);
-  if (dfd >= 0) {
-    ::fsync(dfd);  // best effort: some filesystems reject directory fsync
-    ::close(dfd);
-  }
-  return {};
-#else
-  {
-    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-    if (!out)
-      return std::unexpected("UpdateEngine: cannot write '" + tmp + "'");
-    for (const ByteSpan& part : parts) {
-      out.write(reinterpret_cast<const char*>(part.data),
-                static_cast<std::streamsize>(part.size));
-      if (!out)
-        return std::unexpected("UpdateEngine: short write to '" + tmp + "'");
-    }
-  }
-  if (std::rename(tmp.c_str(), path.c_str()) != 0)
-    return std::unexpected("UpdateEngine: atomic rename to '" + path +
-                           "' failed");
-  return {};
-#endif
-}
-
-std::expected<void, std::string> WriteFileDurable(const std::string& path,
-                                                  const uint8_t* data,
-                                                  size_t size) {
-  return WriteFileDurable(path, {ByteSpan{data, size}});
-}
-
-std::expected<std::vector<uint8_t>, std::string> ReadFileBytes(
-    const std::string& path) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) return std::unexpected("UpdateEngine: cannot open '" + path + "'");
-  f.seekg(0, std::ios::end);
-  const std::streamoff end = f.tellg();
-  if (end < 0)
-    return std::unexpected("UpdateEngine: cannot stat '" + path + "'");
-  f.seekg(0);
-  std::vector<uint8_t> bytes(static_cast<size_t>(end));
-  if (!bytes.empty() &&
-      !f.read(reinterpret_cast<char*>(bytes.data()),
-              static_cast<std::streamsize>(bytes.size())))
-    return std::unexpected("UpdateEngine: cannot read '" + path + "'");
-  return bytes;
-}
-
-// --- Overflow-safe validation of file-supplied offsets and sizes -------------
-
-bool MulOk(uint64_t a, uint64_t b, uint64_t* out) {
-  if (b != 0 && a > UINT64_MAX / b) return false;
-  *out = a * b;
-  return true;
-}
-
-bool RangeOk(uint64_t off, uint64_t bytes, uint64_t size) {
-  return off <= size && bytes <= size - off;
-}
-
-// Checks that every ref operand of `ins` lies fully inside its address space
-// (arena or rodata), with byte extents derived from the instruction's dims the
-// same way the kernels derive their loop bounds, and that writes only target
-// the mutable arena. Rejects unknown opcodes, which Execute() would silently
-// skip.
-std::expected<void, std::string> ValidateInstruction(
-    const up::UpdateInstruction& ins, uint64_t arena_size,
-    uint64_t rodata_size) {
-  // elem_bytes: f32/i32 operands are 4 bytes; quantized weights are 1.
-  auto ref_ok_w = [&](uint64_t ref, uint64_t elems, bool write,
-                      uint64_t elem_bytes) {
-    if (ref == up::kNullRef) return false;
-    if (write && up::IsRodataRef(ref)) return false;
-    uint64_t bytes = 0;
-    if (!MulOk(elems, elem_bytes, &bytes)) return false;
-    const uint64_t space = up::IsRodataRef(ref) ? rodata_size : arena_size;
-    return RangeOk(up::RefOffset(ref), bytes, space);
-  };
-  auto ref_ok = [&](uint64_t ref, uint64_t elems, bool write) {
-    return ref_ok_w(ref, elems, write, sizeof(float));
-  };
-  auto fail = [&] {
-    return std::unexpected("UpdateEngine: instruction operand out of bounds "
-                           "(opcode " +
-                           std::to_string(ins.opcode) + ")");
-  };
-
-  const uint64_t d0 = ins.out[0], d1 = ins.out[1], d2 = ins.out[2];
-  uint64_t mk = 0, kn = 0, mn = 0, nc = 0;
-  switch (static_cast<up::OpCode>(ins.opcode)) {
-    case up::OpCode::kNop:
-      return {};
-    case up::OpCode::kGemmNN:
-    case up::OpCode::kGemmNT:
-    case up::OpCode::kGemmTN:
-    case up::OpCode::kGemmAccNN:
-    case up::OpCode::kGemmNNQ8:
-    case up::OpCode::kGemmNTQ8: {
-      // Every layout variant reads M*K (A) and K*N (B), writes M*N (C).
-      const bool q8 = static_cast<up::OpCode>(ins.opcode) ==
-                          up::OpCode::kGemmNNQ8 ||
-                      static_cast<up::OpCode>(ins.opcode) ==
-                          up::OpCode::kGemmNTQ8;
-      if (!MulOk(d0, d2, &mk) || !MulOk(d2, d1, &kn) || !MulOk(d0, d1, &mn))
-        return fail();
-      // Quantized B must live in rodata: only the compiler's own int8
-      // packing produces it, and it is 1 byte per element.
-      if (q8 && !up::IsRodataRef(ins.in[1])) return fail();
-      if (!ref_ok(ins.in[0], mk, false) ||
-          !ref_ok_w(ins.in[1], kn, false, q8 ? 1 : sizeof(float)) ||
-          !ref_ok(ins.in[2], mn, true))
-        return fail();
-      return {};
-    }
-    case up::OpCode::kAddEW:
-    case up::OpCode::kMulEW:
-    case up::OpCode::kReluBwd:
-    case up::OpCode::kGeluBwd:
-    case up::OpCode::kSiluBwd:
-      if (!ref_ok(ins.in[0], d0, false) || !ref_ok(ins.in[1], d0, false) ||
-          !ref_ok(ins.in[2], d0, true))
-        return fail();
-      return {};
-    case up::OpCode::kAddBias:
-      if (!MulOk(d0, d1, &mn)) return fail();
-      if (!ref_ok(ins.in[0], mn, false) || !ref_ok(ins.in[1], d1, false) ||
-          !ref_ok(ins.in[2], mn, true))
-        return fail();
-      return {};
-    case up::OpCode::kReluFwd:
-    case up::OpCode::kGeluFwd:
-    case up::OpCode::kSiluFwd:
-    case up::OpCode::kScale:
-    case up::OpCode::kCopy:
-      if (!ref_ok(ins.in[0], d0, false) || !ref_ok(ins.in[1], d0, true))
-        return fail();
-      return {};
-    case up::OpCode::kLayerNormFwd: {
-      const uint64_t rows = d0 >> 32, cols = d0 & 0xFFFFFFFFu;
-      if (!MulOk(rows, cols, &nc)) return fail();
-      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], cols, false) ||
-          !ref_ok(ins.in[2], cols, false) || !ref_ok(ins.in[3], nc, true) ||
-          !ref_ok(ins.out[1], rows, true) || !ref_ok(ins.out[2], rows, true))
-        return fail();
-      return {};
-    }
-    case up::OpCode::kLayerNormBwd: {
-      const uint64_t rows = d2 >> 32, cols = d2 & 0xFFFFFFFFu;
-      if (!MulOk(rows, cols, &nc)) return fail();
-      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], nc, false) ||
-          !ref_ok(ins.in[2], cols, false) || !ref_ok(ins.in[3], nc, true) ||
-          !ref_ok(ins.out[0], rows, false) || !ref_ok(ins.out[1], rows, false))
-        return fail();
-      return {};
-    }
-    case up::OpCode::kClipNorm:
-      if (!ref_ok(ins.in[0], d0, true)) return fail();
-      return {};
-    case up::OpCode::kReduceRows:
-      if (!MulOk(d0, d1, &mn)) return fail();
-      if (!ref_ok(ins.in[0], mn, false) || !ref_ok(ins.in[1], d1, true))
-        return fail();
-      return {};
-    case up::OpCode::kSoftmaxXEntFwd:
-      if (!MulOk(d0, d1, &nc)) return fail();
-      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], d0, false) ||
-          !ref_ok(ins.in[2], 1, true) || !ref_ok(ins.in[3], nc, true))
-        return fail();
-      return {};
-    case up::OpCode::kSoftmaxXEntBwd:
-      if (!MulOk(d0, d1, &nc)) return fail();
-      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], d0, false) ||
-          !ref_ok(ins.in[2], 1, false) || !ref_ok(ins.in[3], nc, true))
-        return fail();
-      return {};
-    case up::OpCode::kMseFwd:
-      if (!ref_ok(ins.in[0], d0, false) || !ref_ok(ins.in[1], d0, false) ||
-          !ref_ok(ins.in[2], 1, true))
-        return fail();
-      return {};
-    case up::OpCode::kMseBwd:
-      if (!ref_ok(ins.in[0], d0, false) || !ref_ok(ins.in[1], d0, false) ||
-          !ref_ok(ins.in[2], 1, false) || !ref_ok(ins.in[3], d0, true))
-        return fail();
-      return {};
-    case up::OpCode::kKLDistillFwd:
-      if (!MulOk(d1 >> 32, d1 & 0xFFFFFFFFu, &nc)) return fail();
-      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], nc, false) ||
-          !ref_ok(ins.in[2], 1, true) || !ref_ok(ins.in[3], nc, true) ||
-          !ref_ok(ins.out[0], nc, true))
-        return fail();
-      return {};
-    case up::OpCode::kKLDistillBwd:
-      if (!MulOk(d0 >> 32, d0 & 0xFFFFFFFFu, &nc)) return fail();
-      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], nc, false) ||
-          !ref_ok(ins.in[2], 1, false) || !ref_ok(ins.in[3], nc, true))
-        return fail();
-      return {};
-    case up::OpCode::kSgdStep:
-      if (!ref_ok(ins.in[0], d0, true) || !ref_ok(ins.in[1], d0, false))
-        return fail();
-      return {};
-    case up::OpCode::kAdamWStep:
-      if (!ref_ok(ins.in[0], d0, true) || !ref_ok(ins.in[1], d0, false) ||
-          !ref_ok(ins.in[2], d0, true) || !ref_ok(ins.in[3], d0, true))
-        return fail();
-      return {};
-    case up::OpCode::kFill:
-      if (!ref_ok(ins.in[0], d0, true)) return fail();
-      return {};
-  }
-  return std::unexpected("UpdateEngine: unknown opcode " +
-                         std::to_string(ins.opcode));
-}
-
 
 }  // namespace
 
@@ -821,71 +557,18 @@ std::expected<void, std::string> UpdateEngine::CommitToModel(
   return WriteFileDurable(out_path, bytes->data(), bytes->size());
 }
 
-namespace {
-
-// Checkpoint container: everything little-endian, hash-bound to its plan.
-//   u32 magic "SEKP"; u32 version
-//   u64 plan_hash        must equal the plan's PlanHeader::plan_hash
-//   u64 step             1-indexed AdamW timestep at save
-//   u64 persistent_size  byte length of the payload
-//   u64 payload_hash     Fnv1a64 of the payload
-//   payload              the arena's persistent segment
-inline constexpr uint32_t kCkptMagic = 0x504B4553;  // "SEKP"
-inline constexpr uint32_t kCkptVersion = 2;
-
-#pragma pack(push, 1)
-struct CkptHeader {
-  uint32_t magic = kCkptMagic;
-  uint32_t version = kCkptVersion;
-  uint64_t plan_hash = 0;
-  uint64_t step = 0;
-  uint64_t persistent_size = 0;
-  uint64_t payload_hash = 0;
-};
-#pragma pack(pop)
-
-}  // namespace
-
 std::expected<void, std::string> UpdateEngine::SaveCheckpoint(
     const std::string& path) const {
-  CkptHeader h;
-  h.plan_hash = header_.plan_hash;
-  h.step = step_;
-  h.persistent_size = header_.persistent_size;
-  h.payload_hash = up::Fnv1a64(arena_, header_.persistent_size);
-
-  // Durable: a checkpoint that can vanish in a power cut is not a checkpoint.
-  // Gather-write header + persistent segment straight from the arena — no
-  // concatenated staging blob, so periodic checkpointing costs no extra
-  // allocation or copy of the (potentially large) optimizer state.
-  return WriteFileDurable(
-      path, {ByteSpan{reinterpret_cast<const uint8_t*>(&h), sizeof(h)},
-             ByteSpan{arena_, header_.persistent_size}});
+  return SaveCheckpointFile(path, header_.plan_hash, step_, arena_,
+                            header_.persistent_size);
 }
 
 std::expected<void, std::string> UpdateEngine::LoadCheckpoint(
     const std::string& path) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) return std::unexpected("UpdateEngine: no checkpoint at '" + path + "'");
-  CkptHeader h;
-  f.read(reinterpret_cast<char*>(&h), sizeof(h));
-  if (!f || h.magic != kCkptMagic || h.version != kCkptVersion)
-    return std::unexpected("UpdateEngine: not a v2 checkpoint: '" + path + "'");
-  // Binding: a checkpoint carries adapter and optimizer state laid out by
-  // one specific plan. Resuming it under any other plan is silent corruption.
-  if (h.plan_hash != header_.plan_hash)
-    return std::unexpected(
-        "UpdateEngine: checkpoint belongs to a different plan");
-  if (h.persistent_size != header_.persistent_size)
-    return std::unexpected("UpdateEngine: checkpoint incompatible with plan");
-  std::vector<uint8_t> payload(h.persistent_size);
-  f.read(reinterpret_cast<char*>(payload.data()),
-         static_cast<std::streamsize>(payload.size()));
-  if (!f) return std::unexpected("UpdateEngine: truncated checkpoint");
-  if (up::Fnv1a64(payload.data(), payload.size()) != h.payload_hash)
-    return std::unexpected("UpdateEngine: checkpoint payload is corrupt");
-  std::memcpy(arena_, payload.data(), payload.size());
-  step_ = h.step;
+  auto step = LoadCheckpointFile(path, header_.plan_hash,
+                                 header_.persistent_size, arena_);
+  if (!step) return std::unexpected(step.error());
+  step_ = *step;
   return {};
 }
 

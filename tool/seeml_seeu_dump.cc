@@ -15,7 +15,7 @@
 #include <fstream>
 #include <vector>
 
-#include "compiler/backend/update_types.h"
+#include "source/update_types.h"
 #include "source/hash.h"
 
 namespace {

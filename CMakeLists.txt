@@ -50,6 +50,8 @@ add_library(seeml_update STATIC
     source/smf.cc
     compiler/frontend/forward_builder.cc
     compiler/trainer/update_passes.cc
+    compiler/backend/arena_binder.cc
+    compiler/backend/instruction_lowering.cc
     compiler/backend/update_compiler.cc
     compiler/backend/native_emitter.cc
 )
@@ -64,6 +66,9 @@ target_link_libraries(seeml_update PUBLIC seeml_sir)
 add_library(seeml_update_rt STATIC
     runtime/update_kernels.cc
     runtime/dataset.cc
+    runtime/durable_io.cc
+    runtime/plan_validator.cc
+    runtime/checkpoint.cc
     runtime/update_engine.cc
 )
 

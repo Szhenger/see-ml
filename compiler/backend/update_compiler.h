@@ -7,7 +7,7 @@
 #include <vector>
 
 #include "source/smf.h"
-#include "compiler/backend/update_types.h"
+#include "source/update_types.h"
 
 // =============================================================================
 // UpdateCompiler — the AOT driver that turns

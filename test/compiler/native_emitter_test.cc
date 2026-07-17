@@ -68,8 +68,9 @@ TEST(NativeEmitter, EmitsCompletePackage) {
   // the repository checkout.
   for (const char* rel :
        {"runtime/update_engine.cc", "runtime/update_kernels.cc",
-        "runtime/dataset.cc", "compiler/backend/update_types.h",
-        "source/hash.h"}) {
+        "runtime/dataset.cc", "runtime/durable_io.cc",
+        "runtime/plan_validator.cc", "runtime/checkpoint.cc",
+        "source/update_types.h", "source/hash.h"}) {
     EXPECT_TRUE(std::filesystem::exists(
         std::filesystem::path(out_dir) / rel));
   }

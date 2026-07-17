@@ -13,10 +13,15 @@ compile compiler/diagnostics/logger.cc        logger.o
 compile source/smf.cc                         smf.o
 compile compiler/frontend/forward_builder.cc  forward_builder.o
 compile compiler/trainer/update_passes.cc     update_passes.o
+compile compiler/backend/arena_binder.cc      arena_binder.o
+compile compiler/backend/instruction_lowering.cc instruction_lowering.o
 compile compiler/backend/update_compiler.cc   update_compiler.o
 compile compiler/backend/native_emitter.cc    native_emitter.o
 compile runtime/update_kernels.cc             update_kernels.o
 compile runtime/dataset.cc                    dataset.o
+compile runtime/durable_io.cc                 durable_io.o
+compile runtime/plan_validator.cc             plan_validator.o
+compile runtime/checkpoint.cc                 checkpoint.o
 compile runtime/update_engine.cc              update_engine.o
 compile tool/seeml_update_compile.cc          seeml_update_compile.o
 compile tool/seeml_seeu_dump.cc               seeml_seeu_dump.o
@@ -26,8 +31,10 @@ compile test/support/scoped_temp_dir.cc       scoped_temp_dir.o
 compile test/support/builders.cc              builders.o
 
 LIBS="build/smf.o build/forward_builder.o build/update_passes.o \
+      build/arena_binder.o build/instruction_lowering.o \
       build/update_compiler.o build/native_emitter.o build/sir.o \
       build/logger.o build/update_kernels.o build/dataset.o \
+      build/durable_io.o build/plan_validator.o build/checkpoint.o \
       build/update_engine.o"
 TESTING="build/seetest.o build/seetest_main.o build/scoped_temp_dir.o \
          build/builders.o"

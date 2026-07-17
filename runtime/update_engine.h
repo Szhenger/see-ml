@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "compiler/backend/update_types.h"
+#include "source/update_types.h"
 #include "runtime/dataset.h"
 
 // =============================================================================

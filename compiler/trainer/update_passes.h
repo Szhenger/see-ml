@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "compiler/frontend/sir.h"
-#include "compiler/backend/update_types.h"
+#include "source/update_types.h"
 
 // =============================================================================
 // The four SIR-to-SIR passes of the update compiler:

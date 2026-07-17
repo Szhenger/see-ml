@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "compiler/backend/update_compiler.h"
-#include "compiler/backend/update_types.h"
+#include "source/update_types.h"
 #include "source/smf.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"

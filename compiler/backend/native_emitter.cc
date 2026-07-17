@@ -231,10 +231,13 @@ int main(int argc, char** argv) {
 // repository — the compiler host's checkout cannot be a build dependency of
 // the deliverable.
 constexpr const char* kVendoredSources[] = {
-    "runtime/update_engine.h",  "runtime/update_engine.cc",
-    "runtime/update_kernels.h", "runtime/update_kernels.cc",
-    "runtime/dataset.h",        "runtime/dataset.cc",
-    "compiler/backend/update_types.h", "source/hash.h",
+    "runtime/update_engine.h",   "runtime/update_engine.cc",
+    "runtime/update_kernels.h",  "runtime/update_kernels.cc",
+    "runtime/dataset.h",         "runtime/dataset.cc",
+    "runtime/durable_io.h",      "runtime/durable_io.cc",
+    "runtime/plan_validator.h",  "runtime/plan_validator.cc",
+    "runtime/checkpoint.h",      "runtime/checkpoint.cc",
+    "source/update_types.h",     "source/hash.h",
 };
 
 std::string BuildScript() {
@@ -251,9 +254,13 @@ std::string BuildScript() {
   s += "$CXX $FLAGS -c update_main.cc -o update_main.o\n";
   s += "$CXX $FLAGS -c runtime/update_kernels.cc -o update_kernels.o\n";
   s += "$CXX $FLAGS -c runtime/dataset.cc -o dataset.o\n";
+  s += "$CXX $FLAGS -c runtime/durable_io.cc -o durable_io.o\n";
+  s += "$CXX $FLAGS -c runtime/plan_validator.cc -o plan_validator.o\n";
+  s += "$CXX $FLAGS -c runtime/checkpoint.cc -o checkpoint.o\n";
   s += "$CXX $FLAGS -c runtime/update_engine.cc -o update_engine.o\n";
   s += "$CXX update_main.o update_plan_embedded.o update_engine.o dataset.o "
-       "update_kernels.o -o model_update\n";
+       "update_kernels.o durable_io.o plan_validator.o checkpoint.o "
+       "-o model_update\n";
   s += "echo \"built: $(pwd)/model_update\"\n";
   return s;
 }

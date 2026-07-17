@@ -1,5 +1,5 @@
-#ifndef SEEML_COMPILER_BACKEND_UPDATE_TYPES_H_
-#define SEEML_COMPILER_BACKEND_UPDATE_TYPES_H_
+#ifndef SEEML_SOURCE_UPDATE_TYPES_H_
+#define SEEML_SOURCE_UPDATE_TYPES_H_
 
 #include <bit>
 #include <cstdint>
@@ -7,7 +7,10 @@
 #include <vector>
 
 // =============================================================================
-// SeeML Update Compiler: shared configuration and the .seeu binary plan schema.
+// SeeML shared substrate: compiler configuration and the .seeu binary plan
+// schema. Lives in source/ (with smf.h and hash.h) because it is the ABI both
+// sides of the product speak: the compiler writes it, the device runtime
+// reads it, and neither may depend on the other's internals.
 //
 // The update compiler consumes:
 //   - a source model (the user's on-device model, SMF format),
@@ -256,4 +259,4 @@ static_assert(sizeof(EmitEntry) == 24, "EmitEntry layout is part of the ABI.");
 
 }  // namespace seeml::update
 
-#endif  // SEEML_COMPILER_BACKEND_UPDATE_TYPES_H_
+#endif  // SEEML_SOURCE_UPDATE_TYPES_H_
