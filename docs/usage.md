@@ -79,8 +79,10 @@ Exit codes: `0` committed, `1` runtime error, `2` bad arguments,
 
 ```bash
 cmake -S . -B build && cmake --build build -j && ctest --test-dir build
-# without CMake:
-sh build/build.sh && ./build/seeml_update_tests
+# without CMake (builds every per-module SeeTest suite):
+sh build/build.sh && for t in build/seeml_*_test; do "$t"; done
+# one suite, one test:
+./build/seeml_update_engine_test --filter=UpdateEngineCheckpoint
 # sanitizers / fuzzing:
 cmake -B build -DSEEML_SANITIZE="address;undefined"
 cmake -B build -DSEEML_FUZZ=ON && ./build/seeml_fuzz_formats

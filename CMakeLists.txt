@@ -78,12 +78,42 @@ add_executable(seeml-seeu-dump tool/seeml_seeu_dump.cc)
 
 # ==============================================================================
 # Tests
+#
+# seeml_testing is the in-tree test framework (test/framework/) plus shared
+# fixtures (test/support/). Each suite is one executable per module, linked
+# against the framework's main() and registered with CTest. Run everything
+# with `ctest`; run one suite directly with e.g.
+#   ./seeml_smf_test --filter=Smf.RoundTrip
 # ==============================================================================
 
 enable_testing()
-add_executable(seeml_update_tests test/test_update_system.cc)
-target_link_libraries(seeml_update_tests PRIVATE seeml_update seeml_update_rt)
-add_test(NAME update_system COMMAND seeml_update_tests)
+
+add_library(seeml_testing STATIC
+    test/framework/seetest.cc
+    test/support/scoped_temp_dir.cc
+    test/support/builders.cc
+)
+target_link_libraries(seeml_testing PUBLIC seeml_update seeml_update_rt)
+# The emitter suite vendors runtime sources out of the repository checkout.
+target_compile_definitions(seeml_testing
+    PUBLIC SEEML_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
+function(seeml_add_test name src)
+    add_executable(${name} ${src} test/framework/seetest_main.cc)
+    target_link_libraries(${name} PRIVATE seeml_testing)
+    add_test(NAME ${name} COMMAND ${name})
+endfunction()
+
+seeml_add_test(seeml_smf_test             test/source/smf_test.cc)
+seeml_add_test(seeml_sir_test             test/compiler/sir_test.cc)
+seeml_add_test(seeml_forward_builder_test test/compiler/forward_builder_test.cc)
+seeml_add_test(seeml_update_passes_test   test/compiler/update_passes_test.cc)
+seeml_add_test(seeml_update_compiler_test test/compiler/update_compiler_test.cc)
+seeml_add_test(seeml_native_emitter_test  test/compiler/native_emitter_test.cc)
+seeml_add_test(seeml_kernels_test         test/runtime/kernels_test.cc)
+seeml_add_test(seeml_dataset_test         test/runtime/dataset_test.cc)
+seeml_add_test(seeml_update_engine_test   test/runtime/update_engine_test.cc)
+seeml_add_test(seeml_update_system_test   test/system/update_system_test.cc)
 
 if(SEEML_FUZZ)
     add_executable(seeml_fuzz_formats test/fuzz_binary_formats.cc)
