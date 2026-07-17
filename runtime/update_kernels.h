@@ -11,6 +11,11 @@
 // variants (AVX-512 / NEON, mirroring backend/kernels/) are swapped in at
 // link time. Every kernel is allocation-free and operates on caller-provided
 // arena/rodata pointers — the zero-allocation contract of the update runtime.
+//
+// Aliasing contract: distinct pointer parameters never overlap (the
+// compiler's arena allocator does not reuse an operand's slot for a result
+// born at the same instruction). The implementations rely on this to
+// restrict-qualify their inner loops.
 // =============================================================================
 
 namespace seeml::update_rt::kernels {

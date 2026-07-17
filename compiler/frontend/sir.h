@@ -185,8 +185,20 @@ class Block {
                         std::vector<std::unique_ptr<Operation>> new_ops);
 
     bool validate() const;
-    void walk(std::function<void(Operation*)> fn);
-    void walkReverse(std::function<void(Operation*)> fn);
+
+    /// Traversals are templates rather than std::function sinks: walk() is
+    /// the single hottest entry point of every compiler pass, and the
+    /// template form lets each lambda inline into the loop with no
+    /// type-erasure allocation or indirect call per operation.
+    template <typename Fn>
+    void walk(Fn&& fn) {
+        for (auto& op : ops_) fn(op.get());
+    }
+    template <typename Fn>
+    void walkReverse(Fn&& fn) {
+        for (auto it = ops_.rbegin(); it != ops_.rend(); ++it) fn(it->get());
+    }
+
     void print(std::ostream& os) const;
 
  private:

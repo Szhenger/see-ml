@@ -10,11 +10,22 @@ std::expected<sir::Value*, std::string> BuildForward(
     sir::Block& block, const SmfModel& model, const std::string& prefix,
     sir::Value* input, int64_t batch, GraphBuild& build) {
   std::unordered_map<std::string, sir::Value*> values;
+  values.reserve(model.tensors.size() + model.ops.size());
   values[model.input_name] = input;
+
+  // Index the tensor table once: every op input resolves through this map
+  // instead of a linear FindTensor scan, turning the import from
+  // O(ops * tensors) into O(ops + tensors). Keys view the model's own
+  // (const, stable) tensor names — no copies.
+  std::unordered_map<std::string_view, const SmfTensor*> tensor_index;
+  tensor_index.reserve(model.tensors.size());
+  for (const SmfTensor& t : model.tensors) tensor_index[t.name] = &t;
 
   auto materialize_weight =
       [&](const std::string& name) -> std::expected<sir::Value*, std::string> {
-    const SmfTensor* t = model.FindTensor(name);
+    auto found = tensor_index.find(name);
+    const SmfTensor* t =
+        found == tensor_index.end() ? nullptr : found->second;
     if (!t || !t->is_const)
       return std::unexpected("UpdateCompiler: '" + name +
                              "' is not a constant tensor in the model");

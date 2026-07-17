@@ -1,5 +1,6 @@
 #include "runtime/dataset.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 
@@ -101,11 +102,36 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
 
   d.inputs_.resize(num_samples * input_dim);
   d.labels_.resize(num_samples * lbytes);
-  for (uint64_t i = 0; i < num_samples; ++i) {
-    if (!read(d.inputs_.data() + i * input_dim, input_dim * sizeof(float)))
+
+  if (lbytes == 0) {
+    // No labels: the sample section is one contiguous f32 block — read it
+    // straight into place, a single bulk transfer instead of one syscall
+    // per sample.
+    if (!read(d.inputs_.data(), num_samples * input_bytes))
       return std::unexpected("Dataset: truncated inputs");
-    if (lbytes && !read(d.labels_.data() + i * lbytes, lbytes))
-      return std::unexpected("Dataset: truncated labels");
+    return d;
+  }
+
+  // Interleaved records: stream fixed chunks of whole records through a
+  // bounded buffer and deinterleave in memory. Bulk reads amortize the
+  // stream overhead; the buffer bound keeps peak memory flat no matter how
+  // large the corpus is.
+  const uint64_t record = input_bytes + lbytes;
+  constexpr uint64_t kChunkBudget = 256 * 1024;
+  const uint64_t per_chunk =
+      record >= kChunkBudget ? 1 : kChunkBudget / record;
+  std::vector<uint8_t> chunk(per_chunk * record);
+  for (uint64_t i = 0; i < num_samples;) {
+    const uint64_t n = std::min(per_chunk, num_samples - i);
+    if (!read(chunk.data(), n * record))
+      return std::unexpected("Dataset: truncated inputs");
+    for (uint64_t s = 0; s < n; ++s) {
+      const uint8_t* rec = chunk.data() + s * record;
+      std::memcpy(d.inputs_.data() + (i + s) * input_dim, rec, input_bytes);
+      std::memcpy(d.labels_.data() + (i + s) * lbytes, rec + input_bytes,
+                  lbytes);
+    }
+    i += n;
   }
   return d;
 }
@@ -140,9 +166,29 @@ std::expected<void, std::string> Dataset::SaveToFile(
   write(&pad, 4);
   write(&label_dim_, 8);
   const uint64_t lbytes = label_bytes_per_sample();
-  for (uint64_t i = 0; i < num_samples_; ++i) {
-    write(inputs_.data() + i * input_dim_, input_dim_ * sizeof(float));
-    if (lbytes) write(labels_.data() + i * lbytes, lbytes);
+  if (lbytes == 0) {
+    // Unlabeled: the sample section is exactly the input block.
+    write(inputs_.data(), num_samples_ * input_dim_ * sizeof(float));
+  } else {
+    // Interleave whole records through a bounded staging chunk and write in
+    // bulk — the mirror of LoadFromFile's chunked reader.
+    const uint64_t input_bytes = input_dim_ * sizeof(float);
+    const uint64_t record = input_bytes + lbytes;
+    constexpr uint64_t kChunkBudget = 256 * 1024;
+    const uint64_t per_chunk =
+        record >= kChunkBudget ? 1 : kChunkBudget / record;
+    std::vector<uint8_t> chunk(per_chunk * record);
+    for (uint64_t i = 0; i < num_samples_;) {
+      const uint64_t n = std::min(per_chunk, num_samples_ - i);
+      for (uint64_t s = 0; s < n; ++s) {
+        uint8_t* rec = chunk.data() + s * record;
+        std::memcpy(rec, inputs_.data() + (i + s) * input_dim_, input_bytes);
+        std::memcpy(rec + input_bytes, labels_.data() + (i + s) * lbytes,
+                    lbytes);
+      }
+      write(chunk.data(), n * record);
+      i += n;
+    }
   }
   if (!f) return std::unexpected("Dataset: short write to '" + path + "'");
   return {};
@@ -151,8 +197,28 @@ std::expected<void, std::string> Dataset::SaveToFile(
 void Dataset::FillBatch(uint64_t batch, float* input_slot,
                         uint8_t* label_slot) {
   const uint64_t lbytes = label_bytes_per_sample();
+
+  if (order_.empty()) {
+    // Sequential serving: samples are contiguous in memory, so copy whole
+    // runs (up to the wraparound point) instead of one sample at a time.
+    uint64_t b = 0;
+    while (b < batch) {
+      const uint64_t run = std::min(batch - b, num_samples_ - cursor_);
+      std::memcpy(input_slot + b * input_dim_,
+                  inputs_.data() + cursor_ * input_dim_,
+                  run * input_dim_ * sizeof(float));
+      if (label_slot && lbytes)
+        std::memcpy(label_slot + b * lbytes, labels_.data() + cursor_ * lbytes,
+                    run * lbytes);
+      b += run;
+      cursor_ += run;
+      if (cursor_ == num_samples_) cursor_ = 0;
+    }
+    return;
+  }
+
   for (uint64_t b = 0; b < batch; ++b) {
-    const uint64_t i = order_.empty() ? cursor_ : order_[cursor_];
+    const uint64_t i = order_[cursor_];
     std::memcpy(input_slot + b * input_dim_, inputs_.data() + i * input_dim_,
                 input_dim_ * sizeof(float));
     if (label_slot && lbytes)
@@ -160,7 +226,7 @@ void Dataset::FillBatch(uint64_t batch, float* input_slot,
     cursor_ = cursor_ + 1;
     if (cursor_ == num_samples_) {
       cursor_ = 0;
-      if (!order_.empty()) Reshuffle();  // fresh permutation every epoch
+      Reshuffle();  // fresh permutation every epoch
     }
   }
 }

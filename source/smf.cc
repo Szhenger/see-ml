@@ -1,5 +1,6 @@
 #include "source/smf.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
 
@@ -78,8 +79,19 @@ const SmfTensor* SmfModel::FindTensor(std::string_view name) const {
 std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   std::ifstream f(path, std::ios::binary);
   if (!f) return std::unexpected("SMF: cannot open '" + path + "'");
-  std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(f)),
-                             std::istreambuf_iterator<char>());
+  // Sized single read: stat, size the buffer once, one bulk transfer —
+  // model files are the largest artifact the compiler ingests, and the
+  // byte-at-a-time istreambuf_iterator form this replaces re-grew the
+  // vector all the way up.
+  f.seekg(0, std::ios::end);
+  const std::streamoff end = f.tellg();
+  if (end < 0) return std::unexpected("SMF: cannot stat '" + path + "'");
+  f.seekg(0);
+  std::vector<uint8_t> bytes(static_cast<size_t>(end));
+  if (!bytes.empty() &&
+      !f.read(reinterpret_cast<char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size())))
+    return std::unexpected("SMF: cannot read '" + path + "'");
 
   Reader r{bytes.data(), bytes.size()};
   if (r.Read<uint32_t>() != kSmfMagic)
@@ -94,6 +106,11 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   SmfModel model;
   model.input_name = r.ReadStr();
   model.output_name = r.ReadStr();
+  // Counts are validated implicitly by the bounded Reader; reserving to the
+  // declared sizes (capped against the file size so a hostile header cannot
+  // demand gigabytes) avoids re-growth during the parse.
+  model.tensors.reserve(std::min<size_t>(num_tensors, bytes.size()));
+  model.ops.reserve(std::min<size_t>(num_ops, bytes.size()));
 
   for (uint32_t i = 0; i < num_tensors && r.ok; ++i) {
     SmfTensor t;
@@ -206,7 +223,10 @@ std::expected<void, std::string> SaveSmf(const std::string& path,
   }
 
   // Pass 2: re-serialize with the final offsets, append the data section.
+  // The probe told us the exact final size — reserve it up front so neither
+  // the metadata append nor the data-section resize ever reallocates.
   Writer w;
+  w.buf.reserve(cursor);
   serialize_meta(w);
   w.buf.resize(cursor, 0);
   for (const auto& t : model.tensors) {

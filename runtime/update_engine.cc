@@ -26,27 +26,37 @@ float BitsToF32(uint64_t bits) {
   return std::bit_cast<float>(static_cast<uint32_t>(bits));
 }
 
+
 // --- Durable file replacement -------------------------------------------------
 // Write-tmp + rename alone is atomic but NOT durable: after a power cut the
 // rename may survive while the data does not, leaving a truncated model on
 // exactly the class of device this runtime targets. POSIX durability needs
 // fsync on the file before the rename and fsync on the directory after it.
-std::expected<void, std::string> WriteFileDurable(const std::string& path,
-                                                  const uint8_t* data,
-                                                  size_t size) {
+//
+// Gather form: writes the spans back to back, so callers with a header +
+// payload (checkpoints) need not concatenate them into a temporary blob first.
+struct ByteSpan {
+  const uint8_t* data;
+  size_t size;
+};
+
+std::expected<void, std::string> WriteFileDurable(
+    const std::string& path, std::initializer_list<ByteSpan> parts) {
   const std::string tmp = path + ".tmp";
 #ifndef _WIN32
   const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0)
     return std::unexpected("UpdateEngine: cannot write '" + tmp + "'");
-  size_t written = 0;
-  while (written < size) {
-    const ssize_t n = ::write(fd, data + written, size - written);
-    if (n < 0) {
-      ::close(fd);
-      return std::unexpected("UpdateEngine: short write to '" + tmp + "'");
+  for (const ByteSpan& part : parts) {
+    size_t written = 0;
+    while (written < part.size) {
+      const ssize_t n = ::write(fd, part.data + written, part.size - written);
+      if (n < 0) {
+        ::close(fd);
+        return std::unexpected("UpdateEngine: short write to '" + tmp + "'");
+      }
+      written += static_cast<size_t>(n);
     }
-    written += static_cast<size_t>(n);
   }
   if (::fsync(fd) != 0) {
     ::close(fd);
@@ -72,10 +82,12 @@ std::expected<void, std::string> WriteFileDurable(const std::string& path,
     std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
     if (!out)
       return std::unexpected("UpdateEngine: cannot write '" + tmp + "'");
-    out.write(reinterpret_cast<const char*>(data),
-              static_cast<std::streamsize>(size));
-    if (!out)
-      return std::unexpected("UpdateEngine: short write to '" + tmp + "'");
+    for (const ByteSpan& part : parts) {
+      out.write(reinterpret_cast<const char*>(part.data),
+                static_cast<std::streamsize>(part.size));
+      if (!out)
+        return std::unexpected("UpdateEngine: short write to '" + tmp + "'");
+    }
   }
   if (std::rename(tmp.c_str(), path.c_str()) != 0)
     return std::unexpected("UpdateEngine: atomic rename to '" + path +
@@ -84,12 +96,27 @@ std::expected<void, std::string> WriteFileDurable(const std::string& path,
 #endif
 }
 
+std::expected<void, std::string> WriteFileDurable(const std::string& path,
+                                                  const uint8_t* data,
+                                                  size_t size) {
+  return WriteFileDurable(path, {ByteSpan{data, size}});
+}
+
 std::expected<std::vector<uint8_t>, std::string> ReadFileBytes(
     const std::string& path) {
   std::ifstream f(path, std::ios::binary);
   if (!f) return std::unexpected("UpdateEngine: cannot open '" + path + "'");
-  return std::vector<uint8_t>((std::istreambuf_iterator<char>(f)),
-                              std::istreambuf_iterator<char>());
+  f.seekg(0, std::ios::end);
+  const std::streamoff end = f.tellg();
+  if (end < 0)
+    return std::unexpected("UpdateEngine: cannot stat '" + path + "'");
+  f.seekg(0);
+  std::vector<uint8_t> bytes(static_cast<size_t>(end));
+  if (!bytes.empty() &&
+      !f.read(reinterpret_cast<char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size())))
+    return std::unexpected("UpdateEngine: cannot read '" + path + "'");
+  return bytes;
 }
 
 // --- Overflow-safe validation of file-supplied offsets and sizes -------------
@@ -259,6 +286,7 @@ std::expected<void, std::string> ValidateInstruction(
                          std::to_string(ins.opcode));
 }
 
+
 }  // namespace
 
 UpdateEngine::~UpdateEngine() {
@@ -292,10 +320,9 @@ std::expected<void, std::string> UpdateEngine::LoadFromMemory(
 
 std::expected<void, std::string> UpdateEngine::LoadFromFile(
     const std::string& path) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) return std::unexpected("UpdateEngine: cannot open '" + path + "'");
-  owned_plan_.assign((std::istreambuf_iterator<char>(f)),
-                     std::istreambuf_iterator<char>());
+  auto bytes = ReadFileBytes(path);
+  if (!bytes) return std::unexpected(bytes.error());
+  owned_plan_ = std::move(*bytes);
   plan_ = owned_plan_.data();
   plan_size_ = owned_plan_.size();
   return Initialize();
@@ -770,14 +797,23 @@ std::expected<void, std::string> UpdateEngine::CommitToModel(
           "model are out of sync");
     const auto* delta =
         reinterpret_cast<const float*>(arena_ + e.arena_offset);
-    // The SMF data section is 64-aligned, but go through memcpy anyway: the
-    // commit path has no business assuming the container's alignment.
-    for (uint64_t i = 0; i < e.byte_size / sizeof(float); ++i) {
-      float w;
-      uint8_t* at = bytes->data() + e.smf_data_offset + i * sizeof(float);
-      std::memcpy(&w, at, sizeof(float));
-      w += delta[i];
-      std::memcpy(at, &w, sizeof(float));
+    const uint64_t count = e.byte_size / sizeof(float);
+    uint8_t* base = bytes->data() + e.smf_data_offset;
+    if (reinterpret_cast<uintptr_t>(base) % alignof(float) == 0) {
+      // The SMF data section is 64-aligned, so this is the path that runs in
+      // practice: a straight vectorizable add over the weight range.
+      auto* w = reinterpret_cast<float*>(base);
+      for (uint64_t i = 0; i < count; ++i) w[i] += delta[i];
+    } else {
+      // Fallback for a container that broke the alignment contract: memcpy
+      // keeps the patch correct regardless.
+      for (uint64_t i = 0; i < count; ++i) {
+        float w;
+        uint8_t* at = base + i * sizeof(float);
+        std::memcpy(&w, at, sizeof(float));
+        w += delta[i];
+        std::memcpy(at, &w, sizeof(float));
+      }
     }
   }
 
@@ -818,11 +854,13 @@ std::expected<void, std::string> UpdateEngine::SaveCheckpoint(
   h.persistent_size = header_.persistent_size;
   h.payload_hash = up::Fnv1a64(arena_, header_.persistent_size);
 
-  std::vector<uint8_t> blob(sizeof(h) + header_.persistent_size);
-  std::memcpy(blob.data(), &h, sizeof(h));
-  std::memcpy(blob.data() + sizeof(h), arena_, header_.persistent_size);
   // Durable: a checkpoint that can vanish in a power cut is not a checkpoint.
-  return WriteFileDurable(path, blob.data(), blob.size());
+  // Gather-write header + persistent segment straight from the arena — no
+  // concatenated staging blob, so periodic checkpointing costs no extra
+  // allocation or copy of the (potentially large) optimizer state.
+  return WriteFileDurable(
+      path, {ByteSpan{reinterpret_cast<const uint8_t*>(&h), sizeof(h)},
+             ByteSpan{arena_, header_.persistent_size}});
 }
 
 std::expected<void, std::string> UpdateEngine::LoadCheckpoint(

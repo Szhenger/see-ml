@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <sstream>
 
 namespace seecpp::utility {
 
@@ -72,16 +73,21 @@ void Logger::Log(LogLevel level, std::string_view msg, const std::source_locatio
             color = "\033[0m";  label = "[?????]"; out = &std::cerr; break;
     }
 
-    // Mutex guard locks only the actual formatting and stream output
-    std::lock_guard<std::mutex> lock(g_log_mutex);
-
-    *out << color
+    // Format the whole line outside the lock: contending threads then
+    // serialize only on the final buffered write, not on time formatting
+    // and a dozen operator<< calls.
+    std::ostringstream line;
+    line << color
          << label << ' '
          << std::put_time(&tm_buf, "%H:%M:%S") << ' '
          << loc.file_name() << ':' << loc.line()
          << " — " << msg
          << "\033[0m" << '\n';  // '\n' avoids per-line flush bottleneck
+    const std::string rendered = std::move(line).str();
 
+    std::lock_guard<std::mutex> lock(g_log_mutex);
+    out->write(rendered.data(),
+               static_cast<std::streamsize>(rendered.size()));
     if (level == LogLevel::kError) {
         out->flush();
     }

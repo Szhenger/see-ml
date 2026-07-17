@@ -166,7 +166,12 @@ void GradientCheck(const CompiledUpdate& compiled, UpdateEngine& engine,
       const double denom =
           std::max(1e-4, std::fabs(numeric) + std::fabs(analytic));
       const double rel = std::fabs(numeric - analytic) / denom;
-      if (rel >= tol)
+      // The loss is a single f32 (ulp ~1e-7 near 1.0), so the central
+      // difference cannot resolve gradients below ~ulp/(2*eps) ≈ 5e-5.
+      // Accept absolute disagreement inside that estimator noise floor;
+      // demand relative agreement for everything the estimator can see.
+      const double noise_floor = 1e-4;
+      if (std::fabs(numeric - analytic) >= noise_floor && rel >= tol)
         ADD_FAILURE("param " + p.id + "[" + std::to_string(i) +
                     "]: analytic " + std::to_string(analytic) + " vs numeric " +
                     std::to_string(numeric));

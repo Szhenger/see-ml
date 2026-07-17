@@ -41,10 +41,23 @@ std::string EmbedPlanAsTU(const std::vector<uint8_t>& plan) {
       "extern const size_t kSeemlUpdatePlanSize;\n\n"
       "const unsigned char kSeemlUpdatePlan[] __attribute__((aligned(64))) = "
       "{\n";
-  char buf[8];
+  // Manual decimal emission: a snprintf call per byte dominates emission
+  // time once plans reach megabytes (frozen weights live in the blob).
+  // Three digit appends and a comma beat the formatter by an order of
+  // magnitude and need no format-string parsing.
   for (size_t i = 0; i < plan.size(); ++i) {
-    std::snprintf(buf, sizeof(buf), "%u,", plan[i]);
-    tu += buf;
+    const unsigned v = plan[i];
+    if (v >= 100) {
+      tu += static_cast<char>('0' + v / 100);
+      tu += static_cast<char>('0' + (v / 10) % 10);
+      tu += static_cast<char>('0' + v % 10);
+    } else if (v >= 10) {
+      tu += static_cast<char>('0' + v / 10);
+      tu += static_cast<char>('0' + v % 10);
+    } else {
+      tu += static_cast<char>('0' + v);
+    }
+    tu += ',';
     if ((i + 1) % 24 == 0) tu += '\n';
   }
   tu += "\n};\nconst size_t kSeemlUpdatePlanSize = sizeof(kSeemlUpdatePlan);\n";

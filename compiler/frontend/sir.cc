@@ -4,7 +4,6 @@
 #include <ostream>
 #include <sstream>
 #include <algorithm>
-#include <stdexcept>
 #include <cassert>
 
 namespace seecpp::sir {
@@ -102,7 +101,9 @@ void Operation::setAttribute(std::string key, AttributeValue val) {
 }
 
 const AttributeValue* Operation::getAttribute(std::string_view key) const {
-    if (auto it = attributes_.find(std::string(key)); it != attributes_.end())
+    // std::less<> makes the map's find heterogeneous: look up by
+    // string_view directly, no temporary std::string per attribute query.
+    if (auto it = attributes_.find(key); it != attributes_.end())
         return &it->second;
     return nullptr;
 }
@@ -220,6 +221,7 @@ std::unique_ptr<Operation> Block::removeOp(Operation* op) {
 
 bool Block::validate() const {
     std::unordered_set<const Value*> defined;
+    defined.reserve(args_.size() + ops_.size() * 2);  // ~2 results/op typical
     for (const auto& arg : args_) defined.insert(arg.get());
 
     for (const auto& op : ops_) {
@@ -234,14 +236,6 @@ bool Block::validate() const {
 
     is_validated_ = true;
     return true;
-}
-
-void Block::walk(std::function<void(Operation*)> fn) {
-    for (auto& op : ops_) fn(op.get());
-}
-
-void Block::walkReverse(std::function<void(Operation*)> fn) {
-    for (auto it = ops_.rbegin(); it != ops_.rend(); ++it) fn(it->get());
 }
 
 void Block::print(std::ostream& os) const {

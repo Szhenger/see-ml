@@ -97,8 +97,21 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "seeml-seeu-dump: cannot open '%s'\n", argv[1]);
     return 1;
   }
-  std::vector<uint8_t> plan((std::istreambuf_iterator<char>(f)),
-                            std::istreambuf_iterator<char>());
+  // Sized single read (plans embed the frozen weights, so they can be MBs).
+  f.seekg(0, std::ios::end);
+  const std::streamoff end = f.tellg();
+  if (end < 0) {
+    std::fprintf(stderr, "seeml-seeu-dump: cannot stat '%s'\n", argv[1]);
+    return 1;
+  }
+  f.seekg(0);
+  std::vector<uint8_t> plan(static_cast<size_t>(end));
+  if (!plan.empty() &&
+      !f.read(reinterpret_cast<char*>(plan.data()),
+              static_cast<std::streamsize>(plan.size()))) {
+    std::fprintf(stderr, "seeml-seeu-dump: cannot read '%s'\n", argv[1]);
+    return 1;
+  }
   if (plan.size() < sizeof(PlanHeader)) {
     std::fprintf(stderr, "seeml-seeu-dump: file smaller than a plan header\n");
     return 1;

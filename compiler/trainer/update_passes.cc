@@ -55,6 +55,7 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
     return std::unexpected("LoraGrafter: no eligible MatMul targets found");
 
   std::vector<GraftedAdapter> adapters;
+  adapters.reserve(targets.size());
   const float scale = spec_.alpha / static_cast<float>(spec_.rank);
 
   size_t adapter_index = 0;
@@ -420,6 +421,7 @@ TrainableAutodiff::Run(sir::Block& block, sir::Value* loss,
   // A value needs a gradient iff it is trainable or is computed from a value
   // that needs one. Everything else — the entire frozen base model and the
   // teacher — is excluded, so no backward compute is ever synthesized for it.
+  ctx.needs.reserve(trainables.size() + block.numOps());
   for (sir::Value* p : trainables) ctx.needs.insert(p);
   block.walk([&](sir::Operation* op) {
     bool any = false;
@@ -442,6 +444,7 @@ TrainableAutodiff::Run(sir::Block& block, sir::Value* loss,
 
   // --- Reverse topological sweep over a snapshot of the primal ops. -------
   std::vector<sir::Operation*> primal_ops;
+  primal_ops.reserve(block.numOps());
   block.walk([&](sir::Operation* op) { primal_ops.push_back(op); });
 
   const auto& registry = VjpRegistry();
@@ -469,6 +472,7 @@ TrainableAutodiff::Run(sir::Block& block, sir::Value* loss,
 
   // --- Collect the parameter gradients. ------------------------------------
   std::unordered_map<sir::Value*, sir::Value*> param_grads;
+  param_grads.reserve(trainables.size());
   for (sir::Value* p : trainables) {
     sir::Value* g = ctx.GradOf(p);
     if (!g)

@@ -133,6 +133,7 @@ bool ParseF32(const std::string& s, float* out) {
 
 std::string JsonEscape(const std::string& s) {
   std::string out;
+  out.reserve(s.size() + 8);  // most names escape nothing
   for (char c : s) {
     if (c == '"' || c == '\\') out += '\\';
     out += c;

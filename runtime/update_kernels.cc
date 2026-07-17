@@ -3,6 +3,16 @@
 #include <cmath>
 #include <cstring>
 
+// No kernel is ever invoked with overlapping source/destination buffers
+// (the compiler's arena allocator guarantees it), so tell the optimizer:
+// restrict-qualified pointers let the inner loops vectorize without runtime
+// alias checks.
+#if defined(_MSC_VER)
+#define SEEML_RESTRICT __restrict
+#else
+#define SEEML_RESTRICT __restrict__
+#endif
+
 namespace seeml::update_rt::kernels {
 
 namespace {
@@ -18,22 +28,88 @@ inline size_t MinZ(size_t a, size_t b) { return a < b ? a : b; }
 
 // Shared blocked core: C[M,N] (+)= alpha * A[M,K] @ B[K,N] with B row-major.
 // GemmNN/GemmAccNN/GemmTN and the q8 variants all reduce to this loop nest.
+// The k loop is unrolled 4-wide so each pass over the C row folds in four B
+// rows: 4x fewer C load/store round-trips per FLOP, and four independent
+// multiply chains for the vectorizer to interleave. A/B/C must not overlap
+// (guaranteed by the arena allocator, which never reuses an operand's slot
+// for a result born at the same instruction).
 template <typename BType>
-void BlockedNN(const float* A, const BType* B, float* C, size_t M, size_t N,
-               size_t K, float alpha, size_t a_stride, bool a_transposed) {
+void BlockedNN(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
+               float* SEEML_RESTRICT C, size_t M, size_t N, size_t K,
+               float alpha, size_t a_stride, bool a_transposed) {
+  auto a_at = [&](size_t k, size_t m) {
+    return a_transposed ? A[k * a_stride + m] : A[m * a_stride + k];
+  };
   for (size_t k0 = 0; k0 < K; k0 += kTileK) {
     const size_t k1 = MinZ(k0 + kTileK, K);
     for (size_t n0 = 0; n0 < N; n0 += kTileN) {
       const size_t n1 = MinZ(n0 + kTileN, N);
       for (size_t m = 0; m < M; ++m) {
-        float* c_row = C + m * N;
-        for (size_t k = k0; k < k1; ++k) {
-          const float a =
-              alpha * (a_transposed ? A[k * a_stride + m] : A[m * a_stride + k]);
-          const BType* b_row = B + k * N;
+        float* SEEML_RESTRICT c_row = C + m * N;
+        size_t k = k0;
+        for (; k + 4 <= k1; k += 4) {
+          const float a0 = alpha * a_at(k + 0, m);
+          const float a1 = alpha * a_at(k + 1, m);
+          const float a2 = alpha * a_at(k + 2, m);
+          const float a3 = alpha * a_at(k + 3, m);
+          const BType* SEEML_RESTRICT b0 = B + (k + 0) * N;
+          const BType* SEEML_RESTRICT b1 = B + (k + 1) * N;
+          const BType* SEEML_RESTRICT b2 = B + (k + 2) * N;
+          const BType* SEEML_RESTRICT b3 = B + (k + 3) * N;
+          for (size_t n = n0; n < n1; ++n)
+            c_row[n] += a0 * static_cast<float>(b0[n]) +
+                        a1 * static_cast<float>(b1[n]) +
+                        a2 * static_cast<float>(b2[n]) +
+                        a3 * static_cast<float>(b3[n]);
+        }
+        for (; k < k1; ++k) {
+          const float a = alpha * a_at(k, m);
+          const BType* SEEML_RESTRICT b_row = B + k * N;
           for (size_t n = n0; n < n1; ++n)
             c_row[n] += a * static_cast<float>(b_row[n]);
         }
+      }
+    }
+  }
+}
+
+// Dot-product core shared by GemmNT and GemmNTQ8: C[m,n] = A row · B row.
+// Four output columns per pass reuse the streamed A row from L1 four times
+// and run four independent accumulator chains.
+template <typename BType>
+void BlockedNT(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
+               float* SEEML_RESTRICT C, size_t M, size_t N, size_t K,
+               float alpha) {
+  for (size_t n0 = 0; n0 < N; n0 += kTileN) {
+    const size_t n1 = MinZ(n0 + kTileN, N);
+    for (size_t m = 0; m < M; ++m) {
+      const float* SEEML_RESTRICT a_row = A + m * K;
+      size_t n = n0;
+      for (; n + 4 <= n1; n += 4) {
+        const BType* SEEML_RESTRICT b0 = B + (n + 0) * K;
+        const BType* SEEML_RESTRICT b1 = B + (n + 1) * K;
+        const BType* SEEML_RESTRICT b2 = B + (n + 2) * K;
+        const BType* SEEML_RESTRICT b3 = B + (n + 3) * K;
+        float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
+        for (size_t k = 0; k < K; ++k) {
+          const float a = a_row[k];
+          acc0 += a * static_cast<float>(b0[k]);
+          acc1 += a * static_cast<float>(b1[k]);
+          acc2 += a * static_cast<float>(b2[k]);
+          acc3 += a * static_cast<float>(b3[k]);
+        }
+        float* c_at = C + m * N + n;
+        c_at[0] = alpha * acc0;
+        c_at[1] = alpha * acc1;
+        c_at[2] = alpha * acc2;
+        c_at[3] = alpha * acc3;
+      }
+      for (; n < n1; ++n) {
+        const BType* SEEML_RESTRICT b_row = B + n * K;
+        float acc = 0.0f;
+        for (size_t k = 0; k < K; ++k)
+          acc += a_row[k] * static_cast<float>(b_row[k]);
+        C[m * N + n] = alpha * acc;
       }
     }
   }
@@ -49,20 +125,7 @@ void GemmNN(const float* A, const float* B, float* C, size_t M, size_t N,
 
 void GemmNT(const float* A, const float* B, float* C, size_t M, size_t N,
             size_t K) {
-  // Both operands stream along K: dot-product form is already cache-friendly;
-  // block N so B panels stay resident across the M loop.
-  for (size_t n0 = 0; n0 < N; n0 += kTileN) {
-    const size_t n1 = MinZ(n0 + kTileN, N);
-    for (size_t m = 0; m < M; ++m) {
-      const float* a_row = A + m * K;
-      for (size_t n = n0; n < n1; ++n) {
-        const float* b_row = B + n * K;
-        float acc = 0.0f;
-        for (size_t k = 0; k < K; ++k) acc += a_row[k] * b_row[k];
-        C[m * N + n] = acc;
-      }
-    }
-  }
+  BlockedNT(A, B, C, M, N, K, 1.0f);
 }
 
 void GemmTN(const float* A, const float* B, float* C, size_t M, size_t N,
@@ -84,19 +147,7 @@ void GemmNNQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
 
 void GemmNTQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
               size_t K, float scale) {
-  for (size_t n0 = 0; n0 < N; n0 += kTileN) {
-    const size_t n1 = MinZ(n0 + kTileN, N);
-    for (size_t m = 0; m < M; ++m) {
-      const float* a_row = A + m * K;
-      for (size_t n = n0; n < n1; ++n) {
-        const int8_t* b_row = B + n * K;
-        float acc = 0.0f;
-        for (size_t k = 0; k < K; ++k)
-          acc += a_row[k] * static_cast<float>(b_row[k]);
-        C[m * N + n] = scale * acc;
-      }
-    }
-  }
+  BlockedNT(A, B, C, M, N, K, scale);
 }
 
 
@@ -325,18 +376,27 @@ void SgdStep(float* p, const float* g, size_t n, float lr,
   for (size_t i = 0; i < n; ++i) p[i] -= lr * (g[i] + weight_decay * p[i]);
 }
 
-void AdamWStep(float* p, const float* g, float* m, float* v, size_t n,
+void AdamWStep(float* SEEML_RESTRICT p, const float* SEEML_RESTRICT g,
+               float* SEEML_RESTRICT m, float* SEEML_RESTRICT v, size_t n,
                float lr, float beta1, float beta2, float eps,
                float weight_decay, uint64_t step) {
-  const float bc1 =
-      1.0f - std::pow(beta1, static_cast<float>(step));
-  const float bc2 =
-      1.0f - std::pow(beta2, static_cast<float>(step));
+  // Hoist everything that is per-step, not per-element: the bias-correction
+  // divides become two multiplies, and the (1-beta) blend factors are
+  // computed once instead of n times.
+  const float inv_bc1 =
+      1.0f / (1.0f - std::pow(beta1, static_cast<float>(step)));
+  const float inv_bc2 =
+      1.0f / (1.0f - std::pow(beta2, static_cast<float>(step)));
+  const float om_b1 = 1.0f - beta1;
+  const float om_b2 = 1.0f - beta2;
   for (size_t i = 0; i < n; ++i) {
-    m[i] = beta1 * m[i] + (1.0f - beta1) * g[i];
-    v[i] = beta2 * v[i] + (1.0f - beta2) * g[i] * g[i];
-    const float m_hat = m[i] / bc1;
-    const float v_hat = v[i] / bc2;
+    const float gi = g[i];
+    const float mi = beta1 * m[i] + om_b1 * gi;
+    const float vi = beta2 * v[i] + om_b2 * gi * gi;
+    m[i] = mi;
+    v[i] = vi;
+    const float m_hat = mi * inv_bc1;
+    const float v_hat = vi * inv_bc2;
     p[i] -= lr * (m_hat / (std::sqrt(v_hat) + eps) + weight_decay * p[i]);
   }
 }

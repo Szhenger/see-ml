@@ -53,10 +53,6 @@ struct ArenaBinding {
   std::vector<uint8_t> rodata;               // packed frozen weights
 };
 
-// -----------------------------------------------------------------------------
-// Frozen-weight quantization (QLoRA-style int8 rodata)
-// -----------------------------------------------------------------------------
-
 /// A frozen weight can be stored as per-tensor symmetric int8 iff every use
 /// is the B operand of a GEMM that has a q8 variant: the student/teacher
 /// forward MatMuls and the dX backward (matmul_nt). Bias vectors, LayerNorm
@@ -141,24 +137,30 @@ uint64_t LinearScanTransients(
     uint64_t start, end;
     size_t free_after;
   };
+  // `active` is kept sorted by start at all times: expiry (erase_if) is
+  // order-preserving and each new block is inserted at its sorted position,
+  // so no per-interval re-sort is needed.
   std::vector<ActiveBlock> active;
+  active.reserve(intervals.size());
   uint64_t high_water = base;
 
   for (const Interval& iv : intervals) {
     std::erase_if(active, [&](const ActiveBlock& ab) {
       return ab.free_after != SIZE_MAX && ab.free_after < iv.start;
     });
-    std::sort(active.begin(), active.end(),
-              [](const ActiveBlock& a, const ActiveBlock& b) {
-                return a.start < b.start;
-              });
     uint64_t offset = base;
     for (const ActiveBlock& ab : active) {
       if (offset + iv.bytes <= ab.start) break;  // first fit
       offset = std::max(offset, ab.end);
     }
     refs_out[iv.value] = MakeArenaRef(offset);
-    active.push_back({offset, offset + iv.bytes, iv.end});
+    const ActiveBlock fresh{offset, offset + iv.bytes, iv.end};
+    active.insert(std::upper_bound(active.begin(), active.end(), fresh,
+                                   [](const ActiveBlock& a,
+                                      const ActiveBlock& b) {
+                                     return a.start < b.start;
+                                   }),
+                  fresh);
     high_water = std::max(high_water, offset + iv.bytes);
   }
   return high_water;
@@ -257,6 +259,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
     const std::vector<sir::Operation*>& ops, const ResolveFn& resolve,
     const std::unordered_map<const sir::Value*, float>& quant_scales) {
   std::vector<UpdateInstruction> instrs;
+  instrs.reserve(ops.size());  // ~1 instruction per non-storage op
   std::string error;
 
   auto ref = [&](const sir::Value* v) -> uint64_t {
@@ -601,6 +604,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
   // Running it computes the current validation loss without touching any
   // parameter — the basis of the runtime's regression gate.
   std::vector<sir::Operation*> primal_ops;
+  primal_ops.reserve(block.numOps());
   block.walk([&](sir::Operation* op) { primal_ops.push_back(op); });
 
   // --- 4. Reverse-mode autodiff pruned to the adapters. ---------------------
@@ -672,6 +676,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
                            std::string(v->id()) + "'");
   };
   std::vector<sir::Operation*> train_ops;
+  train_ops.reserve(block.numOps());
   block.walk([&](sir::Operation* op) { train_ops.push_back(op); });
   auto train_instrs = LowerOps(train_ops, resolve_train, quant_scales);
   if (!train_instrs) return std::unexpected(train_instrs.error());
@@ -687,6 +692,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
                            std::string(v->id()) + "'");
   };
   std::vector<sir::Operation*> merge_ops;
+  merge_ops.reserve(merge->block->numOps());
   merge->block->walk([&](sir::Operation* op) { merge_ops.push_back(op); });
   auto merge_instrs = LowerOps(merge_ops, resolve_merge, quant_scales);
   if (!merge_instrs) return std::unexpected(merge_instrs.error());
