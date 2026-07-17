@@ -25,14 +25,33 @@ void GemmTN(const float* A, const float* B, float* C, size_t M, size_t N,
 void GemmAccNN(const float* A, const float* B, float* C, size_t M, size_t N,
                size_t K, float alpha);       // C += alpha * A @ B
 
+// --- Quantized GEMM: B is per-tensor symmetric int8, dequantized on the fly.
+void GemmNNQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
+              size_t K, float scale);       // C = A[M,K] @ (scale*B)[K,N]
+void GemmNTQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
+              size_t K, float scale);       // C = A[M,K] @ (scale*B)[N,K]^T
+
 // --- Elementwise / broadcast -------------------------------------------------
 void AddEW(const float* x, const float* y, float* out, size_t n);
+void MulEW(const float* x, const float* y, float* out, size_t n);
 void AddBias(const float* x, const float* b, float* out, size_t rows,
              size_t cols);
 void ReluFwd(const float* x, float* out, size_t n);
 void ReluBwd(const float* dy, const float* x, float* dx, size_t n);
+void GeluFwd(const float* x, float* out, size_t n);   // tanh approximation
+void GeluBwd(const float* dy, const float* x, float* dx, size_t n);
+void SiluFwd(const float* x, float* out, size_t n);   // x * sigmoid(x)
+void SiluBwd(const float* dy, const float* x, float* dx, size_t n);
 void Scale(const float* x, float* out, float alpha, size_t n);
 void ReduceRows(const float* dy, float* db, size_t rows, size_t cols);
+
+// --- LayerNorm over the last dim of x[N,D], affine gamma/beta[D] --------------
+// Forward caches per-row mean and reciprocal stddev for the backward kernel.
+void LayerNormFwd(const float* x, const float* gamma, const float* beta,
+                  float* y, float* mean, float* rstd, size_t rows, size_t cols);
+void LayerNormBwd(const float* dy, const float* x, const float* gamma,
+                  const float* mean, const float* rstd, float* dx, size_t rows,
+                  size_t cols);
 
 // --- Losses ------------------------------------------------------------------
 // loss = -(1/N) sum_n log softmax(logits)_n[label_n]; probs cached for bwd.
@@ -53,6 +72,10 @@ void KLDistillFwd(const float* s_logits, const float* t_logits, float* loss,
                   float* p_s, float* p_t, size_t N, size_t C, float T);
 void KLDistillBwd(const float* p_s, const float* p_t, const float* seed,
                   float* dlogits, size_t N, size_t C, float T);
+
+// --- Gradient conditioning ---------------------------------------------------
+// Per-tensor L2 norm clip in place: g *= min(1, max_norm / ||g||_2).
+void ClipNorm(float* g, size_t n, float max_norm);
 
 // --- Optimizers (in-place) ---------------------------------------------------
 void SgdStep(float* p, const float* g, size_t n, float lr, float weight_decay);

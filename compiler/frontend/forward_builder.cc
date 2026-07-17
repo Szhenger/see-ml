@@ -84,16 +84,73 @@ std::expected<sir::Value*, std::string> BuildForward(
                                           sir::DataType::F32, (*x)->shape());
         break;
       }
-      case SmfOpKind::kRelu: {
+      case SmfOpKind::kRelu:
+      case SmfOpKind::kGelu:
+      case SmfOpKind::kSilu: {
+        const char* mnemonic = op.kind == SmfOpKind::kRelu ? "sc_high.relu"
+                               : op.kind == SmfOpKind::kGelu
+                                   ? "sc_high.gelu"
+                                   : "sc_high.silu";
         if (op.inputs.size() != 1)
-          return std::unexpected("UpdateCompiler: Relu '" + op.name +
+          return std::unexpected("UpdateCompiler: '" + op.name +
                                  "' needs 1 input");
         auto x = resolve(op.inputs[0]);
         if (!x) return std::unexpected(x.error());
-        sir::Operation* r = block.appendOp("sc_high.relu");
+        sir::Operation* r = block.appendOp(mnemonic);
         r->addOperand(*x);
         values[op.output] = r->addResult(prefix + op.output,
                                          sir::DataType::F32, (*x)->shape());
+        break;
+      }
+      case SmfOpKind::kMul: {
+        if (op.inputs.size() != 2)
+          return std::unexpected("UpdateCompiler: Mul '" + op.name +
+                                 "' needs 2 inputs");
+        auto x = resolve(op.inputs[0]);
+        if (!x) return std::unexpected(x.error());
+        auto y = resolve(op.inputs[1]);
+        if (!y) return std::unexpected(y.error());
+        if ((*x)->shape() != (*y)->shape())
+          return std::unexpected("UpdateCompiler: Mul '" + op.name +
+                                 "' operand shapes disagree");
+        sir::Operation* mul = block.appendOp("sc_high.mul");
+        mul->addOperand(*x);
+        mul->addOperand(*y);
+        values[op.output] = mul->addResult(prefix + op.output,
+                                           sir::DataType::F32, (*x)->shape());
+        break;
+      }
+      case SmfOpKind::kLayerNorm: {
+        if (op.inputs.size() != 3)
+          return std::unexpected("UpdateCompiler: LayerNorm '" + op.name +
+                                 "' needs 3 inputs (x, gamma, beta)");
+        auto x = resolve(op.inputs[0]);
+        if (!x) return std::unexpected(x.error());
+        auto gamma = resolve(op.inputs[1]);
+        if (!gamma) return std::unexpected(gamma.error());
+        auto beta = resolve(op.inputs[2]);
+        if (!beta) return std::unexpected(beta.error());
+        if ((*x)->shape().dims.size() != 2)
+          return std::unexpected("UpdateCompiler: LayerNorm '" + op.name +
+                                 "' input must be rank-2");
+        const int64_t d = (*x)->shape().dims.back();
+        for (const sir::Value* affine : {*gamma, *beta})
+          if (affine->shape().dims.size() != 1 ||
+              affine->shape().dims[0] != d)
+            return std::unexpected("UpdateCompiler: LayerNorm '" + op.name +
+                                   "' gamma/beta width does not match input");
+        const int64_t rows = (*x)->shape().dims.at(0);
+        sir::Operation* ln = block.appendOp("sc_high.layer_norm");
+        ln->addOperand(*x);
+        ln->addOperand(*gamma);
+        ln->addOperand(*beta);
+        values[op.output] = ln->addResult(prefix + op.output,
+                                          sir::DataType::F32, (*x)->shape());
+        // Row statistics cached for the backward kernel.
+        ln->addResult(prefix + op.output + ".mean", sir::DataType::F32,
+                      sir::Shape{rows});
+        ln->addResult(prefix + op.output + ".rstd", sir::DataType::F32,
+                      sir::Shape{rows});
         break;
       }
     }

@@ -23,9 +23,12 @@
 //                             ordinary SIR ops, declaring persistent moment
 //                             state so one program execution = one full
 //                             training step (fwd + bwd + update).
-//   4. MergeBuilder         — builds the separate merge program that folds the
-//                             trained adapters back into the base weights:
-//                             W' = W + (α/r)·A@B.
+//   4. MergeBuilder         — builds the separate merge program that
+//                             materializes each adapter's weight delta,
+//                             Δ = (α/r)·A@B; commit adds Δ to the pristine
+//                             f32 weights inside the model file itself, so
+//                             the merge never needs the frozen base (which
+//                             may live in rodata as quantized int8).
 //
 // Op dialect used (matching sir.h's mnemonic prefixes):
 //   sc_mem.weight  frozen base/teacher weight (rodata); attrs: smf_offset
@@ -85,15 +88,15 @@ class OptimizerSynthesizer {
   OptimizerSpec spec_;
 };
 
-/// The merge program lives in its own block. Its operands alias storage owned
-/// by the training block (W in rodata, A/B in the persistent segment), so the
-/// builder returns an alias map that lowering uses to resolve those mirrors
-/// to the training program's already-bound offsets.
+/// The merge program lives in its own block. Its A/B operands alias storage
+/// owned by the training block (the persistent segment), so the builder
+/// returns an alias map that lowering uses to resolve those mirrors to the
+/// training program's already-bound offsets.
 struct MergeProgram {
   std::unique_ptr<seecpp::sir::Block> block;
   // mirror value in the merge block -> original value in the training block
   std::unordered_map<seecpp::sir::Value*, seecpp::sir::Value*> aliases;
-  // merged output value -> the adapter it belongs to (for the emit table)
+  // delta output value -> the adapter it belongs to (for the emit table)
   std::vector<std::pair<seecpp::sir::Value*, const GraftedAdapter*>> outputs;
 };
 

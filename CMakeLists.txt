@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(seeml VERSION 1.1.0 LANGUAGES CXX)
+project(seeml VERSION 1.2.0 LANGUAGES CXX)
 
 # ==============================================================================
 # Global Configuration
@@ -15,6 +15,18 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 elseif(MSVC)
     add_compile_options(/W4 /WX)
 endif()
+
+# CI hardening: -DSEEML_SANITIZE=address;undefined (or thread).
+set(SEEML_SANITIZE "" CACHE STRING "Semicolon-separated sanitizer list")
+if(SEEML_SANITIZE)
+    string(REPLACE ";" "," _san "${SEEML_SANITIZE}")
+    add_compile_options(-fsanitize=${_san} -fno-omit-frame-pointer -g)
+    add_link_options(-fsanitize=${_san})
+endif()
+
+# libFuzzer harnesses over the binary-format parsers (clang only):
+# -DSEEML_FUZZ=ON builds seeml_fuzz_formats.
+option(SEEML_FUZZ "Build the libFuzzer format-parser harness" OFF)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
@@ -62,6 +74,8 @@ add_library(seeml_update_rt STATIC
 add_executable(seeml-update-compile tool/seeml_update_compile.cc)
 target_link_libraries(seeml-update-compile PRIVATE seeml_update)
 
+add_executable(seeml-seeu-dump tool/seeml_seeu_dump.cc)
+
 # ==============================================================================
 # Tests
 # ==============================================================================
@@ -70,3 +84,10 @@ enable_testing()
 add_executable(seeml_update_tests test/test_update_system.cc)
 target_link_libraries(seeml_update_tests PRIVATE seeml_update seeml_update_rt)
 add_test(NAME update_system COMMAND seeml_update_tests)
+
+if(SEEML_FUZZ)
+    add_executable(seeml_fuzz_formats test/fuzz_binary_formats.cc)
+    target_compile_options(seeml_fuzz_formats PRIVATE -fsanitize=fuzzer,address)
+    target_link_options(seeml_fuzz_formats PRIVATE -fsanitize=fuzzer,address)
+    target_link_libraries(seeml_fuzz_formats PRIVATE seeml_update seeml_update_rt)
+endif()

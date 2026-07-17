@@ -35,14 +35,27 @@
 namespace seeml::update {
 
 inline constexpr uint32_t kSmfMagic = 0x31464D53;  // "SMF1" little-endian
-inline constexpr uint32_t kSmfVersion = 1;
+// v2 extends the op-kind vocabulary (Gelu/Silu/Mul/LayerNorm); the byte
+// layout is unchanged. Readers accept v1 files; the writer emits v2.
+inline constexpr uint32_t kSmfVersion = 2;
+inline constexpr uint32_t kSmfMinVersion = 1;
 
 // SMF is read/written by memcpy of host integers; the documented on-disk
 // contract is little-endian. Big-endian hosts need byte-swapping I/O.
 static_assert(std::endian::native == std::endian::little,
               "SMF serialization assumes a little-endian host.");
 
-enum class SmfOpKind : uint8_t { kMatMul = 0, kAddBias = 1, kRelu = 2 };
+enum class SmfOpKind : uint8_t {
+  kMatMul = 0,
+  kAddBias = 1,
+  kRelu = 2,
+  // v2 vocabulary.
+  kGelu = 3,       // tanh-approximation GELU
+  kSilu = 4,       // x * sigmoid(x)
+  kMul = 5,        // elementwise product of two same-shape activations
+  kLayerNorm = 6,  // inputs: {x, gamma, beta}; normalizes the last dim
+};
+inline constexpr uint8_t kSmfOpKindMax = 6;
 
 struct SmfTensor {
   std::string name;
@@ -65,6 +78,11 @@ struct SmfModel {
   std::string output_name;
   std::vector<SmfTensor> tensors;
   std::vector<SmfOp> ops;  // topologically ordered
+
+  // Fnv1a64 of the file bytes this model was loaded from (source/hash.h).
+  // 0 for models constructed in memory. Compiled into the plan so the
+  // runtime refuses to patch a model file the plan was not built against.
+  uint64_t content_hash = 0;
 
   const SmfTensor* FindTensor(std::string_view name) const;
 };

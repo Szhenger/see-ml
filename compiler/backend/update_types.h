@@ -35,6 +35,11 @@ enum class LossKind : uint8_t {
 
 enum class OptimizerKind : uint8_t { kSgd = 0, kAdamW = 1 };
 
+// Learning-rate schedule applied by the runtime on top of OptimizerSpec::lr.
+// Warmup ramps linearly from 0 over `warmup_steps`; cosine then decays to
+// lr * min_lr_factor across the plan's default_steps horizon.
+enum class LrSchedule : uint32_t { kConstant = 0, kCosineWithWarmup = 1 };
+
 struct LoRASpec {
   int64_t rank = 8;
   float alpha = 16.0f;
@@ -51,6 +56,12 @@ struct OptimizerSpec {
   float beta2 = 0.999f;
   float eps = 1e-8f;
   float weight_decay = 0.01f;
+  // Per-tensor L2 gradient clipping applied before each optimizer step;
+  // 0 disables (no clip instructions are emitted).
+  float clip_norm = 0.0f;
+  LrSchedule lr_schedule = LrSchedule::kConstant;
+  uint64_t warmup_steps = 0;
+  float min_lr_factor = 0.0f;  // cosine floor as a fraction of lr
 };
 
 struct UpdateConfig {
@@ -61,6 +72,10 @@ struct UpdateConfig {
   LoRASpec lora;
   OptimizerSpec optimizer;
   uint64_t default_steps = 1000;
+  // Quantize frozen base/teacher weights that feed MatMuls to per-tensor
+  // symmetric int8 in the plan's rodata (QLoRA-style). Adapters, gradients,
+  // and all activations stay f32; the source .smf on disk is untouched.
+  bool quantize_base = false;
   // Test hook: when false, the plan contains forward+backward only (no
   // parameter mutation), enabling finite-difference gradient verification.
   bool emit_optimizer = true;
@@ -71,7 +86,10 @@ struct UpdateConfig {
 // -----------------------------------------------------------------------------
 
 inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
-inline constexpr uint32_t kSeeuVersion = 1;
+// v2: eval program section, plan/model integrity hashes, LR schedule fields,
+// int8-quantized rodata opcodes. v1 plans are not accepted by the v2 runtime
+// (they lack the integrity contract); recompile the plan.
+inline constexpr uint32_t kSeeuVersion = 2;
 
 // The plan is serialized by memcpy of host integers/structs; the documented
 // on-disk contract is little-endian. Big-endian hosts need byte-swapping I/O.
@@ -119,6 +137,23 @@ enum class OpCode : uint16_t {
   // Utility.
   kFill = 19,  // in: dst, f32 value bits;   out[0] = count
   kCopy = 20,  // in: src, dst;              out[0] = count (floats)
+  // Elementwise (v2).
+  kMulEW = 21,    // out = x * y             in: x, y, out; out[0] = count
+  kGeluFwd = 22,  // out = gelu(x)           in: x, out;    out[0] = count
+  kGeluBwd = 23,  // dx = dy * gelu'(x)      in: dy, x, dx; out[0] = count
+  kSiluFwd = 24,  // out = x * sigmoid(x)    in: x, out;    out[0] = count
+  kSiluBwd = 25,  // dx = dy * silu'(x)      in: dy, x, dx; out[0] = count
+  // LayerNorm over the last dim of x[N,D] with affine gamma/beta[D] (v2).
+  kLayerNormFwd = 26,  // in: x, gamma, beta, y; out[0]=N<<32|D,
+                       // out[1]=mean ref [N], out[2]=rstd ref [N]
+  kLayerNormBwd = 27,  // in: dy, x, gamma, dx;  out[0]=mean ref,
+                       // out[1]=rstd ref, out[2]=N<<32|D
+  // Training utilities (v2).
+  kClipNorm = 28,  // g *= min(1, max/||g||)  in: g, max f32 bits; out[0]=count
+  // Quantized frozen weights (v2): B is per-tensor symmetric int8 in rodata,
+  // dequantized on the fly as scale * q. Layouts mirror the f32 GEMMs.
+  kGemmNNQ8 = 29,  // C = A @ dq(B);    in: A, Bq8, C, scale bits; out=M,N,K
+  kGemmNTQ8 = 30,  // C = A @ dq(B)^T;  in: A, Bq8, C, scale bits; out=M,N,K
 };
 
 #pragma pack(push, 1)
@@ -175,15 +210,42 @@ struct PlanHeader {
 
   uint64_t batch = 0;
   uint64_t default_steps = 0;
+
+  // --- v2: evaluation program (forward + loss only, no parameter mutation).
+  // Used for held-out validation gating; shares the training arena binding.
+  uint64_t eval_instr_offset = 0;
+  uint64_t eval_instr_count = 0;
+
+  // --- v2: integrity binding (Fnv1a64, source/hash.h).
+  // Hash of the source .smf file this plan was compiled from; CommitToModel
+  // refuses to patch a file whose bytes hash differently. 0 = unbound (the
+  // model was built in memory, not loaded from a file).
+  uint64_t source_model_hash = 0;
+  // Hash of the entire plan blob with this field zeroed; verified on load.
+  // Also the identity that checkpoints bind to.
+  uint64_t plan_hash = 0;
+
+  // --- v2: LR schedule (applied by the runtime on top of `lr`).
+  uint32_t lr_schedule = 0;  // LrSchedule
+  uint32_t pad3 = 0;
+  uint64_t warmup_steps = 0;
+  float min_lr_factor = 0.0f;
+  // Per-tensor gradient clip threshold baked into the instruction stream;
+  // recorded here for introspection (seeu-dump). 0 = no clipping.
+  float clip_norm = 0.0f;
+
   uint64_t reserved[4] = {0, 0, 0, 0};
 };
 
-/// Maps a merged weight in the arena back to the byte range it patches inside
-/// the source model file — the "delta application" table of the update.
+/// Maps a trained weight delta in the arena to the byte range it updates
+/// inside the source model file. Commit applies W'[i] = W[i] + delta[i]
+/// elementwise over the f32 range — the file's pristine weights are the
+/// base, so a quantized plan never bakes its quantization error into the
+/// committed model.
 struct EmitEntry {
   uint64_t smf_data_offset = 0;  // absolute offset of W inside the source .smf
-  uint64_t byte_size = 0;
-  uint64_t arena_offset = 0;     // where the merged W' lives after RunMerge()
+  uint64_t byte_size = 0;        // f32 byte length of the weight
+  uint64_t arena_offset = 0;     // where delta = (α/r)·A@B lives after RunMerge()
 };
 
 #pragma pack(pop)

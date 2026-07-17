@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <random>
 #include <sstream>
@@ -12,6 +14,7 @@
 #include "compiler/frontend/forward_builder.h"
 #include "compiler/frontend/sir.h"
 #include "compiler/trainer/update_passes.h"
+#include "source/hash.h"
 
 namespace seeml::update {
 
@@ -49,6 +52,44 @@ struct ArenaBinding {
   std::vector<ParamInit> params;             // in allocation order
   std::vector<uint8_t> rodata;               // packed frozen weights
 };
+
+// -----------------------------------------------------------------------------
+// Frozen-weight quantization (QLoRA-style int8 rodata)
+// -----------------------------------------------------------------------------
+
+/// A frozen weight can be stored as per-tensor symmetric int8 iff every use
+/// is the B operand of a GEMM that has a q8 variant: the student/teacher
+/// forward MatMuls and the dX backward (matmul_nt). Bias vectors, LayerNorm
+/// affine parameters, and anything feeding another op stay f32.
+std::unordered_map<const sir::Value*, float> SelectQuantizedWeights(
+    sir::Block& block, const GraphBuild& build) {
+  std::unordered_map<const sir::Value*, float> scales;
+  block.walk([&](sir::Operation* op) {
+    if (op->mnemonic() != "sc_mem.weight") return;
+    const sir::Value* v = op->result(0);
+    auto src = build.weight_sources.find(v);
+    if (src == build.weight_sources.end()) return;
+
+    for (const sir::Operation* user : v->users()) {
+      const std::string_view m = user->mnemonic();
+      if (m != "sc_high.matmul" && m != "sc_low.matmul_nt") return;
+      // v must be exactly the weight operand, never the activation side.
+      if (user->numOperands() != 2 || user->operand(1) != v ||
+          user->operand(0) == v)
+        return;
+    }
+
+    const auto* data = reinterpret_cast<const float*>(src->second->data.data());
+    const size_t count = src->second->byte_size / sizeof(float);
+    float max_abs = 0.0f;
+    for (size_t i = 0; i < count; ++i)
+      max_abs = std::max(max_abs, std::fabs(data[i]));
+    // An all-zero weight quantizes to zeros under any scale; 1.0 keeps the
+    // reciprocal finite.
+    scales[v] = max_abs > 0.0f ? max_abs / 127.0f : 1.0f;
+  });
+  return scales;
+}
 
 uint64_t ValueBytes(const sir::Value* v) {
   return AlignUp(v->shape().byteSize(v->dtype()));
@@ -125,7 +166,8 @@ uint64_t LinearScanTransients(
 
 std::expected<ArenaBinding, std::string> BindArena(
     sir::Block& train_block, const GraphBuild& build,
-    const std::unordered_set<const sir::Value*>& pinned) {
+    const std::unordered_set<const sir::Value*>& pinned,
+    const std::unordered_map<const sir::Value*, float>& quant_scales) {
   ArenaBinding binding;
 
   // --- PERSISTENT segment: trainable adapters + optimizer state at offset 0.
@@ -155,15 +197,30 @@ std::expected<ArenaBinding, std::string> BindArena(
   binding.io_end = cursor;
 
   // --- RODATA: pack every frozen weight, dedup-free sequential layout.
+  // Weights selected for quantization pack as per-tensor symmetric int8
+  // (4x smaller); everything else as raw f32.
   train_block.walk([&](sir::Operation* op) {
     if (op->mnemonic() != "sc_mem.weight") return;
     const sir::Value* v = op->result(0);
     auto src = build.weight_sources.find(v);
     if (src == build.weight_sources.end()) return;  // caught below
     const uint64_t offset = AlignUp(binding.rodata.size());
-    binding.rodata.resize(offset + src->second->byte_size, 0);
-    std::memcpy(binding.rodata.data() + offset, src->second->data.data(),
-                src->second->byte_size);
+    if (auto q = quant_scales.find(v); q != quant_scales.end()) {
+      const auto* data =
+          reinterpret_cast<const float*>(src->second->data.data());
+      const size_t count = src->second->byte_size / sizeof(float);
+      binding.rodata.resize(offset + count, 0);
+      auto* dst = reinterpret_cast<int8_t*>(binding.rodata.data() + offset);
+      const float inv_scale = 1.0f / q->second;
+      for (size_t i = 0; i < count; ++i) {
+        const float r = std::round(data[i] * inv_scale);
+        dst[i] = static_cast<int8_t>(std::clamp(r, -127.0f, 127.0f));
+      }
+    } else {
+      binding.rodata.resize(offset + src->second->byte_size, 0);
+      std::memcpy(binding.rodata.data() + offset, src->second->data.data(),
+                  src->second->byte_size);
+    }
     binding.refs[v] = MakeRodataRef(offset);
   });
 
@@ -191,8 +248,14 @@ std::expected<ArenaBinding, std::string> BindArena(
 using ResolveFn = std::function<std::expected<uint64_t, std::string>(
     const sir::Value*)>;
 
-std::expected<std::vector<UpdateInstruction>, std::string> LowerBlock(
-    sir::Block& block, const ResolveFn& resolve) {
+/// Lowers `ops` in order. Lowering over an explicit op list (rather than a
+/// whole block) lets the driver emit the evaluation program from the primal
+/// prefix of the training block — the ops present before autodiff appended
+/// the backward pass. `quant_scales` maps frozen weights stored as int8 to
+/// their dequantization scale; GEMMs over them lower to the q8 opcodes.
+std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
+    const std::vector<sir::Operation*>& ops, const ResolveFn& resolve,
+    const std::unordered_map<const sir::Value*, float>& quant_scales) {
   std::vector<UpdateInstruction> instrs;
   std::string error;
 
@@ -208,10 +271,10 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerBlock(
     return static_cast<uint64_t>(v->shape().volume());
   };
 
-  block.walk([&](sir::Operation* op) {
-    if (!error.empty()) return;
+  for (sir::Operation* op : ops) {
+    if (!error.empty()) break;
     const std::string_view m = op->mnemonic();
-    if (m.starts_with("sc_mem.")) return;  // storage declaration, no code
+    if (m.starts_with("sc_mem.")) continue;  // storage declaration, no code
 
     UpdateInstruction ins;
     auto set = [&](OpCode oc) { ins.opcode = static_cast<uint16_t>(oc); };
@@ -220,12 +283,19 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerBlock(
         m == "sc_low.matmul_tn") {
       const sir::Value* a = op->operand(0);
       const sir::Value* c = op->result(0);
-      set(m == "sc_high.matmul"  ? OpCode::kGemmNN
-          : m == "sc_low.matmul_nt" ? OpCode::kGemmNT
+      // GEMMs whose B operand is a quantized frozen weight take the q8
+      // opcode and carry the dequant scale in in[3].
+      const auto q = m != "sc_low.matmul_tn"
+                         ? quant_scales.find(op->operand(1))
+                         : quant_scales.end();
+      const bool q8 = q != quant_scales.end();
+      set(m == "sc_high.matmul"     ? (q8 ? OpCode::kGemmNNQ8 : OpCode::kGemmNN)
+          : m == "sc_low.matmul_nt" ? (q8 ? OpCode::kGemmNTQ8 : OpCode::kGemmNT)
                                     : OpCode::kGemmTN);
       ins.in[0] = ref(a);
       ins.in[1] = ref(op->operand(1));
       ins.in[2] = ref(c);
+      if (q8) ins.in[3] = F32Bits(q->second);
       ins.out[0] = static_cast<uint64_t>(c->shape().dims.at(0));  // M
       ins.out[1] = static_cast<uint64_t>(c->shape().dims.at(1));  // N
       ins.out[2] = static_cast<uint64_t>(                          // K
@@ -255,17 +325,56 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerBlock(
       ins.in[2] = ref(op->result(0));
       ins.out[0] = static_cast<uint64_t>(op->result(0)->shape().dims.at(0));
       ins.out[1] = static_cast<uint64_t>(op->result(0)->shape().dims.at(1));
-    } else if (m == "sc_high.relu") {
-      set(OpCode::kReluFwd);
+    } else if (m == "sc_high.relu" || m == "sc_high.gelu" ||
+               m == "sc_high.silu") {
+      set(m == "sc_high.relu"   ? OpCode::kReluFwd
+          : m == "sc_high.gelu" ? OpCode::kGeluFwd
+                                : OpCode::kSiluFwd);
       ins.in[0] = ref(op->operand(0));
       ins.in[1] = ref(op->result(0));
       ins.out[0] = vol(op->result(0));
-    } else if (m == "sc_low.relu_grad") {
-      set(OpCode::kReluBwd);
+    } else if (m == "sc_low.relu_grad" || m == "sc_low.gelu_grad" ||
+               m == "sc_low.silu_grad") {
+      set(m == "sc_low.relu_grad"   ? OpCode::kReluBwd
+          : m == "sc_low.gelu_grad" ? OpCode::kGeluBwd
+                                    : OpCode::kSiluBwd);
       ins.in[0] = ref(op->operand(0));
       ins.in[1] = ref(op->operand(1));
       ins.in[2] = ref(op->result(0));
       ins.out[0] = vol(op->result(0));
+    } else if (m == "sc_high.mul" || m == "sc_low.mul") {
+      set(OpCode::kMulEW);
+      ins.in[0] = ref(op->operand(0));
+      ins.in[1] = ref(op->operand(1));
+      ins.in[2] = ref(op->result(0));
+      ins.out[0] = vol(op->result(0));
+    } else if (m == "sc_high.layer_norm") {
+      const sir::Value* y = op->result(0);
+      set(OpCode::kLayerNormFwd);
+      ins.in[0] = ref(op->operand(0));   // x
+      ins.in[1] = ref(op->operand(1));   // gamma
+      ins.in[2] = ref(op->operand(2));   // beta
+      ins.in[3] = ref(y);
+      ins.out[0] = (static_cast<uint64_t>(y->shape().dims.at(0)) << 32) |
+                   static_cast<uint64_t>(y->shape().dims.at(1));
+      ins.out[1] = ref(op->result(1));   // mean cache
+      ins.out[2] = ref(op->result(2));   // rstd cache
+    } else if (m == "sc_low.layer_norm_grad") {
+      const sir::Value* dx = op->result(0);
+      set(OpCode::kLayerNormBwd);
+      ins.in[0] = ref(op->operand(0));   // dy
+      ins.in[1] = ref(op->operand(1));   // x
+      ins.in[2] = ref(op->operand(2));   // gamma
+      ins.in[3] = ref(dx);
+      ins.out[0] = ref(op->operand(3));  // mean cache
+      ins.out[1] = ref(op->operand(4));  // rstd cache
+      ins.out[2] = (static_cast<uint64_t>(dx->shape().dims.at(0)) << 32) |
+                   static_cast<uint64_t>(dx->shape().dims.at(1));
+    } else if (m == "sc_low.clip_norm") {
+      set(OpCode::kClipNorm);
+      ins.in[0] = ref(op->operand(0));
+      ins.in[1] = F32Bits(op->getAttrAs<float>("max_norm").value_or(0.0f));
+      ins.out[0] = vol(op->operand(0));
     } else if (m == "sc_high.scale" || m == "sc_low.scale") {
       set(OpCode::kScale);
       ins.in[0] = ref(op->operand(0));
@@ -352,10 +461,10 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerBlock(
       ins.out[0] = vol(op->result(0));
     } else {
       error = "UpdateCompiler: cannot lower '" + std::string(m) + "'";
-      return;
+      break;
     }
     instrs.push_back(ins);
-  });
+  }
 
   if (!error.empty()) return std::unexpected(error);
   return instrs;
@@ -487,6 +596,13 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
     trainables.push_back(a.B);
   }
 
+  // Snapshot the primal program (adapted forward + loss, nothing else): it
+  // becomes the evaluation program, lowered against the same arena binding.
+  // Running it computes the current validation loss without touching any
+  // parameter — the basis of the runtime's regression gate.
+  std::vector<sir::Operation*> primal_ops;
+  block.walk([&](sir::Operation* op) { primal_ops.push_back(op); });
+
   // --- 4. Reverse-mode autodiff pruned to the adapters. ---------------------
   TrainableAutodiff autodiff;
   auto param_grads = autodiff.Run(block, loss, trainables);
@@ -503,28 +619,37 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
     return std::unexpected("UpdateCompiler: training program failed SSA "
                            "dominance validation");
 
-  // --- 6. Merge program: W' = W + (α/r)·A@B. --------------------------------
+  // --- 6. Merge program: Δ = (α/r)·A@B (commit adds Δ to the model file). ---
   MergeBuilder merger;
   auto merge = merger.Run(*adapters);
   if (!merge) return std::unexpected(merge.error());
   if (!merge->block->validate())
     return std::unexpected("UpdateCompiler: merge program failed validation");
 
-  // --- 7. Segmented arena binding. -------------------------------------------
+  // --- 7. Frozen-weight quantization selection. ------------------------------
+  std::unordered_map<const sir::Value*, float> quant_scales;
+  if (config_.quantize_base) {
+    quant_scales = SelectQuantizedWeights(block, build);
+    Logger::Info("UpdateCompiler: quantized " +
+                 std::to_string(quant_scales.size()) +
+                 " frozen weight(s) to int8 rodata");
+  }
+
+  // --- 8. Segmented arena binding. -------------------------------------------
   // Pin the loss slot and every parameter gradient: they are read outside the
   // program (engine / optimizer-less debug builds) and must survive the step.
   std::unordered_set<const sir::Value*> pinned;
   pinned.insert(loss);
   for (const auto& [p, g] : *param_grads) pinned.insert(g);
 
-  auto binding = BindArena(block, build, pinned);
+  auto binding = BindArena(block, build, pinned, quant_scales);
   if (!binding) return std::unexpected(binding.error());
 
-  // Bind the merge program into the same arena: mirrors resolve through the
-  // alias map; merged outputs are pinned fresh transients in the workspace
+  // Bind the merge program into the same arena: A/B mirrors resolve through
+  // the alias map; delta outputs are pinned fresh transients in the workspace
   // region (training has finished when the merge runs, so reuse is safe).
   std::unordered_set<const sir::Value*> merge_pinned;
-  for (const auto& [merged, adapter] : merge->outputs) merge_pinned.insert(merged);
+  for (const auto& [delta, adapter] : merge->outputs) merge_pinned.insert(delta);
 
   std::unordered_map<const sir::Value*, uint64_t> merge_bound;
   for (const auto& [mirror, original] : merge->aliases) {
@@ -538,7 +663,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
       merge_bound);
   binding->arena_size = std::max(binding->arena_size, merge_high);
 
-  // --- 8. Lowering. ----------------------------------------------------------
+  // --- 9. Lowering: train, eval (primal prefix), and merge programs. ---------
   auto resolve_train =
       [&](const sir::Value* v) -> std::expected<uint64_t, std::string> {
     if (auto it = binding->refs.find(v); it != binding->refs.end())
@@ -546,8 +671,13 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
     return std::unexpected("UpdateCompiler: unbound value '" +
                            std::string(v->id()) + "'");
   };
-  auto train_instrs = LowerBlock(block, resolve_train);
+  std::vector<sir::Operation*> train_ops;
+  block.walk([&](sir::Operation* op) { train_ops.push_back(op); });
+  auto train_instrs = LowerOps(train_ops, resolve_train, quant_scales);
   if (!train_instrs) return std::unexpected(train_instrs.error());
+
+  auto eval_instrs = LowerOps(primal_ops, resolve_train, quant_scales);
+  if (!eval_instrs) return std::unexpected(eval_instrs.error());
 
   auto resolve_merge =
       [&](const sir::Value* v) -> std::expected<uint64_t, std::string> {
@@ -556,10 +686,12 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
     return std::unexpected("UpdateCompiler: unbound merge value '" +
                            std::string(v->id()) + "'");
   };
-  auto merge_instrs = LowerBlock(*merge->block, resolve_merge);
+  std::vector<sir::Operation*> merge_ops;
+  merge->block->walk([&](sir::Operation* op) { merge_ops.push_back(op); });
+  auto merge_instrs = LowerOps(merge_ops, resolve_merge, quant_scales);
   if (!merge_instrs) return std::unexpected(merge_instrs.error());
 
-  // --- 9. Persistent-segment initial image (deterministic, seeded). ---------
+  // --- 10. Persistent-segment initial image (deterministic, seeded). --------
   std::vector<uint8_t> persist_init(binding->persistent_size, 0);
   for (const ParamInit& p : binding->params) {
     if (p.init != "randn") continue;  // zeros already
@@ -571,18 +703,18 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
     for (uint64_t i = 0; i < count; ++i) dst[i] = dist(rng);
   }
 
-  // --- 10. Emit table: merged arena ranges -> source-file byte ranges. ------
+  // --- 11. Emit table: delta arena ranges -> source-file byte ranges. -------
   std::vector<EmitEntry> emit_table;
-  for (const auto& [merged, adapter] : merge->outputs) {
+  for (const auto& [delta, adapter] : merge->outputs) {
     auto src = build.weight_sources.find(adapter->frozen_weight);
     if (src == build.weight_sources.end())
       return std::unexpected("UpdateCompiler: adapter weight lacks SMF source");
     emit_table.push_back({.smf_data_offset = src->second->data_offset,
                           .byte_size = src->second->byte_size,
-                          .arena_offset = RefOffset(merge_bound.at(merged))});
+                          .arena_offset = RefOffset(merge_bound.at(delta))});
   }
 
-  // --- 11. Plan assembly. -----------------------------------------------------
+  // --- 12. Plan assembly. -----------------------------------------------------
   PlanHeader header;
   header.arena_size = AlignUp(binding->arena_size);
   header.persistent_size = binding->persistent_size;
@@ -601,6 +733,11 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
   header.weight_decay = config_.optimizer.weight_decay;
   header.batch = static_cast<uint64_t>(batch);
   header.default_steps = config_.default_steps;
+  header.lr_schedule = static_cast<uint32_t>(config_.optimizer.lr_schedule);
+  header.warmup_steps = config_.optimizer.warmup_steps;
+  header.min_lr_factor = config_.optimizer.min_lr_factor;
+  header.clip_norm = config_.optimizer.clip_norm;
+  header.source_model_hash = source.content_hash;
 
   uint64_t off = AlignUp(sizeof(PlanHeader));
   header.train_instr_offset = off;
@@ -609,6 +746,9 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
   header.merge_instr_offset = off;
   header.merge_instr_count = merge_instrs->size();
   off += merge_instrs->size() * sizeof(UpdateInstruction);
+  header.eval_instr_offset = off;
+  header.eval_instr_count = eval_instrs->size();
+  off += eval_instrs->size() * sizeof(UpdateInstruction);
   off = AlignUp(off);
   header.rodata_offset = off;
   header.rodata_size = binding->rodata.size();
@@ -630,6 +770,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
       train_instrs->size() * sizeof(UpdateInstruction));
   put(header.merge_instr_offset, merge_instrs->data(),
       merge_instrs->size() * sizeof(UpdateInstruction));
+  put(header.eval_instr_offset, eval_instrs->data(),
+      eval_instrs->size() * sizeof(UpdateInstruction));
   if (!binding->rodata.empty())
     put(header.rodata_offset, binding->rodata.data(), binding->rodata.size());
   if (!persist_init.empty())
@@ -638,7 +780,13 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
     put(header.emit_table_offset, emit_table.data(),
         emit_table.size() * sizeof(EmitEntry));
 
-  // --- 12. Debug hooks + report. ----------------------------------------------
+  // Integrity seal: hash the whole blob with the hash field zeroed (it is,
+  // so far), then patch the result in. Initialize() re-derives and compares.
+  const uint64_t plan_hash = Fnv1a64(result.plan.data(), result.plan.size());
+  std::memcpy(result.plan.data() + offsetof(PlanHeader, plan_hash), &plan_hash,
+              sizeof(plan_hash));
+
+  // --- 13. Debug hooks + report. ----------------------------------------------
   std::ostringstream dump;
   block.print(dump);
   dump << "  --- merge program ---\n";
@@ -658,28 +806,34 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
 
   for (size_t i = 0; i < adapters->size(); ++i) {
     const GraftedAdapter& a = (*adapters)[i];
+    const auto q = quant_scales.find(a.frozen_weight);
     result.adapters.push_back(
         {.weight_name = std::string(a.frozen_weight->id()),
          .weight_rodata_ref = binding->refs.at(a.frozen_weight),
          .a_ref = binding->refs.at(a.A),
          .b_ref = binding->refs.at(a.B),
-         .merged_ref = merge_bound.at(merge->outputs[i].first),
+         .delta_ref = merge_bound.at(merge->outputs[i].first),
          .k = a.frozen_weight->shape().dims.at(0),
          .m = a.frozen_weight->shape().dims.at(1),
          .r = a.A->shape().dims.at(1),
-         .scale = a.scale});
+         .scale = a.scale,
+         .quant_scale = q != quant_scales.end() ? q->second : 0.0f});
   }
 
   result.arena_size = header.arena_size;
   result.persistent_size = header.persistent_size;
   result.train_instruction_count = header.train_instr_count;
   result.merge_instruction_count = header.merge_instr_count;
+  result.eval_instruction_count = header.eval_instr_count;
+  result.rodata_size = header.rodata_size;
 
   Logger::Info("UpdateCompiler: plan compiled — " +
-               std::to_string(header.train_instr_count) + " train instrs, " +
+               std::to_string(header.train_instr_count) + " train + " +
+               std::to_string(header.eval_instr_count) + " eval + " +
                std::to_string(header.merge_instr_count) + " merge instrs, " +
                "arena " + std::to_string(header.arena_size) + " B (" +
-               std::to_string(header.persistent_size) + " B persistent)");
+               std::to_string(header.persistent_size) + " B persistent), " +
+               "rodata " + std::to_string(header.rodata_size) + " B");
   return result;
 }
 

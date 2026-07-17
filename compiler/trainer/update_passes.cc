@@ -258,6 +258,77 @@ const std::unordered_map<std::string_view, VjpRule>& VjpRegistry() {
          return true;
        }},
 
+      // Y = gelu(X) (tanh approximation): dX = dY * gelu'(X). The backward
+      // kernel differentiates the same approximation the forward evaluates,
+      // so the pair is exactly consistent under finite differences.
+      {"sc_high.gelu",
+       [](sir::Operation* op, AdContext& ctx) {
+         sir::Value* x = op->operand(0);
+         sir::Value* dy = ctx.GradOf(op->result(0));
+         sir::Value* dx = Emit1(
+             ctx, "sc_low.gelu_grad", {dy, x},
+             std::string(x->id()) + ".d" + std::to_string(ctx.fresh_counter++),
+             x->shape());
+         ctx.Accumulate(x, dx);
+         return true;
+       }},
+
+      // Y = X * sigmoid(X): dX = dY * (s(X) * (1 + X * (1 - s(X)))).
+      {"sc_high.silu",
+       [](sir::Operation* op, AdContext& ctx) {
+         sir::Value* x = op->operand(0);
+         sir::Value* dy = ctx.GradOf(op->result(0));
+         sir::Value* dx = Emit1(
+             ctx, "sc_low.silu_grad", {dy, x},
+             std::string(x->id()) + ".d" + std::to_string(ctx.fresh_counter++),
+             x->shape());
+         ctx.Accumulate(x, dx);
+         return true;
+       }},
+
+      // C = X * Y (elementwise): dX = dC * Y, dY = dC * X.
+      {"sc_high.mul",
+       [](sir::Operation* op, AdContext& ctx) {
+         sir::Value* x = op->operand(0);
+         sir::Value* y = op->operand(1);
+         sir::Value* dc = ctx.GradOf(op->result(0));
+         if (ctx.Needs(x)) {
+           sir::Value* dx = Emit1(
+               ctx, "sc_low.mul", {dc, y},
+               std::string(x->id()) + ".d" + std::to_string(ctx.fresh_counter++),
+               x->shape());
+           ctx.Accumulate(x, dx);
+         }
+         if (ctx.Needs(y)) {
+           sir::Value* dy = Emit1(
+               ctx, "sc_low.mul", {dc, x},
+               std::string(y->id()) + ".d" + std::to_string(ctx.fresh_counter++),
+               y->shape());
+           ctx.Accumulate(y, dy);
+         }
+         return true;
+       }},
+
+      // (Y, mean, rstd) = layer_norm(X, gamma, beta). Only dX is synthesized:
+      // gamma/beta are frozen base weights (LoRA adapts MatMuls only), so an
+      // adjoint can never be demanded for them by construction.
+      {"sc_high.layer_norm",
+       [](sir::Operation* op, AdContext& ctx) {
+         sir::Value* x = op->operand(0);
+         sir::Value* gamma = op->operand(1);
+         if (ctx.Needs(gamma) || ctx.Needs(op->operand(2)))
+           return false;  // trainable affine params are unsupported
+         sir::Value* dy = ctx.GradOf(op->result(0));
+         if (!ctx.Needs(x)) return true;
+         sir::Value* dx = Emit1(
+             ctx, "sc_low.layer_norm_grad",
+             {dy, x, gamma, op->result(1), op->result(2)},
+             std::string(x->id()) + ".d" + std::to_string(ctx.fresh_counter++),
+             x->shape());
+         ctx.Accumulate(x, dx);
+         return true;
+       }},
+
       // Y = alpha * X: dX = alpha * dY.
       {"sc_high.scale",
        [](sir::Operation* op, AdContext& ctx) {
@@ -426,6 +497,13 @@ std::expected<void, std::string> OptimizerSynthesizer::Run(
   });
 
   for (auto& [p, g] : ordered) {
+    // Per-tensor L2 clipping precedes the step: one bad batch must not be
+    // able to blow up the parameters (or poison AdamW's moment state).
+    if (spec_.clip_norm > 0.0f) {
+      sir::Operation* clip = block.appendOp("sc_low.clip_norm");
+      clip->setAttribute("max_norm", spec_.clip_norm);
+      clip->addOperand(g);
+    }
     if (spec_.kind == OptimizerKind::kSgd) {
       sir::Operation* step = block.appendOp("sc_low.sgd_step");
       step->addOperand(p);
@@ -468,13 +546,7 @@ std::expected<MergeProgram, std::string> MergeBuilder::Run(
   program.block = std::make_unique<sir::Block>();
 
   for (const GraftedAdapter& adapter : adapters) {
-    // Mirror declarations aliasing the training program's storage.
-    sir::Operation* w_op = program.block->appendOp("sc_mem.weight");
-    sir::Value* w = w_op->addResult(
-        std::string(adapter.frozen_weight->id()) + ".merge_w",
-        sir::DataType::F32, adapter.frozen_weight->shape());
-    program.aliases[w] = adapter.frozen_weight;
-
+    // Mirror declarations aliasing the training program's persistent storage.
     sir::Operation* a_op = program.block->appendOp("sc_mem.param");
     sir::Value* a = a_op->addResult(std::string(adapter.A->id()) + ".merge_a",
                                     sir::DataType::F32, adapter.A->shape());
@@ -485,20 +557,21 @@ std::expected<MergeProgram, std::string> MergeBuilder::Run(
                                     sir::DataType::F32, adapter.B->shape());
     program.aliases[b] = adapter.B;
 
-    // W' = copy(W); W' += (α/r) · A @ B — pure linear algebra, no epochs.
-    sir::Operation* copy = program.block->appendOp("sc_low.copy");
-    copy->addOperand(w);
-    sir::Value* merged = copy->addResult(
-        std::string(adapter.frozen_weight->id()) + ".merged",
+    // Δ = 0; Δ += (α/r) · A @ B — pure linear algebra, no epochs. Commit
+    // adds Δ to the model file's own f32 weights (see EmitEntry).
+    sir::Operation* fill = program.block->appendOp("sc_low.fill");
+    fill->setAttribute("value", 0.0f);
+    sir::Value* delta = fill->addResult(
+        std::string(adapter.frozen_weight->id()) + ".delta",
         sir::DataType::F32, adapter.frozen_weight->shape());
 
     sir::Operation* acc = program.block->appendOp("sc_low.gemm_acc");
     acc->setAttribute("alpha", adapter.scale);
     acc->addOperand(a);
     acc->addOperand(b);
-    acc->addOperand(merged);
+    acc->addOperand(delta);
 
-    program.outputs.emplace_back(merged, &adapter);
+    program.outputs.emplace_back(delta, &adapter);
   }
 
   return program;

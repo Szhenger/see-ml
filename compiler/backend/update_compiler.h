@@ -42,9 +42,12 @@ struct AdapterDebugInfo {
   uint64_t weight_rodata_ref = kNullRef;
   uint64_t a_ref = kNullRef;
   uint64_t b_ref = kNullRef;
-  uint64_t merged_ref = kNullRef;
+  uint64_t delta_ref = kNullRef;  // Δ = (α/r)·A@B after RunMerge()
   int64_t k = 0, m = 0, r = 0;
   float scale = 1.0f;
+  // Per-tensor int8 scale when the frozen weight was quantized into rodata;
+  // 0 when the weight is stored as f32.
+  float quant_scale = 0.0f;
 };
 
 struct CompiledUpdate {
@@ -56,6 +59,8 @@ struct CompiledUpdate {
   uint64_t persistent_size = 0;
   uint64_t train_instruction_count = 0;
   uint64_t merge_instruction_count = 0;
+  uint64_t eval_instruction_count = 0;
+  uint64_t rodata_size = 0;
 };
 
 class UpdateCompiler {

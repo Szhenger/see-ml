@@ -18,8 +18,10 @@
 //   records[num_samples]: f32 input[input_dim], then the label
 //     (i32 for class labels, f32[label_dim] for dense, nothing for kind 0)
 //
-// Batches are served sequentially with wraparound — deterministic and
-// allocation-free, matching the closed-world execution contract.
+// Batches are served sequentially with wraparound, or — with EnableShuffle —
+// through a seeded permutation that is re-drawn every epoch. Both modes are
+// deterministic and allocation-free per batch, matching the closed-world
+// execution contract (the permutation buffer is allocated once, up front).
 // =============================================================================
 
 namespace seeml::update_rt {
@@ -59,12 +61,25 @@ class Dataset {
   /// (pure distillation).
   void FillBatch(uint64_t batch, float* input_slot, uint8_t* label_slot);
 
+  /// Switches batch serving to a seeded random permutation, re-shuffled at
+  /// every epoch boundary. Deterministic for a given (seed, epoch) pair.
+  void EnableShuffle(uint64_t seed);
+
+  /// Splits off the LAST `fraction` of samples (before any shuffling) as a
+  /// held-out validation set, removing them from this dataset. Deterministic:
+  /// the same file and fraction always produce the same split. At least one
+  /// sample stays on each side.
+  [[nodiscard]] std::expected<Dataset, std::string> SplitValidation(
+      double fraction);
+
   /// Serializes to the .sds file format.
   [[nodiscard]] std::expected<void, std::string> SaveToFile(
       const std::string& path) const;
 
  private:
   Dataset() = default;
+
+  void Reshuffle();
 
   std::vector<float> inputs_;   // num_samples * input_dim
   std::vector<uint8_t> labels_; // num_samples * label_bytes_per_sample
@@ -73,6 +88,10 @@ class Dataset {
   uint32_t label_kind_ = 0;
   uint64_t label_dim_ = 0;
   uint64_t cursor_ = 0;
+
+  // Shuffled serving order; empty when shuffling is disabled.
+  std::vector<uint64_t> order_;
+  uint64_t shuffle_state_ = 0;  // splitmix64 state; 0 = shuffling off
 };
 
 }  // namespace seeml::update_rt

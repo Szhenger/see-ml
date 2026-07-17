@@ -152,13 +152,82 @@ void Dataset::FillBatch(uint64_t batch, float* input_slot,
                         uint8_t* label_slot) {
   const uint64_t lbytes = label_bytes_per_sample();
   for (uint64_t b = 0; b < batch; ++b) {
-    const uint64_t i = cursor_;
+    const uint64_t i = order_.empty() ? cursor_ : order_[cursor_];
     std::memcpy(input_slot + b * input_dim_, inputs_.data() + i * input_dim_,
                 input_dim_ * sizeof(float));
     if (label_slot && lbytes)
       std::memcpy(label_slot + b * lbytes, labels_.data() + i * lbytes, lbytes);
-    cursor_ = (cursor_ + 1) % num_samples_;
+    cursor_ = cursor_ + 1;
+    if (cursor_ == num_samples_) {
+      cursor_ = 0;
+      if (!order_.empty()) Reshuffle();  // fresh permutation every epoch
+    }
   }
+}
+
+namespace {
+
+// splitmix64: tiny, deterministic, and high-quality enough for shuffling.
+// Avoids dragging <random> (and its per-platform distribution differences)
+// into the device runtime — the permutation must be reproducible everywhere.
+uint64_t SplitMix64(uint64_t* state) {
+  uint64_t z = (*state += 0x9E3779B97F4A7C15ULL);
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+  return z ^ (z >> 31);
+}
+
+}  // namespace
+
+void Dataset::EnableShuffle(uint64_t seed) {
+  // Fold the seed through one splitmix step so seed 0 is a valid choice
+  // (shuffle_state_ == 0 means "shuffling off").
+  shuffle_state_ = seed;
+  shuffle_state_ = SplitMix64(&shuffle_state_) | 1ULL;
+  order_.resize(num_samples_);
+  Reshuffle();
+  cursor_ = 0;
+}
+
+void Dataset::Reshuffle() {
+  for (uint64_t i = 0; i < num_samples_; ++i) order_[i] = i;
+  // Fisher–Yates with an unbiased-enough bound (num_samples << 2^64).
+  for (uint64_t i = num_samples_ - 1; i > 0; --i) {
+    const uint64_t j = SplitMix64(&shuffle_state_) % (i + 1);
+    std::swap(order_[i], order_[j]);
+  }
+}
+
+std::expected<Dataset, std::string> Dataset::SplitValidation(double fraction) {
+  if (!(fraction > 0.0) || fraction >= 1.0)
+    return std::unexpected("Dataset: validation fraction must be in (0, 1)");
+  if (num_samples_ < 2)
+    return std::unexpected("Dataset: too few samples to split");
+  if (!order_.empty())
+    return std::unexpected("Dataset: split before enabling shuffle");
+
+  uint64_t val_n = static_cast<uint64_t>(
+      static_cast<double>(num_samples_) * fraction);
+  if (val_n == 0) val_n = 1;
+  if (val_n >= num_samples_) val_n = num_samples_ - 1;
+  const uint64_t train_n = num_samples_ - val_n;
+  const uint64_t lbytes = label_bytes_per_sample();
+
+  Dataset val;
+  val.num_samples_ = val_n;
+  val.input_dim_ = input_dim_;
+  val.label_kind_ = label_kind_;
+  val.label_dim_ = label_dim_;
+  val.inputs_.assign(inputs_.begin() + static_cast<ptrdiff_t>(train_n * input_dim_),
+                     inputs_.end());
+  val.labels_.assign(labels_.begin() + static_cast<ptrdiff_t>(train_n * lbytes),
+                     labels_.end());
+
+  inputs_.resize(train_n * input_dim_);
+  labels_.resize(train_n * lbytes);
+  num_samples_ = train_n;
+  cursor_ = 0;
+  return val;
 }
 
 }  // namespace seeml::update_rt

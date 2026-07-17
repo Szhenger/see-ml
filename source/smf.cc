@@ -3,6 +3,8 @@
 #include <cstring>
 #include <fstream>
 
+#include "source/hash.h"
+
 namespace seeml::update {
 
 namespace {
@@ -82,7 +84,8 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   Reader r{bytes.data(), bytes.size()};
   if (r.Read<uint32_t>() != kSmfMagic)
     return std::unexpected("SMF: bad magic in '" + path + "'");
-  if (r.Read<uint32_t>() != kSmfVersion)
+  const uint32_t version = r.Read<uint32_t>();
+  if (version < kSmfMinVersion || version > kSmfVersion)
     return std::unexpected("SMF: unsupported version in '" + path + "'");
 
   const uint32_t num_tensors = r.Read<uint32_t>();
@@ -141,7 +144,13 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
 
   for (uint32_t i = 0; i < num_ops && r.ok; ++i) {
     SmfOp op;
-    op.kind = static_cast<SmfOpKind>(r.Read<uint8_t>());
+    const uint8_t kind = r.Read<uint8_t>();
+    // Range-check before the cast: an unknown kind must be a load error, not
+    // an out-of-range enum that a downstream switch silently skips.
+    if (kind > kSmfOpKindMax)
+      return std::unexpected("SMF: unknown op kind " + std::to_string(kind) +
+                             " in '" + path + "'");
+    op.kind = static_cast<SmfOpKind>(kind);
     op.name = r.ReadStr();
     const uint8_t n_in = r.Read<uint8_t>();
     for (uint8_t k = 0; k < n_in; ++k) op.inputs.push_back(r.ReadStr());
@@ -150,6 +159,7 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   }
 
   if (!r.ok) return std::unexpected("SMF: truncated file '" + path + "'");
+  model.content_hash = Fnv1a64(bytes.data(), bytes.size());
   return model;
 }
 
@@ -209,6 +219,9 @@ std::expected<void, std::string> SaveSmf(const std::string& path,
   f.write(reinterpret_cast<const char*>(w.buf.data()),
           static_cast<std::streamsize>(w.buf.size()));
   if (!f) return std::unexpected("SMF: short write to '" + path + "'");
+  // The model now corresponds to the saved bytes: bind its identity so a
+  // plan compiled from this in-memory model patches this exact file.
+  model.content_hash = Fnv1a64(w.buf.data(), w.buf.size());
   return {};
 }
 

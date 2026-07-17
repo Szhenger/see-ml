@@ -13,9 +13,13 @@ Usage:
         export_smf(torch_sequential, "model.smf")
         export_sds(inputs, labels, "corpus.sds")
 
-Supported modules: nn.Linear and nn.ReLU inside an nn.Sequential.
-nn.Linear(in, out) is exported as MatMul(x, W[in,out]) + AddBias(b[out]),
-i.e. the Linear weight is stored transposed from PyTorch's [out, in] layout.
+Supported modules inside an nn.Sequential:
+    nn.Linear     -> MatMul(x, W[in,out]) + AddBias(b[out])  (W stored
+                     transposed from PyTorch's [out, in] layout)
+    nn.ReLU       -> Relu
+    nn.GELU       -> Gelu (tanh approximation on-device)
+    nn.SiLU       -> Silu
+    nn.LayerNorm  -> LayerNorm(x, gamma, beta) over the last dim
 """
 
 import argparse
@@ -23,8 +27,11 @@ import struct
 import sys
 
 SMF_MAGIC = 0x31464D53  # "SMF1"
+SMF_VERSION = 2         # v2: Gelu/Silu/Mul/LayerNorm op kinds
 SDS_MAGIC = 0x31534453  # "SDS1"
 ALIGN = 64
+
+OP_MATMUL, OP_ADDBIAS, OP_RELU, OP_GELU, OP_SILU, OP_MUL, OP_LAYERNORM = range(7)
 
 
 def _align(n: int) -> int:
@@ -54,7 +61,8 @@ class _SmfBuilder:
 
     def serialize(self) -> bytes:
         def meta(offsets):
-            out = struct.pack("<IIII", SMF_MAGIC, 1, len(self.tensors), len(self.ops))
+            out = struct.pack("<IIII", SMF_MAGIC, SMF_VERSION,
+                              len(self.tensors), len(self.ops))
             out += _s(self.input_name) + _s(self.output_name)
             for t in self.tensors:
                 out += _s(t["name"])
@@ -88,7 +96,7 @@ class _SmfBuilder:
 
 
 def export_smf(model, path: str, input_name: str = "x"):
-    """Export an nn.Sequential of Linear/ReLU layers to an SMF file."""
+    """Export an nn.Sequential of Linear/ReLU/GELU/SiLU/LayerNorm to SMF."""
     import torch.nn as nn
 
     linears = [m for m in model if isinstance(m, nn.Linear)]
@@ -103,14 +111,27 @@ def export_smf(model, path: str, input_name: str = "x"):
             bias = m.bias.detach().float()
             b.add_tensor(f"w{idx}", list(w.shape), w.numpy().tobytes())
             b.add_tensor(f"b{idx}", [bias.numel()], bias.numpy().tobytes())
-            b.add_op(0, f"mm{idx}", [prev, f"w{idx}"], f"z{idx}")
-            b.add_op(1, f"ab{idx}", [f"z{idx}", f"b{idx}"], f"zb{idx}")
+            b.add_op(OP_MATMUL, f"mm{idx}", [prev, f"w{idx}"], f"z{idx}")
+            b.add_op(OP_ADDBIAS, f"ab{idx}", [f"z{idx}", f"b{idx}"], f"zb{idx}")
             prev = f"zb{idx}"
             idx += 1
-        elif isinstance(m, nn.ReLU):
-            # Name by module position: consecutive ReLUs must not collide.
-            b.add_op(2, f"relu{pos}", [prev], f"h{pos}")
+        elif isinstance(m, (nn.ReLU, nn.GELU, nn.SiLU)):
+            # Name by module position: consecutive activations must not collide.
+            kind = (OP_RELU if isinstance(m, nn.ReLU)
+                    else OP_GELU if isinstance(m, nn.GELU) else OP_SILU)
+            b.add_op(kind, f"act{pos}", [prev], f"h{pos}")
             prev = f"h{pos}"
+        elif isinstance(m, nn.LayerNorm):
+            if len(m.normalized_shape) != 1:
+                raise ValueError("export_smf: LayerNorm must normalize the "
+                                 "last dimension only")
+            gamma = m.weight.detach().float()
+            beta = m.bias.detach().float()
+            b.add_tensor(f"ln_g{pos}", [gamma.numel()], gamma.numpy().tobytes())
+            b.add_tensor(f"ln_b{pos}", [beta.numel()], beta.numpy().tobytes())
+            b.add_op(OP_LAYERNORM, f"ln{pos}",
+                     [prev, f"ln_g{pos}", f"ln_b{pos}"], f"n{pos}")
+            prev = f"n{pos}"
         else:
             raise ValueError(f"export_smf: unsupported module {type(m).__name__}")
 
