@@ -1,7 +1,9 @@
 #include "source/smf.h"
 
+#include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <utility>
 
 namespace seeml::update {
 
@@ -141,7 +143,14 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
 
   for (uint32_t i = 0; i < num_ops && r.ok; ++i) {
     SmfOp op;
-    op.kind = static_cast<SmfOpKind>(r.Read<uint8_t>());
+    const uint8_t kind = r.Read<uint8_t>();
+    // Range-check the op vocabulary here: ForwardBuilder switches over the
+    // enum, and an out-of-range value would silently skip the op, surfacing
+    // later as a misleading "not a constant tensor" error.
+    if (r.ok && kind > static_cast<uint8_t>(SmfOpKind::kRelu))
+      return std::unexpected("SMF: op " + std::to_string(i) +
+                             " has unknown kind " + std::to_string(kind));
+    op.kind = static_cast<SmfOpKind>(kind);
     op.name = r.ReadStr();
     const uint8_t n_in = r.Read<uint8_t>();
     for (uint8_t k = 0; k < n_in; ++k) op.inputs.push_back(r.ReadStr());
@@ -150,11 +159,53 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   }
 
   if (!r.ok) return std::unexpected("SMF: truncated file '" + path + "'");
+
+  // Each blob was individually range-checked against the file, but the
+  // ranges must also be pairwise disjoint and lie past the metadata (the
+  // writer's layout). Without this, a small file can declare its whole
+  // extent as the data of arbitrarily many tensors, amplifying one crafted
+  // or corrupt megabyte into an unbounded total allocation above.
+  std::vector<std::pair<uint64_t, uint64_t>> ranges;  // (offset, size)
+  for (const auto& t : model.tensors)
+    if (t.is_const) ranges.emplace_back(t.data_offset, t.byte_size);
+  std::sort(ranges.begin(), ranges.end());
+  uint64_t prev_end = r.pos;  // first byte past the metadata section
+  for (const auto& [off, size] : ranges) {
+    if (off < prev_end)
+      return std::unexpected(
+          "SMF: constant tensor data ranges overlap each other or the "
+          "metadata in '" + path + "'");
+    prev_end = off + size;  // cannot wrap: range-checked against file size
+  }
   return model;
 }
 
 std::expected<void, std::string> SaveSmf(const std::string& path,
                                          SmfModel& model) {
+  // The record formats carry u16 string lengths and u8 rank/input counts;
+  // Writer casts silently, so an oversized field would desynchronize every
+  // record after it. Reject instead of writing a self-corrupting file.
+  auto str_ok = [](const std::string& s) { return s.size() <= UINT16_MAX; };
+  if (!str_ok(model.input_name) || !str_ok(model.output_name))
+    return std::unexpected("SMF: I/O tensor name exceeds 65535 bytes");
+  for (const auto& t : model.tensors) {
+    if (!str_ok(t.name))
+      return std::unexpected("SMF: tensor name exceeds 65535 bytes");
+    if (t.dims.size() > UINT8_MAX)
+      return std::unexpected("SMF: tensor '" + t.name + "' rank exceeds 255");
+  }
+  for (const auto& op : model.ops) {
+    if (!str_ok(op.name) || !str_ok(op.output))
+      return std::unexpected("SMF: op name exceeds 65535 bytes");
+    if (op.inputs.size() > UINT8_MAX)
+      return std::unexpected("SMF: op '" + op.name +
+                             "' has more than 255 inputs");
+    for (const auto& in : op.inputs)
+      if (!str_ok(in))
+        return std::unexpected("SMF: op '" + op.name +
+                               "' input name exceeds 65535 bytes");
+  }
+
   // Pass 1: serialize the header/metadata with zeroed data offsets to learn
   // the metadata section size, then lay out the 64-aligned data section.
   auto serialize_meta = [&](Writer& w) {

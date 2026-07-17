@@ -57,6 +57,18 @@ TrainOptions Quiet() {
   return options;
 }
 
+/// Byte offset of the first train instruction with `oc`, or 0 if absent.
+size_t FindTrainInstr(const std::vector<uint8_t>& plan, OpCode oc) {
+  const PlanHeader h = HeaderOf(plan);
+  for (uint64_t i = 0; i < h.train_instr_count; ++i) {
+    const size_t off = h.train_instr_offset + i * sizeof(UpdateInstruction);
+    UpdateInstruction ins;
+    std::memcpy(&ins, plan.data() + off, sizeof(ins));
+    if (ins.opcode == static_cast<uint16_t>(oc)) return off;
+  }
+  return 0;
+}
+
 TEST(UpdateEngineLoad, AcceptsCompiledPlan) {
   const std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
   ASSERT_FALSE(plan.empty());
@@ -147,6 +159,80 @@ TEST(UpdateEngineLoad, RejectsOperandOutsideItsAddressSpace) {
   UpdateEngine engine;
   EXPECT_ERROR_CONTAINS(engine.LoadFromMemory(plan.data(), plan.size()),
                         "out of bounds");
+}
+
+TEST(UpdateEngineLoad, FailedReloadLeavesEngineUnloaded) {
+  const std::vector<uint8_t> good = CompilePlan(BaseConfig(kBatch));
+  ASSERT_FALSE(good.empty());
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(good.data(), good.size()));
+
+  // A plan that fails validation *late* in the load — after its header and
+  // programs have been decoded.
+  std::vector<uint8_t> bad = good;
+  const PlanHeader h = HeaderOf(bad);
+  UpdateInstruction ins;
+  std::memcpy(&ins, bad.data() + h.train_instr_offset, sizeof(ins));
+  ins.in[0] = MakeArenaRef(h.arena_size + (1ULL << 32));
+  std::memcpy(bad.data() + h.train_instr_offset, &ins, sizeof(ins));
+  EXPECT_ERROR(engine.LoadFromMemory(bad.data(), bad.size()));
+
+  // The failed load must not leave the bad plan's programs paired with the
+  // good plan's arena; the engine must be cleanly unloaded.
+  ASSERT_OK_AND_ASSIGN(Dataset data, MakeClassificationData(32, kInDim, 1));
+  EXPECT_ERROR_CONTAINS(engine.Train(data, 1, Quiet()), "no plan loaded");
+  EXPECT_ERROR_CONTAINS(engine.RunMerge(), "no plan loaded");
+}
+
+TEST(UpdateEngineLoad, RejectsSoftmaxLabelsUnboundFromLabelSlot) {
+  std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
+  ASSERT_FALSE(plan.empty());
+  const PlanHeader h = HeaderOf(plan);
+  const size_t off = FindTrainInstr(plan, OpCode::kSoftmaxXEntFwd);
+  ASSERT_NE(off, 0u);
+
+  // Point the labels operand at a different (individually valid) arena
+  // region: the input slot. The kernel would then index probs rows with
+  // whatever bit patterns live there — an unbounded read/write.
+  UpdateInstruction ins;
+  std::memcpy(&ins, plan.data() + off, sizeof(ins));
+  ins.in[1] = MakeArenaRef(RefOffset(h.input_ref));
+  std::memcpy(plan.data() + off, &ins, sizeof(ins));
+
+  UpdateEngine engine;
+  EXPECT_ERROR_CONTAINS(engine.LoadFromMemory(plan.data(), plan.size()),
+                        "not bound to the plan's label slot");
+}
+
+TEST(UpdateEngineLoad, RejectsInconsistentSoftmaxClassCounts) {
+  std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
+  ASSERT_FALSE(plan.empty());
+  const size_t off = FindTrainInstr(plan, OpCode::kSoftmaxXEntBwd);
+  ASSERT_NE(off, 0u);
+
+  // Shrink the backward instruction's class count: labels validated against
+  // the forward's C would still index out of the backward's narrower rows.
+  UpdateInstruction ins;
+  std::memcpy(&ins, plan.data() + off, sizeof(ins));
+  ASSERT_GT(ins.out[1], 1u);
+  ins.out[1] -= 1;
+  std::memcpy(plan.data() + off, &ins, sizeof(ins));
+
+  UpdateEngine engine;
+  EXPECT_ERROR_CONTAINS(engine.LoadFromMemory(plan.data(), plan.size()),
+                        "inconsistent class count");
+}
+
+TEST(UpdateEngineLoad, RejectsSoftmaxWithoutClassLabels) {
+  std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
+  ASSERT_FALSE(plan.empty());
+  PlanHeader h = HeaderOf(plan);
+  h.label_kind = 2;  // dense targets: ValidateClassLabels() would never run
+  PutHeader(plan, h);
+
+  UpdateEngine engine;
+  EXPECT_ERROR_CONTAINS(engine.LoadFromMemory(plan.data(), plan.size()),
+                        "without class-index labels");
 }
 
 TEST(UpdateEngineLoad, LoadFromFileMatchesLoadFromMemory) {

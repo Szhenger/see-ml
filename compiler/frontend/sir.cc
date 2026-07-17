@@ -6,8 +6,23 @@
 #include <algorithm>
 #include <stdexcept>
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
 
 namespace seecpp::sir {
+
+namespace {
+
+// Structural-invariant violations abort in every build mode: the callers of
+// these APIs (the grafting and autodiff passes) mutate live graphs, and a
+// compiled-out assert would turn a pass bug into silent memory corruption
+// (an increment past end(), a dereference of end()) instead of a diagnosis.
+[[noreturn]] void FatalInvariant(const char* what) {
+    std::fprintf(stderr, "sir: fatal invariant violation: %s\n", what);
+    std::abort();
+}
+
+}  // namespace
 
 // =============================================================================
 // 1. Shape
@@ -195,7 +210,8 @@ void Block::insertOpsAfter(Operation* anchor,
                            std::vector<std::unique_ptr<Operation>> new_ops) {
     auto it = std::find_if(ops_.begin(), ops_.end(),
                            [anchor](const auto& p) { return p.get() == anchor; });
-    assert(it != ops_.end() && "insertOpsAfter: anchor not found in block");
+    if (it == ops_.end())
+        FatalInvariant("insertOpsAfter: anchor not found in block");
 
     for (auto& op : new_ops)
         op->setParentBlock(this);
@@ -207,7 +223,8 @@ void Block::insertOpsAfter(Operation* anchor,
 
 std::unique_ptr<Operation> Block::removeOp(Operation* op) {
     auto it = std::find_if(ops_.begin(), ops_.end(), [op](const auto& p) { return p.get() == op; });
-    assert(it != ops_.end() && "removeOp: operation not found in block");
+    if (it == ops_.end())
+        FatalInvariant("removeOp: operation not found in block");
 
     for (size_t i = 0; i < op->numOperands(); ++i)
         op->operand(i)->removeUser(op);
@@ -266,7 +283,8 @@ Block* Region::addBlock() {
 }
 
 Block* Region::entryBlock() {
-    assert(!blocks_.empty());
+    if (blocks_.empty())
+        FatalInvariant("entryBlock: region has no blocks");
     return blocks_.front().get();
 }
 

@@ -162,6 +162,36 @@ TEST(ForwardBuilder, RejectsInnerDimensionMismatch) {
                         "inner dimensions disagree");
 }
 
+TEST(ForwardBuilder, RejectsConstLhsRowsMismatchingBatch) {
+  SmfModel model;
+  model.input_name = "x";
+  model.output_name = "y";
+  model.tensors.push_back({.name = "x", .dims = {-1, 4}, .is_const = false});
+  model.tensors.push_back(
+      {.name = "a",
+       .dims = {2, 4},
+       .is_const = true,
+       .data = AsBytes({1, 2, 3, 4, 5, 6, 7, 8})});
+  model.tensors.back().byte_size = model.tensors.back().data.size();
+  model.tensors.push_back(
+      {.name = "w",
+       .dims = {4, 3},
+       .is_const = true,
+       .data = AsBytes({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12})});
+  model.tensors.back().byte_size = model.tensors.back().data.size();
+  // Rank-2 with agreeing inner dims, but the constant LHS has 2 rows while
+  // the plan is compiled for kBatch — the result shape would claim kBatch
+  // rows and the lowered GEMM would read past the 2-row buffer at runtime.
+  model.ops.push_back({SmfOpKind::kMatMul, "mm", {"a", "w"}, "y"});
+
+  sir::Block block;
+  GraphBuild build;
+  build.input = AddInput(block, 4);
+  EXPECT_ERROR_CONTAINS(
+      BuildForward(block, model, "", build.input, kBatch, build),
+      "compiled for batch");
+}
+
 TEST(ForwardBuilder, RejectsBiasWidthMismatch) {
   SmfModel model;
   model.input_name = "x";
