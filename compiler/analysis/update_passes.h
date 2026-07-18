@@ -1,5 +1,5 @@
-#ifndef SEEML_COMPILER_TRAINER_UPDATE_PASSES_H_
-#define SEEML_COMPILER_TRAINER_UPDATE_PASSES_H_
+#ifndef SEEML_COMPILER_ANALYSIS_UPDATE_PASSES_H_
+#define SEEML_COMPILER_ANALYSIS_UPDATE_PASSES_H_
 
 #include <expected>
 #include <memory>
@@ -108,4 +108,4 @@ class MergeBuilder {
 
 }  // namespace seeml::update
 
-#endif  // SEEML_COMPILER_TRAINER_UPDATE_PASSES_H_
+#endif  // SEEML_COMPILER_ANALYSIS_UPDATE_PASSES_H_

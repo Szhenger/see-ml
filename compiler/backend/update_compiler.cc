@@ -13,8 +13,9 @@
 #include "compiler/diagnostics/logger.h"
 #include "compiler/frontend/forward_builder.h"
 #include "compiler/frontend/sir.h"
-#include "compiler/trainer/update_passes.h"
+#include "compiler/analysis/update_passes.h"
 #include "source/hash.h"
+#include "source/parallel_for.h"
 
 namespace seeml::update {
 
@@ -244,16 +245,23 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
   if (!merge_instrs) return std::unexpected(merge_instrs.error());
 
   // --- 10. Persistent-segment initial image (deterministic, seeded). --------
+  // Every randn parameter owns an independent per-tensor RNG stream and a
+  // disjoint byte range of the image, so generation parallelizes per tensor
+  // with output identical to the serial loop.
   std::vector<uint8_t> persist_init(binding->persistent_size, 0);
-  for (const ParamInit& p : binding->params) {
-    if (p.init != "randn") continue;  // zeros already
-    std::mt19937_64 rng(p.seed);
-    std::normal_distribution<float> dist(0.0f, p.std);
-    auto* dst = reinterpret_cast<float*>(persist_init.data() + p.offset);
-    const uint64_t count =
-        static_cast<uint64_t>(p.value->shape().volume());
-    for (uint64_t i = 0; i < count; ++i) dst[i] = dist(rng);
-  }
+  std::vector<const ParamInit*> randn_params;
+  for (const ParamInit& p : binding->params)
+    if (p.init == "randn") randn_params.push_back(&p);  // zeros already
+  ParallelFor(randn_params.size(), 1, [&](size_t b, size_t e, size_t) {
+    for (size_t i = b; i < e; ++i) {
+      const ParamInit& p = *randn_params[i];
+      std::mt19937_64 rng(p.seed);
+      std::normal_distribution<float> dist(0.0f, p.std);
+      auto* dst = reinterpret_cast<float*>(persist_init.data() + p.offset);
+      const uint64_t count = static_cast<uint64_t>(p.value->shape().volume());
+      for (uint64_t j = 0; j < count; ++j) dst[j] = dist(rng);
+    }
+  });
 
   // --- 11. Emit table: delta arena ranges -> source-file byte ranges. -------
   std::vector<EmitEntry> emit_table;

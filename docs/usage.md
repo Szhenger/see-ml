@@ -75,6 +75,25 @@ What happens, in order:
 Exit codes: `0` committed, `1` runtime error, `2` bad arguments,
 `3` regression-gate rejection.
 
+## Threading
+
+Both sides of the product parallelize: the compiler's byte-heavy passes
+(int8 quantization, adapter initialization, plan embedding) and the
+runtime's kernels, plus a feeder thread that stages the next batch while the
+current step computes. Control it with `SEEML_THREADS`:
+
+```bash
+SEEML_THREADS=1 model_update ...   # fully serial: no thread is ever created
+SEEML_THREADS=4 model_update ...   # pin the pool width; default = all cores
+```
+
+Parallel execution is **bitwise-deterministic**: work is split into chunks
+whose boundaries depend only on the problem shape (never the thread count),
+and reductions combine per-chunk partials in a fixed order. The same plan,
+data, and seed produce the same bits at any thread count — thread count is a
+throughput knob, not a numerics knob — so a loss curve from an 8-core dev
+board reproduces exactly on a single-core target.
+
 ## Development
 
 ```bash
@@ -85,5 +104,6 @@ sh build/build.sh && for t in build/seeml_*_test; do "$t"; done
 ./build/seeml_update_engine_test --filter=UpdateEngineCheckpoint
 # sanitizers / fuzzing:
 cmake -B build -DSEEML_SANITIZE="address;undefined"
+cmake -B build -DSEEML_SANITIZE="thread"   # proves the pool + feeder sync
 cmake -B build -DSEEML_FUZZ=ON && ./build/seeml_fuzz_formats
 ```

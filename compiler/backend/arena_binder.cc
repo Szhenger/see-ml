@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstring>
 
+#include "source/parallel_for.h"
+
 namespace seeml::update {
 
 namespace sir = seecpp::sir;
@@ -13,6 +15,11 @@ namespace {
 uint64_t ValueBytes(const sir::Value* v) {
   return AlignUp(v->shape().byteSize(v->dtype()));
 }
+
+// Elements per chunk when sweeping a frozen weight blob (max-abs scan, int8
+// pack). Weight tensors reach tens of megabytes; the sweeps are elementwise
+// over disjoint ranges, so they parallelize with bit-identical results.
+constexpr size_t kWeightSweepGrain = 65536;
 
 }  // namespace
 
@@ -36,9 +43,17 @@ std::unordered_map<const sir::Value*, float> SelectQuantizedWeights(
 
     const auto* data = reinterpret_cast<const float*>(src->second->data.data());
     const size_t count = src->second->byte_size / sizeof(float);
+    // Chunked max reduction; max is order-insensitive, and the fixed chunk
+    // geometry keeps even the combining order thread-count-independent.
+    float partials[kMaxParallelChunks] = {};
+    ParallelFor(count, kWeightSweepGrain, [&](size_t b, size_t e, size_t c) {
+      float m = 0.0f;
+      for (size_t i = b; i < e; ++i) m = std::max(m, std::fabs(data[i]));
+      partials[c] = m;
+    });
     float max_abs = 0.0f;
-    for (size_t i = 0; i < count; ++i)
-      max_abs = std::max(max_abs, std::fabs(data[i]));
+    const size_t chunks = ParallelChunkCount(count, kWeightSweepGrain);
+    for (size_t c = 0; c < chunks; ++c) max_abs = std::max(max_abs, partials[c]);
     // An all-zero weight quantizes to zeros under any scale; 1.0 keeps the
     // reciprocal finite.
     scales[v] = max_abs > 0.0f ? max_abs / 127.0f : 1.0f;
@@ -166,10 +181,12 @@ std::expected<ArenaBinding, std::string> BindArena(
       binding.rodata.resize(offset + count, 0);
       auto* dst = reinterpret_cast<int8_t*>(binding.rodata.data() + offset);
       const float inv_scale = 1.0f / q->second;
-      for (size_t i = 0; i < count; ++i) {
-        const float r = std::round(data[i] * inv_scale);
-        dst[i] = static_cast<int8_t>(std::clamp(r, -127.0f, 127.0f));
-      }
+      ParallelFor(count, kWeightSweepGrain, [&](size_t b, size_t e, size_t) {
+        for (size_t i = b; i < e; ++i) {
+          const float r = std::round(data[i] * inv_scale);
+          dst[i] = static_cast<int8_t>(std::clamp(r, -127.0f, 127.0f));
+        }
+      });
     } else {
       binding.rodata.resize(offset + src->second->byte_size, 0);
       std::memcpy(binding.rodata.data() + offset, src->second->data.data(),

@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <fstream>
 
+#include "source/parallel_for.h"
+
 namespace seeml::update {
 
 namespace {
@@ -44,22 +46,34 @@ std::string EmbedPlanAsTU(const std::vector<uint8_t>& plan) {
   // Manual decimal emission: a snprintf call per byte dominates emission
   // time once plans reach megabytes (frozen weights live in the blob).
   // Three digit appends and a comma beat the formatter by an order of
-  // magnitude and need no format-string parsing.
-  for (size_t i = 0; i < plan.size(); ++i) {
-    const unsigned v = plan[i];
-    if (v >= 100) {
-      tu += static_cast<char>('0' + v / 100);
-      tu += static_cast<char>('0' + (v / 10) % 10);
-      tu += static_cast<char>('0' + v % 10);
-    } else if (v >= 10) {
-      tu += static_cast<char>('0' + v / 10);
-      tu += static_cast<char>('0' + v % 10);
-    } else {
-      tu += static_cast<char>('0' + v);
-    }
-    tu += ',';
-    if ((i + 1) % 24 == 0) tu += '\n';
-  }
+  // magnitude and need no format-string parsing. Each byte's text (and its
+  // line break, keyed off the global index) is independent of every other
+  // byte, so fixed chunks render in parallel and concatenate in order —
+  // the output is character-identical to the serial emitter.
+  constexpr size_t kEmbedGrain = 256 * 1024;
+  std::vector<std::string> parts(
+      ParallelChunkCount(plan.size(), kEmbedGrain));
+  ParallelFor(plan.size(), kEmbedGrain,
+              [&](size_t begin, size_t end, size_t chunk) {
+                std::string& out = parts[chunk];
+                out.reserve((end - begin) * 4 + 8);
+                for (size_t i = begin; i < end; ++i) {
+                  const unsigned v = plan[i];
+                  if (v >= 100) {
+                    out += static_cast<char>('0' + v / 100);
+                    out += static_cast<char>('0' + (v / 10) % 10);
+                    out += static_cast<char>('0' + v % 10);
+                  } else if (v >= 10) {
+                    out += static_cast<char>('0' + v / 10);
+                    out += static_cast<char>('0' + v % 10);
+                  } else {
+                    out += static_cast<char>('0' + v);
+                  }
+                  out += ',';
+                  if ((i + 1) % 24 == 0) out += '\n';
+                }
+              });
+  for (const std::string& part : parts) tu += part;
   tu += "\n};\nconst size_t kSeemlUpdatePlanSize = sizeof(kSeemlUpdatePlan);\n";
   return tu;
 }
@@ -234,10 +248,12 @@ constexpr const char* kVendoredSources[] = {
     "runtime/update_engine.h",   "runtime/update_engine.cc",
     "runtime/update_kernels.h",  "runtime/update_kernels.cc",
     "runtime/dataset.h",         "runtime/dataset.cc",
+    "runtime/batch_pipeline.h",  "runtime/batch_pipeline.cc",
     "runtime/durable_io.h",      "runtime/durable_io.cc",
     "runtime/plan_validator.h",  "runtime/plan_validator.cc",
     "runtime/checkpoint.h",      "runtime/checkpoint.cc",
     "source/update_types.h",     "source/hash.h",
+    "source/parallel_for.h",     "source/parallel_for.cc",
 };
 
 std::string BuildScript() {
@@ -249,17 +265,23 @@ std::string BuildScript() {
   s += "set -e\n";
   s += "cd \"$(dirname \"$0\")\"\n";
   s += "CXX=\"${CXX:-c++}\"\n";
-  s += "FLAGS=\"-std=c++23 -O2 -Wall -Wextra -I.\"\n";
+  s += "# -pthread: the runtime parallelizes its kernels and pipelines the\n";
+  s += "# batch feeder; SEEML_THREADS=1 at run time restores fully serial\n";
+  s += "# execution (with bit-identical results — chunking is fixed).\n";
+  s += "FLAGS=\"-std=c++23 -O2 -Wall -Wextra -pthread -I.\"\n";
   s += "$CXX $FLAGS -c update_plan_embedded.cc -o update_plan_embedded.o\n";
   s += "$CXX $FLAGS -c update_main.cc -o update_main.o\n";
+  s += "$CXX $FLAGS -c source/parallel_for.cc -o parallel_for.o\n";
   s += "$CXX $FLAGS -c runtime/update_kernels.cc -o update_kernels.o\n";
   s += "$CXX $FLAGS -c runtime/dataset.cc -o dataset.o\n";
+  s += "$CXX $FLAGS -c runtime/batch_pipeline.cc -o batch_pipeline.o\n";
   s += "$CXX $FLAGS -c runtime/durable_io.cc -o durable_io.o\n";
   s += "$CXX $FLAGS -c runtime/plan_validator.cc -o plan_validator.o\n";
   s += "$CXX $FLAGS -c runtime/checkpoint.cc -o checkpoint.o\n";
   s += "$CXX $FLAGS -c runtime/update_engine.cc -o update_engine.o\n";
-  s += "$CXX update_main.o update_plan_embedded.o update_engine.o dataset.o "
-       "update_kernels.o durable_io.o plan_validator.o checkpoint.o "
+  s += "$CXX $FLAGS update_main.o update_plan_embedded.o update_engine.o "
+       "dataset.o batch_pipeline.o update_kernels.o parallel_for.o "
+       "durable_io.o plan_validator.o checkpoint.o "
        "-o model_update\n";
   s += "echo \"built: $(pwd)/model_update\"\n";
   return s;

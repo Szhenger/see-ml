@@ -10,7 +10,7 @@
 
 #include "compiler/frontend/forward_builder.h"
 #include "compiler/frontend/sir.h"
-#include "compiler/trainer/update_passes.h"
+#include "compiler/analysis/update_passes.h"
 #include "source/smf.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"

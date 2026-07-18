@@ -11,6 +11,7 @@
 
 #include "compiler/backend/update_compiler.h"
 #include "source/update_types.h"
+#include "source/parallel_for.h"
 #include "source/smf.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
@@ -275,6 +276,26 @@ TEST(UpdateCompiler, PropagatesGrafterFailure) {
   UpdateConfig config = BaseConfig(kBatch);
   config.lora.target_filters = {"no_such_weight"};
   EXPECT_ERROR_CONTAINS(UpdateCompiler(config).Compile(model), "no eligible");
+}
+
+TEST(UpdateCompiler, PlanBytesAreThreadCountInvariant) {
+  // Compilation parallelizes its byte-heavy passes (int8 quantization,
+  // seeded randn init of the persistent image); the emitted plan must be
+  // bit-identical at any pool width — same blob, same integrity hash.
+  UpdateConfig config = BaseConfig(kBatch);
+  config.quantize_base = true;  // exercise the parallel max-abs scan + pack
+
+  seeml::update::SetParallelThreadCount(1);
+  SmfModel model_a = MakeMlp(kInDim, kHidden, kOutDim, 17);
+  auto serial = UpdateCompiler(config).Compile(model_a);
+  seeml::update::SetParallelThreadCount(8);
+  SmfModel model_b = MakeMlp(kInDim, kHidden, kOutDim, 17);
+  auto wide = UpdateCompiler(config).Compile(model_b);
+  seeml::update::SetParallelThreadCount(0);
+
+  ASSERT_OK(serial);
+  ASSERT_OK(wide);
+  EXPECT_TRUE(serial->plan == wide->plan);
 }
 
 }  // namespace

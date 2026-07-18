@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "runtime/batch_pipeline.h"
 #include "runtime/checkpoint.h"
 #include "runtime/durable_io.h"
 #include "runtime/plan_validator.h"
@@ -446,40 +447,50 @@ std::expected<TrainReport, std::string> UpdateEngine::Train(
 
   const uint64_t start = step_;
   uint64_t executed = 0;
-  for (uint64_t s = start; s < start + steps; ++s) {
-    if (options.should_stop && options.should_stop()) {
-      report.stopped_early = true;
-      break;
-    }
-    step_ = s + 1;  // 1-indexed timestep for AdamW bias correction
-    data.FillBatch(header_.batch, input_slot, label_slot);
-    Execute(train_program_);
-    ++executed;
+  {
+    // The feeder thread stages batch s+1 (shuffle gather + epoch reshuffles)
+    // while step s computes; the batch sequence is exactly the serial one, so
+    // pipelining never changes what is trained on. Scoped to the loop: the
+    // destructor joins the feeder on every exit path — including the error
+    // returns below — and the surrounding Evaluate() calls see the dataset
+    // single-threaded again.
+    BatchPipeline feeder(data, header_.batch, header_.input_floats,
+                         header_.label_kind == 0 ? 0 : header_.label_bytes);
+    for (uint64_t s = start; s < start + steps; ++s) {
+      if (options.should_stop && options.should_stop()) {
+        report.stopped_early = true;
+        break;
+      }
+      step_ = s + 1;  // 1-indexed timestep for AdamW bias correction
+      feeder.NextBatch(input_slot, label_slot);
+      Execute(train_program_);
+      ++executed;
 
-    const float loss = LossValue();
-    // A non-finite loss means the parameters (and any AdamW moments) are
-    // already poisoned; continuing can only burn energy. Fail the update —
-    // the source model on disk is untouched by construction.
-    if (!std::isfinite(loss))
-      return std::unexpected(
-          "UpdateEngine: loss became non-finite at step " +
-          std::to_string(step_) + " — aborting the update");
-    if (options.record_loss_curve) report.loss_curve.push_back(loss);
-    if (s - start < window) {
-      first_sum += loss;
-      ++first_n;
-    }
-    if (s - start >= steps - window) {
-      last_sum += loss;
-      ++last_n;
-    }
-    if (options.log_every && (s - start) % options.log_every == 0)
-      std::fprintf(stderr, "seeml-update: step %llu  loss %.6f\n",
-                   static_cast<unsigned long long>(step_), loss);
-    if (options.checkpoint_every && !options.checkpoint_path.empty() &&
-        step_ % options.checkpoint_every == 0) {
-      if (auto r = SaveCheckpoint(options.checkpoint_path); !r)
-        return std::unexpected(r.error());
+      const float loss = LossValue();
+      // A non-finite loss means the parameters (and any AdamW moments) are
+      // already poisoned; continuing can only burn energy. Fail the update —
+      // the source model on disk is untouched by construction.
+      if (!std::isfinite(loss))
+        return std::unexpected(
+            "UpdateEngine: loss became non-finite at step " +
+            std::to_string(step_) + " — aborting the update");
+      if (options.record_loss_curve) report.loss_curve.push_back(loss);
+      if (s - start < window) {
+        first_sum += loss;
+        ++first_n;
+      }
+      if (s - start >= steps - window) {
+        last_sum += loss;
+        ++last_n;
+      }
+      if (options.log_every && (s - start) % options.log_every == 0)
+        std::fprintf(stderr, "seeml-update: step %llu  loss %.6f\n",
+                     static_cast<unsigned long long>(step_), loss);
+      if (options.checkpoint_every && !options.checkpoint_path.empty() &&
+          step_ % options.checkpoint_every == 0) {
+        if (auto r = SaveCheckpoint(options.checkpoint_path); !r)
+          return std::unexpected(r.error());
+      }
     }
   }
 

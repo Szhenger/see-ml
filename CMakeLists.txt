@@ -30,6 +30,20 @@ option(SEEML_FUZZ "Build the libFuzzer format-parser harness" OFF)
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
+find_package(Threads REQUIRED)
+
+# ==============================================================================
+# Target 0: The parallel substrate (seeml_parallel)
+# Deterministic chunked ParallelFor over a persistent worker pool; shared by
+# the compiler's byte-heavy passes and the runtime's kernels. Chunk geometry
+# is thread-count-independent, so parallel results are bitwise-reproducible.
+# ==============================================================================
+
+add_library(seeml_parallel STATIC
+    source/parallel_for.cc
+)
+target_link_libraries(seeml_parallel PUBLIC Threads::Threads)
+
 # ==============================================================================
 # Target 1: SIR — the SeeML Intermediate Representation (+ shared utilities)
 # ==============================================================================
@@ -41,7 +55,7 @@ add_library(seeml_sir STATIC
 
 # ==============================================================================
 # Target 2: The Update Compiler (seeml_update)
-# Heavyweight AOT target: front end (SMF import), trainer (LoRA / autodiff /
+# Heavyweight AOT target: front end (SMF import), analysis (LoRA / autodiff /
 # optimizer / merge passes), back end (arena binding, lowering, plan assembly,
 # native packaging).
 # ==============================================================================
@@ -49,13 +63,13 @@ add_library(seeml_sir STATIC
 add_library(seeml_update STATIC
     source/smf.cc
     compiler/frontend/forward_builder.cc
-    compiler/trainer/update_passes.cc
+    compiler/analysis/update_passes.cc
     compiler/backend/arena_binder.cc
     compiler/backend/instruction_lowering.cc
     compiler/backend/update_compiler.cc
     compiler/backend/native_emitter.cc
 )
-target_link_libraries(seeml_update PUBLIC seeml_sir)
+target_link_libraries(seeml_update PUBLIC seeml_sir seeml_parallel)
 
 # ==============================================================================
 # Target 3: The Update Runtime (seeml_update_rt)
@@ -66,11 +80,13 @@ target_link_libraries(seeml_update PUBLIC seeml_sir)
 add_library(seeml_update_rt STATIC
     runtime/update_kernels.cc
     runtime/dataset.cc
+    runtime/batch_pipeline.cc
     runtime/durable_io.cc
     runtime/plan_validator.cc
     runtime/checkpoint.cc
     runtime/update_engine.cc
 )
+target_link_libraries(seeml_update_rt PUBLIC seeml_parallel)
 
 # ==============================================================================
 # Tools
@@ -110,6 +126,7 @@ function(seeml_add_test name src)
 endfunction()
 
 seeml_add_test(seeml_smf_test             test/source/smf_test.cc)
+seeml_add_test(seeml_parallel_for_test    test/source/parallel_for_test.cc)
 seeml_add_test(seeml_sir_test             test/compiler/sir_test.cc)
 seeml_add_test(seeml_forward_builder_test test/compiler/forward_builder_test.cc)
 seeml_add_test(seeml_update_passes_test   test/compiler/update_passes_test.cc)

@@ -1,4 +1,4 @@
-#include "compiler/trainer/update_passes.h"
+#include "compiler/analysis/update_passes.h"
 
 #include <algorithm>
 #include <cmath>

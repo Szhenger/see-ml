@@ -4,11 +4,14 @@
 // These are the numerical ground truth the compiled plans execute on.
 // =============================================================================
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "runtime/update_kernels.h"
+#include "source/parallel_for.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 
@@ -309,6 +312,155 @@ TEST(Utility, FillAndCopy) {
   k::Copy(src.data(), dst.data(), 4);
   EXPECT_NEAR(dst[0], 1.0f, 0.0);
   EXPECT_NEAR(dst[3], 4.0f, 0.0);
+}
+
+// --- Parallel execution: bitwise determinism across thread counts -------------
+//
+// The kernels partition work into chunks whose geometry depends only on the
+// problem shape, so serial and wide executions must produce identical BITS —
+// not merely close values. Shapes below are chosen large enough that the
+// wide runs actually fan out (multiple chunks per kernel).
+
+/// Pins the pool width for one test; restores automatic resolution after.
+struct ScopedThreads {
+  explicit ScopedThreads(size_t n) {
+    seeml::update::SetParallelThreadCount(n);
+  }
+  ~ScopedThreads() { seeml::update::SetParallelThreadCount(0); }
+};
+
+template <typename Fn>
+std::vector<float> RunAtWidth(size_t threads, size_t out_size, Fn&& fill) {
+  ScopedThreads scoped(threads);
+  std::vector<float> out(out_size, 0.0f);
+  fill(out.data());
+  return out;
+}
+
+#define EXPECT_BITWISE_EQ_F32(a, b)                                       \
+  do {                                                                    \
+    const std::vector<float> bitwise_a_ = (a);                            \
+    const std::vector<float> bitwise_b_ = (b);                            \
+    ASSERT_EQ(bitwise_a_.size(), bitwise_b_.size());                      \
+    EXPECT_EQ(std::memcmp(bitwise_a_.data(), bitwise_b_.data(),           \
+                          bitwise_a_.size() * sizeof(float)),             \
+              0);                                                         \
+  } while (0)
+
+TEST(ParallelDeterminism, GemmFamilyIsThreadCountInvariant) {
+  const size_t M = 64, N = 96, K = 48;
+  const std::vector<float> a = RandnVector(M * K, 11);
+  const std::vector<float> b = RandnVector(K * N, 12);
+  const std::vector<float> bt = RandnVector(N * K, 13);
+  const std::vector<float> at = RandnVector(K * M, 14);
+  std::vector<int8_t> q8(K * N);
+  for (size_t i = 0; i < q8.size(); ++i)
+    q8[i] = static_cast<int8_t>((i * 37 + 11) % 255 - 127);
+
+  auto nn = [&](float* c) { k::GemmNN(a.data(), b.data(), c, M, N, K); };
+  auto nt = [&](float* c) { k::GemmNT(a.data(), bt.data(), c, M, N, K); };
+  auto tn = [&](float* c) { k::GemmTN(at.data(), b.data(), c, M, N, K); };
+  auto acc = [&](float* c) {
+    k::Fill(c, 0.25f, M * N);
+    k::GemmAccNN(a.data(), b.data(), c, M, N, K, 0.5f);
+  };
+  auto nnq8 = [&](float* c) {
+    k::GemmNNQ8(a.data(), q8.data(), c, M, N, K, 0.01f);
+  };
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, M * N, nn), RunAtWidth(8, M * N, nn));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, M * N, nt), RunAtWidth(8, M * N, nt));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, M * N, tn), RunAtWidth(8, M * N, tn));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, M * N, acc), RunAtWidth(8, M * N, acc));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, M * N, nnq8),
+                        RunAtWidth(8, M * N, nnq8));
+}
+
+TEST(ParallelDeterminism, LossReductionsAreThreadCountInvariant) {
+  const size_t N = 2048, C = 8;
+  const std::vector<float> logits = RandnVector(N * C, 21);
+  const std::vector<float> targets = RandnVector(N * C, 22);
+  std::vector<int32_t> labels(N);
+  for (size_t i = 0; i < N; ++i) labels[i] = static_cast<int32_t>(i % C);
+
+  auto xent = [&](float* out) {
+    std::vector<float> probs(N * C);
+    k::SoftmaxXEntFwd(logits.data(), labels.data(), out, probs.data(), N, C);
+    std::memcpy(out + 1, probs.data(),
+                std::min<size_t>(N * C, 63) * sizeof(float));
+  };
+  auto mse = [&](float* out) {
+    k::MseFwd(logits.data(), targets.data(), out, N * C);
+  };
+  auto kl = [&](float* out) {
+    std::vector<float> p_s(N * C), p_t(N * C);
+    k::KLDistillFwd(logits.data(), targets.data(), out, p_s.data(),
+                    p_t.data(), N, C, 2.0f);
+  };
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, 64, xent), RunAtWidth(8, 64, xent));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, 1, mse), RunAtWidth(8, 1, mse));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, 1, kl), RunAtWidth(8, 1, kl));
+}
+
+TEST(ParallelDeterminism, StatefulKernelsAreThreadCountInvariant) {
+  const size_t n = 100'000;
+  const std::vector<float> g = RandnVector(n, 31);
+  const std::vector<float> p0 = RandnVector(n, 32);
+  const std::vector<float> m0 = RandnVector(n, 33, 0.1f);
+  std::vector<float> v0(n);
+  for (size_t i = 0; i < n; ++i) v0[i] = std::fabs(m0[i]) + 0.01f;
+
+  auto adamw = [&](float* out) {
+    std::vector<float> p = p0, m = m0, v = v0;
+    k::AdamWStep(p.data(), g.data(), m.data(), v.data(), n, 0.01f, 0.9f,
+                 0.999f, 1e-8f, 0.01f, 3);
+    std::memcpy(out, p.data(), n * sizeof(float));
+  };
+  auto clip = [&](float* out) {
+    std::memcpy(out, g.data(), n * sizeof(float));
+    k::ClipNorm(out, n, 1.0f);  // ||g|| >> 1 for n randn values: rescales
+  };
+  const size_t rows = 64, cols = 2048;
+  const std::vector<float> dy = RandnVector(rows * cols, 34);
+  auto reduce = [&](float* out) {
+    k::ReduceRows(dy.data(), out, rows, cols);
+  };
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, n, adamw), RunAtWidth(8, n, adamw));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, n, clip), RunAtWidth(8, n, clip));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, 2048, reduce),
+                        RunAtWidth(8, 2048, reduce));
+}
+
+TEST(ParallelDeterminism, RowAndElementwiseKernelsAreThreadCountInvariant) {
+  const size_t rows = 512, cols = 96;
+  const size_t n = rows * cols;
+  const std::vector<float> x = RandnVector(n, 41);
+  const std::vector<float> dy = RandnVector(n, 42);
+  const std::vector<float> gamma = RandnVector(cols, 43);
+  const std::vector<float> beta = RandnVector(cols, 44);
+
+  auto layernorm = [&](float* out) {
+    std::vector<float> mean(rows), rstd(rows), y(n), dx(n);
+    k::LayerNormFwd(x.data(), gamma.data(), beta.data(), y.data(),
+                    mean.data(), rstd.data(), rows, cols);
+    k::LayerNormBwd(dy.data(), x.data(), gamma.data(), mean.data(),
+                    rstd.data(), dx.data(), rows, cols);
+    std::memcpy(out, y.data(), n * sizeof(float));
+    std::memcpy(out + n, dx.data(), n * sizeof(float));
+  };
+  auto gelu = [&](float* out) {
+    k::GeluFwd(x.data(), out, n);
+    k::GeluBwd(dy.data(), x.data(), out + n, n);
+  };
+  auto silu = [&](float* out) {
+    k::SiluFwd(x.data(), out, n);
+    k::SiluBwd(dy.data(), x.data(), out + n, n);
+  };
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, 2 * n, layernorm),
+                        RunAtWidth(8, 2 * n, layernorm));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, 2 * n, gelu),
+                        RunAtWidth(8, 2 * n, gelu));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, 2 * n, silu),
+                        RunAtWidth(8, 2 * n, silu));
 }
 
 }  // namespace

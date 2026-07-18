@@ -68,14 +68,20 @@ TEST(NativeEmitter, EmitsCompletePackage) {
   // the repository checkout.
   for (const char* rel :
        {"runtime/update_engine.cc", "runtime/update_kernels.cc",
-        "runtime/dataset.cc", "runtime/durable_io.cc",
-        "runtime/plan_validator.cc", "runtime/checkpoint.cc",
-        "source/update_types.h", "source/hash.h"}) {
+        "runtime/dataset.cc", "runtime/batch_pipeline.cc",
+        "runtime/durable_io.cc", "runtime/plan_validator.cc",
+        "runtime/checkpoint.cc", "source/update_types.h", "source/hash.h",
+        "source/parallel_for.h", "source/parallel_for.cc"}) {
     EXPECT_TRUE(std::filesystem::exists(
         std::filesystem::path(out_dir) / rel));
   }
   const std::string script = ReadText(paths.build_script);
   EXPECT_STR_CONTAINS(script, "runtime/update_engine.cc");
+  // The vendored runtime is threaded: the script must compile the parallel
+  // substrate and link with -pthread.
+  EXPECT_STR_CONTAINS(script, "source/parallel_for.cc");
+  EXPECT_STR_CONTAINS(script, "runtime/batch_pipeline.cc");
+  EXPECT_STR_CONTAINS(script, "-pthread");
 
   // The build script is marked executable.
   const auto perms = std::filesystem::status(paths.build_script).permissions();

@@ -15,6 +15,7 @@
 #include "runtime/dataset.h"
 #include "runtime/update_engine.h"
 #include "source/hash.h"
+#include "source/parallel_for.h"
 #include "source/smf.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
@@ -454,6 +455,47 @@ TEST(UpdateEngineTrain, ShouldStopInterruptsAndLossCurveRecords) {
   EXPECT_TRUE(report.stopped_early);
   EXPECT_EQ(report.steps, 25u);
   EXPECT_EQ(report.loss_curve.size(), 25u);
+}
+
+TEST(UpdateEngineTrain, TrainingIsBitwiseInvariantAcrossThreadCounts) {
+  // The whole update — batch pipeline, parallel kernels, ordered loss
+  // reductions — must compute identical BITS at any pool width: with one
+  // thread the feeder and every kernel run inline, with four the feeder
+  // overlaps compute and the kernels fan out, and nothing may change.
+  const std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
+  ASSERT_FALSE(plan.empty());
+
+  auto run = [&](size_t threads, std::vector<float>* curve,
+                 std::vector<uint8_t>* persistent) {
+    seeml::update::SetParallelThreadCount(threads);
+    UpdateEngine engine;
+    EXPECT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
+    auto data = MakeClassificationData(30, kInDim, 5);
+    EXPECT_OK(data);
+    data->EnableShuffle(3);  // batches cross epoch boundaries mid-run
+    TrainOptions options = Quiet();
+    options.record_loss_curve = true;
+    auto report = engine.Train(*data, 25, options);
+    EXPECT_OK(report);
+    if (!report) return;
+    *curve = report->loss_curve;
+    persistent->assign(engine.arena(),
+                       engine.arena() + engine.header().persistent_size);
+  };
+
+  std::vector<float> curve_serial, curve_wide;
+  std::vector<uint8_t> persist_serial, persist_wide;
+  run(1, &curve_serial, &persist_serial);
+  run(4, &curve_wide, &persist_wide);
+  seeml::update::SetParallelThreadCount(0);
+
+  ASSERT_EQ(curve_serial.size(), 25u);
+  ASSERT_EQ(curve_wide.size(), 25u);
+  EXPECT_EQ(std::memcmp(curve_serial.data(), curve_wide.data(),
+                        curve_serial.size() * sizeof(float)),
+            0);
+  ASSERT_FALSE(persist_serial.empty());
+  EXPECT_TRUE(persist_serial == persist_wide);
 }
 
 }  // namespace
