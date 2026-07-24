@@ -1,18 +1,21 @@
-#include "source/smf.h"
+#include "compiler/frontend/ingressor/model_reader.h"
 
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <thread>
+#include <vector>
 
 #include "source/hash.h"
+#include "source/parallel_for.h"
 
 namespace seeml::update {
 
 namespace {
 
-constexpr uint64_t kDataAlignment = 64;
-
-uint64_t AlignUp(uint64_t v, uint64_t a) { return (v + a - 1) & ~(a - 1); }
+// Constant-tensor payloads below this total stay on the serial copy path:
+// fanning a few KiB over the worker pool costs more than the copies.
+constexpr uint64_t kParallelCopyThreshold = 4u << 20;
 
 // Overflow-checked u64 multiply for validating file-supplied sizes.
 bool MulU64(uint64_t a, uint64_t b, uint64_t* out) {
@@ -53,28 +56,7 @@ struct Reader {
   }
 };
 
-struct Writer {
-  std::vector<uint8_t> buf;
-
-  template <typename T>
-  void Write(T v) {
-    const auto* p = reinterpret_cast<const uint8_t*>(&v);
-    buf.insert(buf.end(), p, p + sizeof(T));
-  }
-
-  void WriteStr(const std::string& s) {
-    Write<uint16_t>(static_cast<uint16_t>(s.size()));
-    buf.insert(buf.end(), s.begin(), s.end());
-  }
-};
-
 }  // namespace
-
-const SmfTensor* SmfModel::FindTensor(std::string_view name) const {
-  for (const auto& t : tensors)
-    if (t.name == name) return &t;
-  return nullptr;
-}
 
 std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   std::ifstream f(path, std::ios::binary);
@@ -104,6 +86,8 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   const uint32_t num_ops = r.Read<uint32_t>();
 
   SmfModel model;
+  std::vector<size_t> const_tensors;  // indices of validated const tensors
+  uint64_t const_bytes = 0;
   model.input_name = r.ReadStr();
   model.output_name = r.ReadStr();
   // Counts are validated implicitly by the bounded Reader; reserving to the
@@ -152,9 +136,11 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
           t.byte_size > bytes.size() - t.data_offset)
         return std::unexpected("SMF: tensor '" + t.name +
                                "' data range exceeds file size");
-      t.data.assign(bytes.begin() + static_cast<ptrdiff_t>(t.data_offset),
-                    bytes.begin() +
-                        static_cast<ptrdiff_t>(t.data_offset + t.byte_size));
+      // Payload copies are deferred: the scan pass touches metadata only, so
+      // every blob is validated before the first byte moves and the copies
+      // can be fanned out together afterwards.
+      const_tensors.push_back(model.tensors.size());
+      const_bytes += t.byte_size;
     }
     model.tensors.push_back(std::move(t));
   }
@@ -176,73 +162,55 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   }
 
   if (!r.ok) return std::unexpected("SMF: truncated file '" + path + "'");
-  model.content_hash = Fnv1a64(bytes.data(), bytes.size());
+
+  // Materialize the validated constant payloads. Each copy writes only its
+  // own tensor, so large models fan the copies out over ParallelFor
+  // (deterministic: chunk geometry never depends on the worker count);
+  // small ones stay serial.
+  auto copy_payload = [&](size_t idx) {
+    SmfTensor& t = model.tensors[idx];
+    t.data.assign(bytes.begin() + static_cast<ptrdiff_t>(t.data_offset),
+                  bytes.begin() +
+                      static_cast<ptrdiff_t>(t.data_offset + t.byte_size));
+  };
+  if (const_bytes >= kParallelCopyThreshold && const_tensors.size() > 1) {
+    ParallelFor(const_tensors.size(), 1,
+                [&](size_t begin, size_t end, size_t /*chunk*/) {
+                  for (size_t i = begin; i < end; ++i)
+                    copy_payload(const_tensors[i]);
+                });
+  } else {
+    for (size_t idx : const_tensors) copy_payload(idx);
+  }
+
+  model.content_hash = ContentHash64(bytes.data(), bytes.size());
   return model;
 }
 
-std::expected<void, std::string> SaveSmf(const std::string& path,
-                                         SmfModel& model) {
-  // Pass 1: serialize the header/metadata with zeroed data offsets to learn
-  // the metadata section size, then lay out the 64-aligned data section.
-  auto serialize_meta = [&](Writer& w) {
-    w.Write<uint32_t>(kSmfMagic);
-    w.Write<uint32_t>(kSmfVersion);
-    w.Write<uint32_t>(static_cast<uint32_t>(model.tensors.size()));
-    w.Write<uint32_t>(static_cast<uint32_t>(model.ops.size()));
-    w.WriteStr(model.input_name);
-    w.WriteStr(model.output_name);
-    for (const auto& t : model.tensors) {
-      w.WriteStr(t.name);
-      w.Write<uint8_t>(static_cast<uint8_t>(t.dims.size()));
-      w.Write<uint8_t>(t.is_const ? 1 : 0);
-      for (int64_t d : t.dims) w.Write<int64_t>(d);
-      w.Write<uint64_t>(t.data_offset);
-      w.Write<uint64_t>(t.byte_size);
-    }
-    for (const auto& op : model.ops) {
-      w.Write<uint8_t>(static_cast<uint8_t>(op.kind));
-      w.WriteStr(op.name);
-      w.Write<uint8_t>(static_cast<uint8_t>(op.inputs.size()));
-      for (const auto& in : op.inputs) w.WriteStr(in);
-      w.WriteStr(op.output);
-    }
-  };
-
-  Writer probe;
-  serialize_meta(probe);
-
-  uint64_t cursor = AlignUp(probe.buf.size(), kDataAlignment);
-  for (auto& t : model.tensors) {
-    if (!t.is_const) continue;
-    if (t.data.empty())
-      return std::unexpected("SMF: constant tensor '" + t.name +
-                             "' has no data to serialize");
-    t.byte_size = t.data.size();
-    t.data_offset = cursor;
-    cursor = AlignUp(cursor + t.byte_size, kDataAlignment);
+std::expected<std::vector<SmfModel>, std::string> LoadSmfMany(
+    std::span<const std::string> paths) {
+  std::vector<std::expected<SmfModel, std::string>> results(paths.size());
+  if (paths.size() == 1) {
+    results[0] = LoadSmf(paths[0]);
+  } else if (!paths.empty()) {
+    // Each loader writes only its own slot; LoadSmf is thread-compatible and
+    // the worker pool serializes the in-flight data-parallel phases.
+    std::vector<std::thread> loaders;
+    loaders.reserve(paths.size());
+    for (size_t i = 0; i < paths.size(); ++i)
+      loaders.emplace_back([&results, &paths, i] {
+        results[i] = LoadSmf(paths[i]);
+      });
+    for (std::thread& t : loaders) t.join();
   }
 
-  // Pass 2: re-serialize with the final offsets, append the data section.
-  // The probe told us the exact final size — reserve it up front so neither
-  // the metadata append nor the data-section resize ever reallocates.
-  Writer w;
-  w.buf.reserve(cursor);
-  serialize_meta(w);
-  w.buf.resize(cursor, 0);
-  for (const auto& t : model.tensors) {
-    if (!t.is_const) continue;
-    std::memcpy(w.buf.data() + t.data_offset, t.data.data(), t.byte_size);
+  std::vector<SmfModel> models;
+  models.reserve(paths.size());
+  for (auto& r : results) {
+    if (!r) return std::unexpected(r.error());
+    models.push_back(std::move(*r));
   }
-
-  std::ofstream f(path, std::ios::binary | std::ios::trunc);
-  if (!f) return std::unexpected("SMF: cannot write '" + path + "'");
-  f.write(reinterpret_cast<const char*>(w.buf.data()),
-          static_cast<std::streamsize>(w.buf.size()));
-  if (!f) return std::unexpected("SMF: short write to '" + path + "'");
-  // The model now corresponds to the saved bytes: bind its identity so a
-  // plan compiled from this in-memory model patches this exact file.
-  model.content_hash = Fnv1a64(w.buf.data(), w.buf.size());
-  return {};
+  return models;
 }
 
 }  // namespace seeml::update

@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <thread>
 #include <vector>
 
 #include "source/parallel_for.h"
@@ -166,6 +167,31 @@ TEST(ParallelFor, BackToBackCallsReuseThePool) {
     });
     EXPECT_EQ(out[n - 1], static_cast<uint32_t>(n - 1));
   }
+}
+
+TEST(ParallelFor, ConcurrentExternalSubmittersBothComplete) {
+  // Two non-worker threads submit loops at once: in-flight jobs serialize in
+  // arrival order, and neither may lose chunks, steal the other's workers,
+  // or unpublish the other's job.
+  ScopedThreads threads(4);
+  const size_t n = 200'000;
+  std::vector<uint32_t> a(n, 0), b(n, 0);
+  std::thread other([&] {
+    ParallelFor(n, 64, [&](size_t begin, size_t end, size_t) {
+      for (size_t i = begin; i < end; ++i) a[i] = static_cast<uint32_t>(i * 3);
+    });
+  });
+  ParallelFor(n, 64, [&](size_t begin, size_t end, size_t) {
+    for (size_t i = begin; i < end; ++i) b[i] = static_cast<uint32_t>(i * 7);
+  });
+  other.join();
+
+  size_t bad = 0;
+  for (size_t i = 0; i < n; ++i) {
+    bad += a[i] != static_cast<uint32_t>(i * 3);
+    bad += b[i] != static_cast<uint32_t>(i * 7);
+  }
+  EXPECT_EQ(bad, 0u);
 }
 
 }  // namespace

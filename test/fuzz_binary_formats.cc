@@ -26,7 +26,7 @@
 #include "runtime/dataset.h"
 #include "runtime/update_engine.h"
 #include "source/hash.h"
-#include "source/smf.h"
+#include "compiler/frontend/ingressor/model_reader.h"
 
 namespace {
 

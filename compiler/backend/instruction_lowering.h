@@ -23,7 +23,7 @@
 namespace seeml::update {
 
 using ResolveFn = std::function<std::expected<uint64_t, std::string>(
-    const seecpp::sir::Value*)>;
+    const seeml::sir::Value*)>;
 
 /// Lowers `ops` in order. Lowering over an explicit op list (rather than a
 /// whole block) lets the driver emit the evaluation program from the primal
@@ -31,9 +31,9 @@ using ResolveFn = std::function<std::expected<uint64_t, std::string>(
 /// the backward pass. `quant_scales` maps frozen weights stored as int8 to
 /// their dequantization scale; GEMMs over them lower to the q8 opcodes.
 [[nodiscard]] std::expected<std::vector<UpdateInstruction>, std::string>
-LowerOps(const std::vector<seecpp::sir::Operation*>& ops,
+LowerOps(const std::vector<seeml::sir::Operation*>& ops,
          const ResolveFn& resolve,
-         const std::unordered_map<const seecpp::sir::Value*, float>&
+         const std::unordered_map<const seeml::sir::Value*, float>&
              quant_scales);
 
 }  // namespace seeml::update

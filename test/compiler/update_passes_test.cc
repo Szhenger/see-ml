@@ -8,17 +8,17 @@
 #include <string>
 #include <vector>
 
-#include "compiler/frontend/forward_builder.h"
+#include "compiler/frontend/parser/parser.h"
 #include "compiler/frontend/sir.h"
 #include "compiler/analysis/update_passes.h"
-#include "source/smf.h"
+#include "compiler/frontend/ingressor/model_format.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 
 namespace {
 
 using namespace seeml::update;
-namespace sir = seecpp::sir;
+namespace sir = seeml::sir;
 using seeml::testing::MakeMlp;
 
 constexpr int64_t kBatch = 4;

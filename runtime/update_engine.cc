@@ -527,7 +527,8 @@ std::expected<void, std::string> UpdateEngine::CommitToModel(
   // meaningful inside the exact file the plan was compiled from. A same-sized
   // different model would otherwise be silently corrupted.
   if (header_.source_model_hash != 0 &&
-      up::Fnv1a64(bytes->data(), bytes->size()) != header_.source_model_hash)
+      up::ContentHash64(bytes->data(), bytes->size()) !=
+          header_.source_model_hash)
     return std::unexpected(
         "UpdateEngine: source model does not match the plan's "
         "source_model_hash — refusing to patch '" +

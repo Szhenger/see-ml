@@ -50,19 +50,25 @@ target_link_libraries(seeml_parallel PUBLIC Threads::Threads)
 
 add_library(seeml_sir STATIC
     compiler/frontend/sir.cc
+    compiler/frontend/op_builder.cc
     compiler/diagnostics/logger.cc
 )
 
 # ==============================================================================
 # Target 2: The Update Compiler (seeml_update)
-# Heavyweight AOT target: front end (SMF import), analysis (LoRA / autodiff /
-# optimizer / merge passes), back end (arena binding, lowering, plan assembly,
-# native packaging).
+# Heavyweight AOT target: front end (ingressor: SMF container I/O; parser:
+# SMF graph -> forward SIR), analysis (LoRA / autodiff / optimizer / merge
+# passes), back end (arena binding, lowering, plan assembly, native packaging).
 # ==============================================================================
 
 add_library(seeml_update STATIC
-    source/smf.cc
-    compiler/frontend/forward_builder.cc
+    compiler/frontend/ingressor/model_format.cc
+    compiler/frontend/ingressor/model_reader.cc
+    compiler/frontend/ingressor/model_writer.cc
+    compiler/frontend/ingressor/resource_analyzer.cc
+    compiler/frontend/parser/value_resolver.cc
+    compiler/frontend/parser/sema.cc
+    compiler/frontend/parser/parser.cc
     compiler/analysis/update_passes.cc
     compiler/backend/arena_binder.cc
     compiler/backend/instruction_lowering.cc
@@ -125,10 +131,12 @@ function(seeml_add_test name src)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-seeml_add_test(seeml_smf_test             test/source/smf_test.cc)
+seeml_add_test(seeml_model_io_test        test/compiler/model_io_test.cc)
+seeml_add_test(seeml_resource_analyzer_test test/compiler/resource_analyzer_test.cc)
+seeml_add_test(seeml_hash_test            test/source/hash_test.cc)
 seeml_add_test(seeml_parallel_for_test    test/source/parallel_for_test.cc)
 seeml_add_test(seeml_sir_test             test/compiler/sir_test.cc)
-seeml_add_test(seeml_forward_builder_test test/compiler/forward_builder_test.cc)
+seeml_add_test(seeml_parser_test          test/compiler/parser_test.cc)
 seeml_add_test(seeml_update_passes_test   test/compiler/update_passes_test.cc)
 seeml_add_test(seeml_update_compiler_test test/compiler/update_compiler_test.cc)
 seeml_add_test(seeml_native_emitter_test  test/compiler/native_emitter_test.cc)

@@ -9,7 +9,7 @@
 #include "source/update_types.h"
 #include "runtime/dataset.h"
 #include "runtime/update_engine.h"
-#include "source/smf.h"
+#include "compiler/frontend/ingressor/model_format.h"
 
 // =============================================================================
 // Shared fixtures for the SeeML test suites: deterministic model builders,

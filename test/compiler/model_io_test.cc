@@ -8,7 +8,8 @@
 #include <string>
 #include <vector>
 
-#include "source/smf.h"
+#include "compiler/frontend/ingressor/model_reader.h"
+#include "compiler/frontend/ingressor/model_writer.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 #include "test/support/scoped_temp_dir.h"
@@ -213,6 +214,39 @@ TEST(Smf, SaveIsDeterministic) {
   ASSERT_OK(SaveSmf(pa, a));
   ASSERT_OK(SaveSmf(pb, b));
   EXPECT_TRUE(ReadAll(pa) == ReadAll(pb));
+}
+
+TEST(Smf, ConcurrentLoadsMatchSequentialLoads) {
+  ScopedTempDir dir;
+  SmfModel a = MakeMlp(4, 8, 2, 1);
+  SmfModel b = MakeMlp(6, 12, 3, 2);
+  const std::string pa = dir.File("a.smf");
+  const std::string pb = dir.File("b.smf");
+  ASSERT_OK(SaveSmf(pa, a));
+  ASSERT_OK(SaveSmf(pb, b));
+
+  ASSERT_OK_AND_ASSIGN(SmfModel sa, LoadSmf(pa));
+  ASSERT_OK_AND_ASSIGN(SmfModel sb, LoadSmf(pb));
+
+  const std::string paths[] = {pa, pb};
+  ASSERT_OK_AND_ASSIGN(auto models, LoadSmfMany(paths));
+  ASSERT_EQ(models.size(), 2u);
+  EXPECT_EQ(models[0].content_hash, sa.content_hash);
+  EXPECT_EQ(models[1].content_hash, sb.content_hash);
+  EXPECT_EQ(models[0].tensors.size(), sa.tensors.size());
+  EXPECT_EQ(models[1].ops.size(), sb.ops.size());
+  ASSERT_NE(models[1].FindTensor("w1"), nullptr);
+  EXPECT_TRUE(models[1].FindTensor("w1")->data == sb.FindTensor("w1")->data);
+}
+
+TEST(Smf, ConcurrentLoadReportsFirstFailureInInputOrder) {
+  ScopedTempDir dir;
+  SmfModel a = MakeMlp(4, 8, 2, 1);
+  const std::string pa = dir.File("a.smf");
+  ASSERT_OK(SaveSmf(pa, a));
+
+  const std::string paths[] = {dir.File("missing.smf"), pa};
+  EXPECT_ERROR_CONTAINS(LoadSmfMany(paths), "missing.smf");
 }
 
 }  // namespace

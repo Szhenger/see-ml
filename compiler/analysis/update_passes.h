@@ -42,10 +42,15 @@ namespace seeml::update {
 
 /// One grafted LoRA adapter and the frozen weight it updates.
 struct GraftedAdapter {
-  seecpp::sir::Value* frozen_weight = nullptr;  // W  [K, M] (rodata)
-  seecpp::sir::Value* A = nullptr;              // A  [K, r] (randn init)
-  seecpp::sir::Value* B = nullptr;              // B  [r, M] (zeros init)
+  seeml::sir::Value* frozen_weight = nullptr;  // W  [K, M] (rodata)
+  seeml::sir::Value* A = nullptr;              // A  [K, r] (randn init)
+  seeml::sir::Value* B = nullptr;              // B  [r, M] (zeros init)
   float scale = 1.0f;                           // α / r
+  // Unique per-site naming stem ("w", or "w@1" for the second graft onto a
+  // tied weight); every value id derived from this adapter uses it, keeping
+  // ids unique across the training AND merge programs (Block::verify
+  // enforces uniqueness).
+  std::string id_base;
 };
 
 class LoraGrafter {
@@ -58,7 +63,7 @@ class LoraGrafter {
   /// Because B is zero-initialized, step 0 of the update is exactly the
   /// source model — the update starts from the identity.
   [[nodiscard]] std::expected<std::vector<GraftedAdapter>, std::string> Run(
-      seecpp::sir::Block& block);
+      seeml::sir::Block& block);
 
  private:
   LoRASpec spec_;
@@ -70,9 +75,9 @@ class TrainableAutodiff {
   /// the block; `trainables` defines the set of parameters that need
   /// gradients. Returns the map param -> synthesized gradient value.
   [[nodiscard]] std::expected<
-      std::unordered_map<seecpp::sir::Value*, seecpp::sir::Value*>, std::string>
-  Run(seecpp::sir::Block& block, seecpp::sir::Value* loss,
-      const std::vector<seecpp::sir::Value*>& trainables);
+      std::unordered_map<seeml::sir::Value*, seeml::sir::Value*>, std::string>
+  Run(seeml::sir::Block& block, seeml::sir::Value* loss,
+      const std::vector<seeml::sir::Value*>& trainables);
 };
 
 class OptimizerSynthesizer {
@@ -80,8 +85,8 @@ class OptimizerSynthesizer {
   explicit OptimizerSynthesizer(OptimizerSpec spec) : spec_(spec) {}
 
   [[nodiscard]] std::expected<void, std::string> Run(
-      seecpp::sir::Block& block,
-      const std::unordered_map<seecpp::sir::Value*, seecpp::sir::Value*>&
+      seeml::sir::Block& block,
+      const std::unordered_map<seeml::sir::Value*, seeml::sir::Value*>&
           param_grads);
 
  private:
@@ -93,11 +98,11 @@ class OptimizerSynthesizer {
 /// returns an alias map that lowering uses to resolve those mirrors to the
 /// training program's already-bound offsets.
 struct MergeProgram {
-  std::unique_ptr<seecpp::sir::Block> block;
+  std::unique_ptr<seeml::sir::Block> block;
   // mirror value in the merge block -> original value in the training block
-  std::unordered_map<seecpp::sir::Value*, seecpp::sir::Value*> aliases;
+  std::unordered_map<seeml::sir::Value*, seeml::sir::Value*> aliases;
   // delta output value -> the adapter it belongs to (for the emit table)
-  std::vector<std::pair<seecpp::sir::Value*, const GraftedAdapter*>> outputs;
+  std::vector<std::pair<seeml::sir::Value*, const GraftedAdapter*>> outputs;
 };
 
 class MergeBuilder {

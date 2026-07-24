@@ -1,5 +1,5 @@
-#ifndef SEECPP_COMPILER_FRONTEND_SIR_H_
-#define SEECPP_COMPILER_FRONTEND_SIR_H_
+#ifndef SEEML_COMPILER_FRONTEND_SIR_H_
+#define SEEML_COMPILER_FRONTEND_SIR_H_
 
 #include <vector>
 #include <string>
@@ -10,11 +10,23 @@
 #include <optional>
 #include <span>
 #include <cstdint>
+#include <expected>
 #include <functional>
 #include <atomic>
 #include <unordered_set>
 
-namespace seecpp::sir {
+// =============================================================================
+// Threading model: SIR is a single-writer structure. A Block — and every
+// Operation and Value it owns — may be mutated by one thread at a time;
+// nothing here locks. Distinct Blocks are independent and may be built
+// concurrently (auto-generated result ids come from one atomic counter), with
+// one caveat: a Value's use-list is written by its *readers* (addOperand /
+// setOperand / removeOp), so two threads may not build ops that reference the
+// same Value, even from different blocks. Once construction stops, any number
+// of threads may traverse concurrently.
+// =============================================================================
+
+namespace seeml::sir {
 
 class Operation;
 class Block;
@@ -68,7 +80,11 @@ struct Shape {
     int64_t rank() const { return static_cast<int64_t>(dims.size()); }
     bool isScalar() const { return dims.empty(); }
     bool isFullyStatic() const;
+    /// Element count; kDynamic when any dimension is dynamic/negative or the
+    /// product would overflow int64 ("unknown" saturates, never wraps).
     int64_t volume() const;
+    /// Bytes at dtype `dt`; 0 when the volume is unknown or the byte count
+    /// would overflow size_t.
     size_t byteSize(DataType dt) const;
 
     bool operator==(const Shape& o) const = default;
@@ -175,6 +191,11 @@ class Block {
 
     Operation* appendOp(std::string name);
     Operation* appendOp(std::unique_ptr<Operation> op);
+
+    /// Detaches `op` and returns ownership, fully unlinked: its operands'
+    /// use-lists drop it, and none of its results may still have uses
+    /// (asserted) — replaceAllUsesWith the consumers first. A removed op
+    /// must not be re-inserted; its use registration is gone.
     std::unique_ptr<Operation> removeOp(Operation* op);
 
     /// Inserts a sequence of operations immediately after `anchor`, preserving
@@ -184,7 +205,18 @@ class Block {
     void insertOpsAfter(Operation* anchor,
                         std::vector<std::unique_ptr<Operation>> new_ops);
 
-    bool validate() const;
+    /// The structural verifier — the invariant gate passes rerun after
+    /// mutating the graph. Checks, with a diagnostic naming the first
+    /// violation: SSA order (every operand defined by an earlier op or an
+    /// argument), value-id uniqueness, parent-block consistency, and
+    /// use-list symmetry (every value's use-list matches exactly the ops in
+    /// this block that reference it — drift here is how a buggy rewrite
+    /// corrupts later passes silently). Assumes the block is self-contained:
+    /// values defined here are only used by ops appended here.
+    [[nodiscard]] std::expected<void, std::string> verify() const;
+
+    /// verify() as a predicate.
+    bool validate() const { return verify().has_value(); }
 
     /// Traversals are templates rather than std::function sinks: walk() is
     /// the single hottest entry point of every compiler pass, and the
@@ -204,7 +236,6 @@ class Block {
  private:
     std::vector<std::unique_ptr<Value>> args_;
     std::vector<std::unique_ptr<Operation>> ops_;
-    mutable bool is_validated_ = false;
 };
 
 class Region {
@@ -217,36 +248,6 @@ class Region {
     std::vector<std::unique_ptr<Block>> blocks_;
 };
 
-struct OpBuilder {
-    static std::unique_ptr<Operation> conv2d(
-        Value* input, Value* filter, Value* bias,
-        std::vector<int64_t> strides,
-        std::vector<int64_t> pads = {0, 0, 0, 0},
-        std::vector<int64_t> dilations = {1, 1},
-        int64_t group = 1
-    );
+} // namespace seeml::sir
 
-    static std::unique_ptr<Operation> batchNorm(
-        Value* input, Value* scale, Value* bias,
-        Value* running_mean, Value* running_var,
-        float epsilon = 1e-5f
-    );
-
-    static std::unique_ptr<Operation> gemm(
-        Value* A, Value* B, Value* bias = nullptr,
-        bool trans_a = false, bool trans_b = false
-    );
-
-    static std::unique_ptr<Operation> relu(Value* input);
-
-    static std::unique_ptr<Operation> im2col(
-        Value* input,
-        std::vector<int64_t> kernel_shape,
-        std::vector<int64_t> strides,
-        std::vector<int64_t> pads
-    );
-};
-
-} // namespace seecpp::sir
-
-#endif // SEECPP_COMPILER_FRONTEND_SIR_H_
+#endif // SEEML_COMPILER_FRONTEND_SIR_H_

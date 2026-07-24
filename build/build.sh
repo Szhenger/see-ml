@@ -9,10 +9,16 @@ FLAGS="-std=c++23 -O2 -Wall -Wextra -Werror -pthread -I. -DSEEML_SOURCE_DIR='\"$
 compile() { echo "  CXX $1"; eval "$CXX $FLAGS -c '$1' -o 'build/$2'"; }
 
 compile compiler/frontend/sir.cc              sir.o
+compile compiler/frontend/op_builder.cc       op_builder.o
 compile compiler/diagnostics/logger.cc        logger.o
-compile source/smf.cc                         smf.o
+compile compiler/frontend/ingressor/model_format.cc model_format.o
+compile compiler/frontend/ingressor/model_reader.cc model_reader.o
+compile compiler/frontend/ingressor/model_writer.cc model_writer.o
+compile compiler/frontend/ingressor/resource_analyzer.cc resource_analyzer.o
 compile source/parallel_for.cc                parallel_for.o
-compile compiler/frontend/forward_builder.cc  forward_builder.o
+compile compiler/frontend/parser/value_resolver.cc value_resolver.o
+compile compiler/frontend/parser/sema.cc      sema.o
+compile compiler/frontend/parser/parser.cc    parser.o
 compile compiler/analysis/update_passes.cc    update_passes.o
 compile compiler/backend/arena_binder.cc      arena_binder.o
 compile compiler/backend/instruction_lowering.cc instruction_lowering.o
@@ -32,9 +38,12 @@ compile test/framework/seetest_main.cc        seetest_main.o
 compile test/support/scoped_temp_dir.cc       scoped_temp_dir.o
 compile test/support/builders.cc              builders.o
 
-LIBS="build/smf.o build/forward_builder.o build/update_passes.o \
+LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
+      build/resource_analyzer.o \
+      build/value_resolver.o build/sema.o build/parser.o build/update_passes.o \
       build/arena_binder.o build/instruction_lowering.o \
       build/update_compiler.o build/native_emitter.o build/sir.o \
+      build/op_builder.o \
       build/logger.o build/update_kernels.o build/dataset.o \
       build/batch_pipeline.o build/durable_io.o build/plan_validator.o \
       build/checkpoint.o build/update_engine.o build/parallel_for.o"
@@ -47,8 +56,9 @@ echo "  LINK seeml-seeu-dump"
 eval "$CXX build/seeml_seeu_dump.o -o build/seeml-seeu-dump"
 
 for suite in \
-    source/smf_test source/parallel_for_test compiler/sir_test \
-    compiler/forward_builder_test \
+    compiler/model_io_test source/hash_test source/parallel_for_test \
+    compiler/sir_test \
+    compiler/resource_analyzer_test compiler/parser_test \
     compiler/update_passes_test compiler/update_compiler_test \
     compiler/native_emitter_test runtime/kernels_test runtime/dataset_test \
     runtime/update_engine_test system/update_system_test; do

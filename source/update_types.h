@@ -82,6 +82,10 @@ struct UpdateConfig {
   // Test hook: when false, the plan contains forward+backward only (no
   // parameter mutation), enabling finite-difference gradient verification.
   bool emit_optimizer = true;
+  // Fail-fast memory gate (ingressor resource analyzer): compilation is
+  // rejected up front when the statically proven lower bound of the training
+  // footprint exceeds this many bytes. 0 = detect the host's physical memory.
+  uint64_t memory_budget_bytes = 0;
 };
 
 // -----------------------------------------------------------------------------
@@ -92,7 +96,10 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // v2: eval program section, plan/model integrity hashes, LR schedule fields,
 // int8-quantized rodata opcodes. v1 plans are not accepted by the v2 runtime
 // (they lack the integrity contract); recompile the plan.
-inline constexpr uint32_t kSeeuVersion = 2;
+// v3: source_model_hash is computed with ContentHash64 (the parallel model
+// identity hash, source/hash.h) instead of plain Fnv1a64. Older plans are
+// rejected by the version gate; recompile the plan.
+inline constexpr uint32_t kSeeuVersion = 3;
 
 // The plan is serialized by memcpy of host integers/structs; the documented
 // on-disk contract is little-endian. Big-endian hosts need byte-swapping I/O.
@@ -219,10 +226,10 @@ struct PlanHeader {
   uint64_t eval_instr_offset = 0;
   uint64_t eval_instr_count = 0;
 
-  // --- v2: integrity binding (Fnv1a64, source/hash.h).
-  // Hash of the source .smf file this plan was compiled from; CommitToModel
-  // refuses to patch a file whose bytes hash differently. 0 = unbound (the
-  // model was built in memory, not loaded from a file).
+  // --- v2: integrity binding (source/hash.h).
+  // ContentHash64 (v3) of the source .smf file this plan was compiled from;
+  // CommitToModel refuses to patch a file whose bytes hash differently.
+  // 0 = unbound (the model was built in memory, not loaded from a file).
   uint64_t source_model_hash = 0;
   // Hash of the entire plan blob with this field zeroed; verified on load.
   // Also the identity that checkpoints bind to.

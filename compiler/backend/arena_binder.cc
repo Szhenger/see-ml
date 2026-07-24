@@ -8,7 +8,7 @@
 
 namespace seeml::update {
 
-namespace sir = seecpp::sir;
+namespace sir = seeml::sir;
 
 namespace {
 

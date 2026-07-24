@@ -18,6 +18,12 @@ namespace {
 // deadlock.
 thread_local bool tls_pool_worker = false;
 
+// Same rule for the submitting thread itself: while it owns the in-flight
+// job (and the submission lock), a nested ParallelFor from one of its own
+// chunk bodies must execute inline — re-submitting would self-deadlock on
+// the non-recursive submission lock.
+thread_local bool tls_job_owner = false;
+
 size_t ResolveAutoThreadCount() {
   if (const char* env = std::getenv("SEEML_THREADS")) {
     char* end = nullptr;
@@ -82,6 +88,13 @@ class WorkerPool {
   }
 
   void Run(Job& job) {
+    // One job in flight at a time: concurrent external submitters queue here
+    // in arrival order, each getting the whole pool. Without this, a second
+    // submitter would overwrite job_/epoch_ (stealing the first job's
+    // workers) and the first submitter's cleanup would null out the second's
+    // freshly published job.
+    std::lock_guard<std::mutex> submit(submit_mutex_);
+    tls_job_owner = true;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       SpawnWorkersLocked();
@@ -96,6 +109,7 @@ class WorkerPool {
              job.holders.load(std::memory_order_acquire) == 0;
     });
     job_ = nullptr;
+    tls_job_owner = false;
   }
 
  private:
@@ -146,6 +160,7 @@ class WorkerPool {
     }
   }
 
+  std::mutex submit_mutex_;  // serializes whole Run() calls; held first
   std::mutex mutex_;
   std::condition_variable work_cv_;
   std::condition_variable done_cv_;
@@ -171,7 +186,8 @@ void ParallelForRaw(size_t n, size_t grain, ChunkFn fn, void* ctx) {
   const size_t g = ParallelChunkGrain(n, grain);
   const size_t chunks = (n + g - 1) / g;
   WorkerPool& pool = WorkerPool::Instance();
-  if (chunks == 1 || tls_pool_worker || pool.ThreadCount() == 1) {
+  if (chunks == 1 || tls_pool_worker || tls_job_owner ||
+      pool.ThreadCount() == 1) {
     for (size_t c = 0; c < chunks; ++c)
       fn(ctx, c * g, std::min((c + 1) * g, n), c);
     return;

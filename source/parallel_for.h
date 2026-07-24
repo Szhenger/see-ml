@@ -31,6 +31,14 @@
 // Chunks are pulled by an atomic counter (dynamic load balancing); pool
 // workers that call ParallelFor recursively execute inline, so a body may
 // safely reach code that itself parallelizes.
+//
+// Concurrency contract: ParallelFor is safe to call from any number of
+// threads at once. In-flight loops are serialized in arrival order — each
+// gets the whole pool — so a loop's result (and, for chunk-order reductions,
+// its bitwise value) never depends on what other threads submit. External
+// concurrency is therefore a latency overlap tool (e.g. one model's file I/O
+// against another's hashing), not a way to multiply throughput of two
+// CPU-bound loops.
 // =============================================================================
 
 namespace seeml::update {

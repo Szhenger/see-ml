@@ -8,12 +8,13 @@
 #include <string>
 #include <vector>
 
+#include "compiler/frontend/op_builder.h"
 #include "compiler/frontend/sir.h"
 #include "test/framework/seetest.h"
 
 namespace {
 
-using namespace seecpp::sir;
+using namespace seeml::sir;
 
 TEST(Shape, VolumeAndStaticness) {
   EXPECT_EQ(Shape({2, 3, 4}).volume(), 24);
@@ -244,6 +245,93 @@ TEST(OpBuilder, Conv2dCarriesGeometry) {
   const auto strides = conv->getAttrAs<std::vector<int64_t>>("strides");
   ASSERT_TRUE(strides.has_value());
   EXPECT_TRUE(*strides == (std::vector<int64_t>{2, 2}));
+}
+
+TEST(OpBuilder, Conv2dInfersOutputShape) {
+  // [1,3,8,8] * [4,3,3,3], stride 2, no pad: OH = OW = (8-3)/2 + 1 = 3.
+  Block block;
+  Value* x = block.addArgument(DataType::F32, Shape{1, 3, 8, 8});
+  Value* w = block.addArgument(DataType::F32, Shape{4, 3, 3, 3});
+  auto conv = OpBuilder::conv2d(x, w, nullptr, {2, 2});
+  EXPECT_TRUE(conv->result(0)->shape() == Shape({1, 4, 3, 3}));
+
+  // A dynamic batch propagates; static spatial math is unaffected.
+  Value* xd = block.addArgument(DataType::F32,
+                                Shape{Shape::kDynamic, 3, 8, 8});
+  auto convd = OpBuilder::conv2d(xd, w, nullptr, {2, 2});
+  EXPECT_TRUE(convd->result(0)->shape() ==
+              Shape({Shape::kDynamic, 4, 3, 3}));
+}
+
+TEST(OpBuilder, GemmInfersResultShape) {
+  Block block;
+  Value* a = block.addArgument(DataType::F32, Shape{2, 3});
+  Value* b = block.addArgument(DataType::F32, Shape{4, 3});
+  auto gemm = OpBuilder::gemm(a, b, nullptr, /*trans_a=*/false,
+                              /*trans_b=*/true);
+  // op(B) = B^T is [3, 4]: result is [2, 4].
+  EXPECT_TRUE(gemm->result(0)->shape() == Shape({2, 4}));
+}
+
+TEST(OpBuilder, Im2colInfersPatchMatrix) {
+  Block block;
+  Value* x = block.addArgument(DataType::F32, Shape{1, 3, 8, 8});
+  auto op = OpBuilder::im2col(x, {3, 3}, {2, 2}, {0, 0, 0, 0});
+  // 3x3 output positions, 3*3*3-element patches: [1*3*3, 3*3*3].
+  EXPECT_TRUE(op->result(0)->shape() == Shape({9, 27}));
+}
+
+TEST(Shape, VolumeOverflowSaturatesToDynamic) {
+  EXPECT_EQ(Shape({INT64_MAX / 2, 3}).volume(), Shape::kDynamic);
+  EXPECT_EQ(Shape({INT64_MAX / 2, 3}).byteSize(DataType::F32), 0u);
+  EXPECT_EQ(Shape({-7, 4}).volume(), Shape::kDynamic);  // invalid negative
+  EXPECT_EQ(Shape({4, 0, 9}).volume(), 0);              // empty is exact
+}
+
+TEST(Block, VerifyExplainsUseBeforeDef) {
+  Block block;
+  Operation* user = block.appendOp("sc_high.relu");
+  Operation* def = block.appendOp("sc_high.relu");
+  Value* v = def->addResult("v", DataType::F32, Shape{4});
+  user->addOperand(v);
+
+  auto verdict = block.verify();
+  ASSERT_FALSE(verdict.has_value());
+  EXPECT_TRUE(verdict.error().find("before its definition") !=
+              std::string::npos);
+}
+
+TEST(Block, VerifyRejectsDuplicateValueIds) {
+  Block block;
+  Value* x = block.addArgument(DataType::F32, Shape{4});
+  Operation* a = block.appendOp("sc_high.relu");
+  a->addOperand(x);
+  a->addResult("y", DataType::F32, Shape{4});
+  Operation* b = block.appendOp("sc_high.relu");
+  b->addOperand(x);
+  b->addResult("y", DataType::F32, Shape{4});
+
+  auto verdict = block.verify();
+  ASSERT_FALSE(verdict.has_value());
+  EXPECT_TRUE(verdict.error().find("duplicate value id") !=
+              std::string::npos);
+}
+
+TEST(Block, VerifyDetectsUseListDrift) {
+  // An op that references a block value without living in the block leaves
+  // the value's use-list pointing at an operation verify cannot account
+  // for — exactly the drift a buggy rewrite would introduce.
+  Block block;
+  Operation* def = block.appendOp("sc_high.relu");
+  Value* v = def->addResult("v", DataType::F32, Shape{4});
+  EXPECT_TRUE(block.validate());
+
+  Operation stray("sc_high.relu");
+  stray.addOperand(v);
+
+  auto verdict = block.verify();
+  ASSERT_FALSE(verdict.has_value());
+  EXPECT_TRUE(verdict.error().find("disagrees") != std::string::npos);
 }
 
 }  // namespace

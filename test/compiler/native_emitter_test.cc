@@ -12,7 +12,7 @@
 #include "compiler/backend/native_emitter.h"
 #include "compiler/backend/update_compiler.h"
 #include "runtime/update_engine.h"
-#include "source/smf.h"
+#include "compiler/frontend/ingressor/model_format.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 #include "test/support/scoped_temp_dir.h"

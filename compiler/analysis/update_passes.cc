@@ -4,13 +4,14 @@
 #include <cmath>
 #include <functional>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 
 #include "compiler/diagnostics/logger.h"
 
 namespace seeml::update {
 
-namespace sir = seecpp::sir;
+namespace sir = seeml::sir;
 using seecpp::utility::Logger;
 
 namespace {
@@ -56,6 +57,7 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
 
   std::vector<GraftedAdapter> adapters;
   adapters.reserve(targets.size());
+  std::unordered_map<std::string, size_t> graft_sites;
   const float scale = spec_.alpha / static_cast<float>(spec_.rank);
 
   size_t adapter_index = 0;
@@ -74,7 +76,13 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
     std::vector<sir::Operation*> consumers(c->users().begin(),
                                            c->users().end());
 
-    const std::string base = std::string(w->id());
+    // A tied weight is grafted once per consuming MatMul; suffix the later
+    // sites so every adapter's value ids stay unique — Block::verify
+    // enforces id uniqueness, and ambiguous ids would make ParamDebugInfo
+    // and the SIR dump lie about which adapter is which.
+    std::string base = std::string(w->id());
+    if (const size_t site = graft_sites[base]++; site > 0)
+      base += "@" + std::to_string(site);
 
     // A ~ N(0, 1/sqrt(K)), B = 0  =>  delta starts at zero: the grafted model
     // is bit-identical to the source model until training moves B.
@@ -132,7 +140,8 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
       for (size_t i = 0; i < consumer->numOperands(); ++i)
         if (consumer->operand(i) == c) consumer->setOperand(i, c_prime);
 
-    adapters.push_back({.frozen_weight = w, .A = a, .B = b, .scale = scale});
+    adapters.push_back({.frozen_weight = w, .A = a, .B = b, .scale = scale,
+                        .id_base = base});
     ++adapter_index;
   }
 
@@ -565,9 +574,11 @@ std::expected<MergeProgram, std::string> MergeBuilder::Run(
     // adds Δ to the model file's own f32 weights (see EmitEntry).
     sir::Operation* fill = program.block->appendOp("sc_low.fill");
     fill->setAttribute("value", 0.0f);
-    sir::Value* delta = fill->addResult(
-        std::string(adapter.frozen_weight->id()) + ".delta",
-        sir::DataType::F32, adapter.frozen_weight->shape());
+    // Named from the adapter's unique site stem, not the frozen weight: a
+    // tied weight has one delta per graft site.
+    sir::Value* delta = fill->addResult(adapter.id_base + ".delta",
+                                        sir::DataType::F32,
+                                        adapter.frozen_weight->shape());
 
     sir::Operation* acc = program.block->appendOp("sc_low.gemm_acc");
     acc->setAttribute("alpha", adapter.scale);

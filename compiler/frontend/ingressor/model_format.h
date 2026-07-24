@@ -1,20 +1,22 @@
-#ifndef SEEML_SOURCE_SMF_H_
-#define SEEML_SOURCE_SMF_H_
+#ifndef SEEML_COMPILER_FRONTEND_INGRESSOR_MODEL_FORMAT_H_
+#define SEEML_COMPILER_FRONTEND_INGRESSOR_MODEL_FORMAT_H_
 
 #include <bit>
 #include <cstdint>
-#include <expected>
 #include <string>
 #include <string_view>
 #include <vector>
 
 // =============================================================================
-// SMF — SeeML Model Format.
+// SMF — SeeML Model Format: the on-disk contract and its in-memory form.
 //
 // A minimal, dependency-free binary container for the feed-forward models the
 // update compiler operates on. It plays the role ONNX ingestion plays on the
 // inference side, without requiring protobuf at build time; the companion
 // exporter (tool/export_model.py) converts PyTorch modules into SMF.
+//
+// This header defines the format constants and the parsed model structures
+// only; deserialization lives in model_reader.h, serialization in model_writer.h.
 //
 // Layout (little-endian):
 //   u32 magic "SMF1"    u32 version
@@ -73,28 +75,24 @@ struct SmfOp {
   std::string output;
 };
 
+/// Immutable once loaded: every consumer (parser, resource analyzer, rodata
+/// packing) takes it by const reference, so one loaded model may be shared
+/// across threads freely.
 struct SmfModel {
   std::string input_name;
   std::string output_name;
   std::vector<SmfTensor> tensors;
   std::vector<SmfOp> ops;  // topologically ordered
 
-  // Fnv1a64 of the file bytes this model was loaded from (source/hash.h).
-  // 0 for models constructed in memory. Compiled into the plan so the
-  // runtime refuses to patch a model file the plan was not built against.
+  // ContentHash64 of the file bytes this model was loaded from
+  // (source/hash.h). 0 for models constructed in memory. Compiled into the
+  // plan so the runtime refuses to patch a model file the plan was not
+  // built against.
   uint64_t content_hash = 0;
 
   const SmfTensor* FindTensor(std::string_view name) const;
 };
 
-[[nodiscard]] std::expected<SmfModel, std::string> LoadSmf(
-    const std::string& path);
-
-/// Serializes a model. Constant tensors must carry their data in
-/// SmfTensor::data; data_offset/byte_size are (re)computed during the write.
-[[nodiscard]] std::expected<void, std::string> SaveSmf(const std::string& path,
-                                                       SmfModel& model);
-
 }  // namespace seeml::update
 
-#endif  // SEEML_SOURCE_SMF_H_
+#endif  // SEEML_COMPILER_FRONTEND_INGRESSOR_MODEL_FORMAT_H_

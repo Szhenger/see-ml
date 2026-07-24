@@ -6,17 +6,19 @@
 
 #include <cstdint>
 #include <string>
+#include <thread>
+#include <vector>
 
-#include "compiler/frontend/forward_builder.h"
+#include "compiler/frontend/parser/parser.h"
 #include "compiler/frontend/sir.h"
-#include "source/smf.h"
+#include "compiler/frontend/ingressor/model_format.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 
 namespace {
 
 using namespace seeml::update;
-namespace sir = seecpp::sir;
+namespace sir = seeml::sir;
 using seeml::testing::AsBytes;
 using seeml::testing::MakeMlp;
 using seeml::testing::MakeTiedMlp;
@@ -210,6 +212,127 @@ TEST(ForwardBuilder, RejectsMissingOutput) {
   EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, kBatch,
                                      build),
                         "was never produced");
+}
+
+TEST(ForwardBuilder, RejectsNonPositiveBatch) {
+  SmfModel model = MakeMlp(6, 10, 3, 1);
+  sir::Block block;
+  GraphBuild build;
+  build.input = AddInput(block, 6);
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, 0, build),
+                        "batch must be at least 1");
+}
+
+TEST(ForwardBuilder, RejectsDuplicateOutputName) {
+  SmfModel model;
+  model.input_name = "x";
+  model.output_name = "y";
+  model.tensors.push_back({.name = "x", .dims = {-1, 4}, .is_const = false});
+  model.ops.push_back({SmfOpKind::kRelu, "r1", {"x"}, "y"});
+  model.ops.push_back({SmfOpKind::kRelu, "r2", {"x"}, "y"});
+
+  sir::Block block;
+  GraphBuild build;
+  build.input = AddInput(block, 4);
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, kBatch,
+                                     build),
+                        "redefines an existing value");
+}
+
+TEST(ForwardBuilder, RejectsOutputShadowingTensorName) {
+  SmfModel model;
+  model.input_name = "x";
+  model.output_name = "w";
+  model.tensors.push_back({.name = "x", .dims = {-1, 4}, .is_const = false});
+  model.tensors.push_back({.name = "w", .dims = {4}, .is_const = true});
+  model.ops.push_back({SmfOpKind::kRelu, "r1", {"x"}, "w"});
+
+  sir::Block block;
+  GraphBuild build;
+  build.input = AddInput(block, 4);
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, kBatch,
+                                     build),
+                        "redefines an existing value");
+}
+
+TEST(ForwardBuilder, RejectsUseBeforeProduction) {
+  // "h" is produced by the second op but consumed by the first: the parser
+  // must name the topological-order violation, not claim "h" is missing.
+  SmfModel model;
+  model.input_name = "x";
+  model.output_name = "y";
+  model.tensors.push_back({.name = "x", .dims = {-1, 4}, .is_const = false});
+  model.ops.push_back({SmfOpKind::kRelu, "r1", {"h"}, "y"});
+  model.ops.push_back({SmfOpKind::kRelu, "r2", {"x"}, "h"});
+
+  sir::Block block;
+  GraphBuild build;
+  build.input = AddInput(block, 4);
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, kBatch,
+                                     build),
+                        "before it is produced");
+}
+
+TEST(ForwardBuilder, RejectsWeightAsModelOutput) {
+  SmfModel model;
+  model.input_name = "x";
+  model.output_name = "w";
+  model.tensors.push_back({.name = "x", .dims = {-1, 4}, .is_const = false});
+  model.tensors.push_back({.name = "w", .dims = {4}, .is_const = true});
+  model.ops.push_back({SmfOpKind::kRelu, "r1", {"x"}, "y"});
+
+  sir::Block block;
+  GraphBuild build;
+  build.input = AddInput(block, 4);
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, kBatch,
+                                     build),
+                        "was never produced by an operation");
+}
+
+TEST(ForwardBuilder, RejectsInputAsModelOutput) {
+  SmfModel model;
+  model.input_name = "x";
+  model.output_name = "x";
+  model.tensors.push_back({.name = "x", .dims = {-1, 4}, .is_const = false});
+  model.ops.push_back({SmfOpKind::kRelu, "r1", {"x"}, "y"});
+
+  sir::Block block;
+  GraphBuild build;
+  build.input = AddInput(block, 4);
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, kBatch,
+                                     build),
+                        "was never produced by an operation");
+}
+
+TEST(ForwardBuilder, ConcurrentDisjointBuildsAreSafe) {
+  // The documented contract: one shared const model, but each thread owns its
+  // (block, build, input). Threads only record; assertions run after the
+  // join (the test framework's recorders are not thread-safe).
+  SmfModel model = MakeMlp(6, 10, 3, 1);
+  constexpr size_t kThreads = 4;
+  bool built[kThreads] = {};
+  bool valid[kThreads] = {};
+  size_t op_count[kThreads] = {};
+
+  std::vector<std::thread> builders;
+  for (size_t t = 0; t < kThreads; ++t)
+    builders.emplace_back([&, t] {
+      sir::Block block;
+      GraphBuild build;
+      build.input = AddInput(block, 6);
+      auto out = BuildForward(block, model, "", build.input, kBatch, build);
+      built[t] = out.has_value();
+      valid[t] = block.validate();
+      op_count[t] = block.numOps();
+    });
+  for (std::thread& t : builders) t.join();
+
+  for (size_t t = 0; t < kThreads; ++t) {
+    EXPECT_TRUE(built[t]);
+    EXPECT_TRUE(valid[t]);
+    EXPECT_EQ(op_count[t], op_count[0]);
+  }
+  EXPECT_TRUE(op_count[0] > 0);
 }
 
 }  // namespace

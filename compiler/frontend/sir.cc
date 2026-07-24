@@ -5,8 +5,9 @@
 #include <sstream>
 #include <algorithm>
 #include <cassert>
+#include <unordered_map>
 
-namespace seecpp::sir {
+namespace seeml::sir {
 
 // =============================================================================
 // 1. Shape
@@ -19,15 +20,22 @@ bool Shape::isFullyStatic() const {
 int64_t Shape::volume() const {
     int64_t v = 1;
     for (auto d : dims) {
-        if (d == kDynamic) return kDynamic;
+        // Any negative dim (kDynamic or invalid) and any product that would
+        // overflow int64 saturate to "unknown" — signed overflow here would
+        // be UB, and a wrapped element count is worse than no count.
+        if (d < 0) return kDynamic;
+        if (d != 0 && v > INT64_MAX / d) return kDynamic;
         v *= d;
     }
     return v;
 }
 
 size_t Shape::byteSize(DataType dt) const {
-    auto vol = volume();
-    return (vol == kDynamic) ? 0 : static_cast<size_t>(vol) * dtypeByteWidth(dt);
+    const int64_t vol = volume();
+    if (vol < 0) return 0;
+    const size_t width = dtypeByteWidth(dt);
+    if (width != 0 && static_cast<size_t>(vol) > SIZE_MAX / width) return 0;
+    return static_cast<size_t>(vol) * width;
 }
 
 // =============================================================================
@@ -209,6 +217,12 @@ void Block::insertOpsAfter(Operation* anchor,
 std::unique_ptr<Operation> Block::removeOp(Operation* op) {
     auto it = std::find_if(ops_.begin(), ops_.end(), [op](const auto& p) { return p.get() == op; });
     assert(it != ops_.end() && "removeOp: operation not found in block");
+#ifndef NDEBUG
+    for (const auto& res : op->results())
+        assert(res->hasNoUses() &&
+               "removeOp: results are still in use — replaceAllUsesWith the "
+               "consumers first");
+#endif
 
     for (size_t i = 0; i < op->numOperands(); ++i)
         op->operand(i)->removeUser(op);
@@ -219,23 +233,70 @@ std::unique_ptr<Operation> Block::removeOp(Operation* op) {
     return owned;
 }
 
-bool Block::validate() const {
+std::expected<void, std::string> Block::verify() const {
     std::unordered_set<const Value*> defined;
+    std::unordered_set<std::string_view> ids;
     defined.reserve(args_.size() + ops_.size() * 2);  // ~2 results/op typical
-    for (const auto& arg : args_) defined.insert(arg.get());
+    ids.reserve(args_.size() + ops_.size() * 2);
+
+    auto define = [&](const Value* v) -> bool {
+        defined.insert(v);
+        return ids.insert(v->id()).second;
+    };
+
+    for (const auto& arg : args_)
+        if (!define(arg.get()))
+            return std::unexpected("SIR verify: duplicate value id '" +
+                                   std::string(arg->id()) + "'");
+
+    // The users each value SHOULD have, rebuilt from the operand lists; the
+    // stored use-lists are checked against this below.
+    std::unordered_map<const Value*, std::vector<const Operation*>> expected;
 
     for (const auto& op : ops_) {
+        if (op->parentBlock() != this)
+            return std::unexpected("SIR verify: op '" +
+                                   std::string(op->mnemonic()) +
+                                   "' has a stale parent block");
         for (const Value* operand : op->operands()) {
-            if (defined.find(operand) == defined.end()) {
-                return false;
-            }
+            if (defined.find(operand) == defined.end())
+                return std::unexpected("SIR verify: op '" + op->toString() +
+                                       "' uses '" + std::string(operand->id()) +
+                                       "' before its definition");
+            expected[operand].push_back(op.get());
         }
         for (const auto& res : op->results())
-            defined.insert(res.get());
+            if (!define(res.get()))
+                return std::unexpected("SIR verify: duplicate value id '" +
+                                       std::string(res->id()) + "'");
     }
 
-    is_validated_ = true;
-    return true;
+    // Use-list symmetry: drift between a value's stored users and the ops
+    // that actually reference it is how a buggy rewrite corrupts later
+    // passes silently. Multiset comparison — an op referencing a value in
+    // two operand slots must appear twice.
+    auto users_agree = [&](const Value* v) {
+        std::vector<const Operation*> stored(v->users().begin(),
+                                             v->users().end());
+        std::vector<const Operation*> derived = std::move(expected[v]);
+        std::sort(stored.begin(), stored.end());
+        std::sort(derived.begin(), derived.end());
+        return stored == derived;
+    };
+    for (const auto& arg : args_)
+        if (!users_agree(arg.get()))
+            return std::unexpected("SIR verify: use-list of '" +
+                                   std::string(arg->id()) +
+                                   "' disagrees with the operations that "
+                                   "reference it");
+    for (const auto& op : ops_)
+        for (const auto& res : op->results())
+            if (!users_agree(res.get()))
+                return std::unexpected("SIR verify: use-list of '" +
+                                       std::string(res->id()) +
+                                       "' disagrees with the operations that "
+                                       "reference it");
+    return {};
 }
 
 void Block::print(std::ostream& os) const {
@@ -264,87 +325,4 @@ Block* Region::entryBlock() {
     return blocks_.front().get();
 }
 
-// =============================================================================
-// 5. OpBuilder
-// =============================================================================
-
-std::unique_ptr<Operation> OpBuilder::conv2d(
-    Value* input, Value* filter, Value* bias,
-    std::vector<int64_t> strides, std::vector<int64_t> pads,
-    std::vector<int64_t> dilations, int64_t group) {
-    assert(input  && "conv2d: null input");
-    assert(filter && "conv2d: null filter");
-
-    auto op = std::make_unique<Operation>("sc_high.conv2d");
-    op->addOperand(input);
-    op->addOperand(filter);
-    if (bias) op->addOperand(bias);
-
-    op->setAttribute("strides",   std::move(strides));
-    op->setAttribute("pads",      std::move(pads));
-    op->setAttribute("dilations", std::move(dilations));
-    op->setAttribute("group",     group);
-
-    op->addResult("", input->dtype(), Shape{});
-    return op;
-}
-
-std::unique_ptr<Operation> OpBuilder::batchNorm(
-    Value* input, Value* scale, Value* bias,
-    Value* running_mean, Value* running_var, float epsilon) {
-    assert(input        && "batchNorm: null input");
-    assert(scale        && "batchNorm: null scale");
-    assert(bias         && "batchNorm: null bias");
-    assert(running_mean && "batchNorm: null running_mean");
-    assert(running_var  && "batchNorm: null running_var");
-
-    auto op = std::make_unique<Operation>("sc_high.batch_norm");
-    op->addOperand(input);
-    op->addOperand(scale);
-    op->addOperand(bias);
-    op->addOperand(running_mean);
-    op->addOperand(running_var);
-    op->setAttribute("epsilon", epsilon);
-
-    op->addResult("", input->dtype(), input->shape());
-    return op;
-}
-
-std::unique_ptr<Operation> OpBuilder::gemm(
-    Value* A, Value* B, Value* bias, bool trans_a, bool trans_b) {
-    assert(A && "gemm: null A");
-    assert(B && "gemm: null B");
-
-    auto op = std::make_unique<Operation>("sc_high.gemm");
-    op->addOperand(A);
-    op->addOperand(B);
-    if (bias) op->addOperand(bias);
-
-    op->setAttribute("trans_a", static_cast<int64_t>(trans_a));
-    op->setAttribute("trans_b", static_cast<int64_t>(trans_b));
-    op->addResult("", A->dtype(), Shape{});
-    return op;
-}
-
-std::unique_ptr<Operation> OpBuilder::relu(Value* input) {
-    assert(input && "relu: null input");
-    auto op = std::make_unique<Operation>("sc_high.relu");
-    op->addOperand(input);
-    op->addResult("", input->dtype(), input->shape());
-    return op;
-}
-
-std::unique_ptr<Operation> OpBuilder::im2col(
-    Value* input, std::vector<int64_t> kernel_shape,
-    std::vector<int64_t> strides, std::vector<int64_t> pads) {
-    assert(input && "im2col: null input");
-    auto op = std::make_unique<Operation>("sc_low.im2col");
-    op->addOperand(input);
-    op->setAttribute("kernel_shape", std::move(kernel_shape));
-    op->setAttribute("strides",      std::move(strides));
-    op->setAttribute("pads",         std::move(pads));
-    op->addResult("", input->dtype(), Shape{});
-    return op;
-}
-
-} // namespace seecpp::sir
+} // namespace seeml::sir

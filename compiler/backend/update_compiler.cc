@@ -11,7 +11,8 @@
 #include "compiler/backend/arena_binder.h"
 #include "compiler/backend/instruction_lowering.h"
 #include "compiler/diagnostics/logger.h"
-#include "compiler/frontend/forward_builder.h"
+#include "compiler/frontend/ingressor/resource_analyzer.h"
+#include "compiler/frontend/parser/parser.h"
 #include "compiler/frontend/sir.h"
 #include "compiler/analysis/update_passes.h"
 #include "source/hash.h"
@@ -19,7 +20,7 @@
 
 namespace seeml::update {
 
-namespace sir = seecpp::sir;
+namespace sir = seeml::sir;
 using seecpp::utility::Logger;
 
 // =============================================================================
@@ -39,6 +40,14 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
     return std::unexpected("UpdateCompiler: source model lacks input metadata");
   const int64_t in_dim = in_tensor->dims.back();
   const int64_t batch = config_.batch;
+
+  // --- 0. Fail fast: prove the training footprint fits local memory. -------
+  TrainingFootprint footprint = EstimateTrainingFootprint(source, batch);
+  if (wants_teacher)
+    footprint += EstimateTrainingFootprint(*teacher, batch);
+  if (auto fits = CheckTrainableLocally(footprint, config_.memory_budget_bytes);
+      !fits)
+    return std::unexpected(fits.error());
 
   // --- 1. Forward SIR: student (+ frozen teacher sharing the input). -------
   sir::Block block;

@@ -12,7 +12,7 @@
 #include "compiler/backend/update_compiler.h"
 #include "source/update_types.h"
 #include "source/parallel_for.h"
-#include "source/smf.h"
+#include "compiler/frontend/ingressor/model_format.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 

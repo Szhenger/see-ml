@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "source/smf.h"
+#include "compiler/frontend/ingressor/model_format.h"
 #include "source/update_types.h"
 
 // =============================================================================

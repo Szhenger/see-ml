@@ -41,7 +41,7 @@
 
 #include "compiler/backend/native_emitter.h"
 #include "compiler/backend/update_compiler.h"
-#include "source/smf.h"
+#include "compiler/frontend/ingressor/model_reader.h"
 
 namespace {
 
@@ -250,21 +250,24 @@ int main(int argc, char** argv) {
     return Fail("unknown argument '" + *unknown + "' (see --help)");
 
   // --- Ingest ---------------------------------------------------------------
-  auto source = LoadSmf(*source_path);
-  if (!source) return Fail(source.error());
+  // Student and teacher load concurrently: one file's read overlaps the
+  // other's hashing and payload copies.
+  std::vector<std::string> model_paths{*source_path};
+  if (teacher_path) model_paths.push_back(*teacher_path);
+  auto models = LoadSmfMany(model_paths);
+  if (!models) return Fail(models.error());
 
+  SmfModel source_model = std::move((*models)[0]);
   SmfModel teacher_model;
   const SmfModel* teacher = nullptr;
   if (teacher_path) {
-    auto t = LoadSmf(*teacher_path);
-    if (!t) return Fail(t.error());
-    teacher_model = std::move(*t);
+    teacher_model = std::move((*models)[1]);
     teacher = &teacher_model;
   }
 
   // --- Compile ----------------------------------------------------------------
   UpdateCompiler compiler(config);
-  auto compiled = compiler.Compile(*source, teacher);
+  auto compiled = compiler.Compile(source_model, teacher);
   if (!compiled) return Fail(compiled.error());
 
   std::fprintf(stderr,

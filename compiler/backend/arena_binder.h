@@ -8,7 +8,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "compiler/frontend/forward_builder.h"
+#include "compiler/frontend/parser/graph_build.h"
 #include "compiler/frontend/sir.h"
 #include "source/update_types.h"
 
@@ -38,7 +38,7 @@ inline uint64_t AlignUp(uint64_t v) {
 
 /// Deterministic initialization recipe for one persistent parameter.
 struct ParamInit {
-  const seecpp::sir::Value* value;
+  const seeml::sir::Value* value;
   uint64_t offset;  // arena offset
   uint64_t bytes;
   std::string init;  // "randn" | "zeros"
@@ -48,7 +48,7 @@ struct ParamInit {
 
 struct ArenaBinding {
   // value -> ref word (MakeArenaRef / MakeRodataRef encoded).
-  std::unordered_map<const seecpp::sir::Value*, uint64_t> refs;
+  std::unordered_map<const seeml::sir::Value*, uint64_t> refs;
   uint64_t persistent_size = 0;
   uint64_t io_end = 0;      // end of [persistent | io] prefix
   uint64_t arena_size = 0;  // total (after transient scan, both programs)
@@ -61,26 +61,26 @@ struct ArenaBinding {
 /// student/teacher forward MatMuls and the dX backward). Bias vectors,
 /// LayerNorm affine parameters, and anything feeding another op stay f32.
 /// Returns weight value -> dequantization scale.
-std::unordered_map<const seecpp::sir::Value*, float> SelectQuantizedWeights(
-    seecpp::sir::Block& block, const GraphBuild& build);
+std::unordered_map<const seeml::sir::Value*, float> SelectQuantizedWeights(
+    seeml::sir::Block& block, const GraphBuild& build);
 
 /// Liveness-driven linear-scan allocation for transient values starting at
 /// `base`. Values in `already_bound` are skipped; values in `pinned` are
 /// never reclaimed (loss slot, parameter gradients, merged deltas).
 /// Returns the high-water mark; assignments are appended to `refs_out`.
 uint64_t LinearScanTransients(
-    seecpp::sir::Block& block, uint64_t base,
-    const std::unordered_map<const seecpp::sir::Value*, uint64_t>&
+    seeml::sir::Block& block, uint64_t base,
+    const std::unordered_map<const seeml::sir::Value*, uint64_t>&
         already_bound,
-    const std::unordered_set<const seecpp::sir::Value*>& pinned,
-    std::unordered_map<const seecpp::sir::Value*, uint64_t>& refs_out);
+    const std::unordered_set<const seeml::sir::Value*>& pinned,
+    std::unordered_map<const seeml::sir::Value*, uint64_t>& refs_out);
 
 /// Binds the training block: persistent params, IO slots, rodata packing
 /// (quantizing weights in `quant_scales`), then the transient scan.
 [[nodiscard]] std::expected<ArenaBinding, std::string> BindArena(
-    seecpp::sir::Block& train_block, const GraphBuild& build,
-    const std::unordered_set<const seecpp::sir::Value*>& pinned,
-    const std::unordered_map<const seecpp::sir::Value*, float>& quant_scales);
+    seeml::sir::Block& train_block, const GraphBuild& build,
+    const std::unordered_set<const seeml::sir::Value*>& pinned,
+    const std::unordered_map<const seeml::sir::Value*, float>& quant_scales);
 
 }  // namespace seeml::update
 
