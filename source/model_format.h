@@ -1,5 +1,5 @@
-#ifndef SEEML_COMPILER_FRONTEND_INGRESSOR_MODEL_FORMAT_H_
-#define SEEML_COMPILER_FRONTEND_INGRESSOR_MODEL_FORMAT_H_
+#ifndef SEEML_SOURCE_MODEL_FORMAT_H_
+#define SEEML_SOURCE_MODEL_FORMAT_H_
 
 #include <bit>
 #include <cstdint>
@@ -16,7 +16,11 @@
 // exporter (tool/export_model.py) converts PyTorch modules into SMF.
 //
 // This header defines the format constants and the parsed model structures
-// only; deserialization lives in model_reader.h, serialization in model_writer.h.
+// only — the source-language contract itself, which is why it lives in
+// source/ (with hash.h and update_types.h) rather than in the frontend: the
+// frontend abstracts the *process* of ingesting SMF, not the language.
+// Deserialization lives in compiler/frontend/ingressor/model_reader.h,
+// serialization in model_writer.h.
 //
 // Layout (little-endian):
 //   u32 magic "SMF1"    u32 version
@@ -95,4 +99,4 @@ struct SmfModel {
 
 }  // namespace seeml::update
 
-#endif  // SEEML_COMPILER_FRONTEND_INGRESSOR_MODEL_FORMAT_H_
+#endif  // SEEML_SOURCE_MODEL_FORMAT_H_

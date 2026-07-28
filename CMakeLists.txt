@@ -49,8 +49,14 @@ target_link_libraries(seeml_parallel PUBLIC Threads::Threads)
 # ==============================================================================
 
 add_library(seeml_sir STATIC
-    compiler/frontend/sir.cc
-    compiler/frontend/op_builder.cc
+    compiler/frontend/representation/type.cc
+    compiler/frontend/representation/value.cc
+    compiler/frontend/representation/operation.cc
+    compiler/frontend/representation/block.cc
+    compiler/frontend/operator/convolution.cc
+    compiler/frontend/operator/linear.cc
+    compiler/frontend/operator/normalization.cc
+    compiler/frontend/operator/activation.cc
     compiler/diagnostics/logger.cc
 )
 
@@ -62,7 +68,7 @@ add_library(seeml_sir STATIC
 # ==============================================================================
 
 add_library(seeml_update STATIC
-    compiler/frontend/ingressor/model_format.cc
+    source/model_format.cc
     compiler/frontend/ingressor/model_reader.cc
     compiler/frontend/ingressor/model_writer.cc
     compiler/frontend/ingressor/resource_analyzer.cc

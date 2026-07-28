@@ -5,7 +5,7 @@
 #include <expected>
 #include <string>
 
-#include "compiler/frontend/ingressor/model_format.h"
+#include "source/model_format.h"
 
 // =============================================================================
 // Resource analyzer — fail-fast static feasibility analysis for local

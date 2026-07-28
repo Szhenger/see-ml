@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "compiler/frontend/ingressor/model_format.h"
+#include "source/model_format.h"
 #include "source/update_types.h"
 
 // =============================================================================

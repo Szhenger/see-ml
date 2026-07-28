@@ -1,10 +1,10 @@
-#ifndef SEEML_COMPILER_FRONTEND_OP_BUILDER_H_
-#define SEEML_COMPILER_FRONTEND_OP_BUILDER_H_
+#ifndef SEEML_COMPILER_FRONTEND_OPERATOR_OP_BUILDER_H_
+#define SEEML_COMPILER_FRONTEND_OPERATOR_OP_BUILDER_H_
 
 #include <memory>
 #include <vector>
 
-#include "compiler/frontend/sir.h"
+#include "compiler/frontend/representation/sir.h"
 
 // =============================================================================
 // OpBuilder — factories for well-formed sc_high.* / sc_low.* operations.
@@ -16,6 +16,13 @@
 // Factories check structure (non-null operands, geometry attribute arity —
 // asserted), not operand agreement: inner-dimension and width consistency
 // belong to sema and Block::verify at the layers above.
+//
+// This header is the façade; each operator family implements its factories
+// in its own unit so a breakpoint or a diff lands in exactly one group:
+//   convolution.cc     conv2d + im2col (shared spatial-window geometry)
+//   linear.cc          gemm
+//   normalization.cc   batchNorm
+//   activation.cc      relu
 // =============================================================================
 
 namespace seeml::sir {
@@ -57,4 +64,4 @@ struct OpBuilder {
 
 }  // namespace seeml::sir
 
-#endif  // SEEML_COMPILER_FRONTEND_OP_BUILDER_H_
+#endif  // SEEML_COMPILER_FRONTEND_OPERATOR_OP_BUILDER_H_

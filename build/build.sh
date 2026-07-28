@@ -8,10 +8,16 @@ FLAGS="-std=c++23 -O2 -Wall -Wextra -Werror -pthread -I. -DSEEML_SOURCE_DIR='\"$
 
 compile() { echo "  CXX $1"; eval "$CXX $FLAGS -c '$1' -o 'build/$2'"; }
 
-compile compiler/frontend/sir.cc              sir.o
-compile compiler/frontend/op_builder.cc       op_builder.o
+compile compiler/frontend/representation/type.cc      sir_type.o
+compile compiler/frontend/representation/value.cc     sir_value.o
+compile compiler/frontend/representation/operation.cc sir_operation.o
+compile compiler/frontend/representation/block.cc     sir_block.o
+compile compiler/frontend/operator/convolution.cc     op_convolution.o
+compile compiler/frontend/operator/linear.cc          op_linear.o
+compile compiler/frontend/operator/normalization.cc   op_normalization.o
+compile compiler/frontend/operator/activation.cc      op_activation.o
 compile compiler/diagnostics/logger.cc        logger.o
-compile compiler/frontend/ingressor/model_format.cc model_format.o
+compile source/model_format.cc model_format.o
 compile compiler/frontend/ingressor/model_reader.cc model_reader.o
 compile compiler/frontend/ingressor/model_writer.cc model_writer.o
 compile compiler/frontend/ingressor/resource_analyzer.cc resource_analyzer.o
@@ -42,8 +48,11 @@ LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/resource_analyzer.o \
       build/value_resolver.o build/sema.o build/parser.o build/update_passes.o \
       build/arena_binder.o build/instruction_lowering.o \
-      build/update_compiler.o build/native_emitter.o build/sir.o \
-      build/op_builder.o \
+      build/update_compiler.o build/native_emitter.o \
+      build/sir_type.o build/sir_value.o build/sir_operation.o \
+      build/sir_block.o \
+      build/op_convolution.o build/op_linear.o build/op_normalization.o \
+      build/op_activation.o \
       build/logger.o build/update_kernels.o build/dataset.o \
       build/batch_pipeline.o build/durable_io.o build/plan_validator.o \
       build/checkpoint.o build/update_engine.o build/parallel_for.o"

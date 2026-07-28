@@ -1,6 +1,10 @@
-#include "compiler/frontend/op_builder.h"
+// Convolution family: sc_high.conv2d and its sc_low.im2col lowering
+// primitive. They live in one unit because both are defined by the same
+// spatial window geometry (the helpers below).
 
 #include <cassert>
+
+#include "compiler/frontend/operator/op_builder.h"
 
 namespace seeml::sir {
 
@@ -54,57 +58,6 @@ std::unique_ptr<Operation> OpBuilder::conv2d(
     op->setAttribute("group",     group);
 
     op->addResult("", input->dtype(), std::move(out));
-    return op;
-}
-
-std::unique_ptr<Operation> OpBuilder::batchNorm(
-    Value* input, Value* scale, Value* bias,
-    Value* running_mean, Value* running_var, float epsilon) {
-    assert(input        && "batchNorm: null input");
-    assert(scale        && "batchNorm: null scale");
-    assert(bias         && "batchNorm: null bias");
-    assert(running_mean && "batchNorm: null running_mean");
-    assert(running_var  && "batchNorm: null running_var");
-
-    auto op = std::make_unique<Operation>("sc_high.batch_norm");
-    op->addOperand(input);
-    op->addOperand(scale);
-    op->addOperand(bias);
-    op->addOperand(running_mean);
-    op->addOperand(running_var);
-    op->setAttribute("epsilon", epsilon);
-
-    op->addResult("", input->dtype(), input->shape());
-    return op;
-}
-
-std::unique_ptr<Operation> OpBuilder::gemm(
-    Value* A, Value* B, Value* bias, bool trans_a, bool trans_b) {
-    assert(A && "gemm: null A");
-    assert(B && "gemm: null B");
-    assert(A->shape().rank() == 2 && B->shape().rank() == 2 &&
-           "gemm: operands must be rank-2");
-
-    const auto& a = A->shape().dims;
-    const auto& b = B->shape().dims;
-    Shape out{a[trans_a ? 1 : 0], b[trans_b ? 0 : 1]};
-
-    auto op = std::make_unique<Operation>("sc_high.gemm");
-    op->addOperand(A);
-    op->addOperand(B);
-    if (bias) op->addOperand(bias);
-
-    op->setAttribute("trans_a", static_cast<int64_t>(trans_a));
-    op->setAttribute("trans_b", static_cast<int64_t>(trans_b));
-    op->addResult("", A->dtype(), std::move(out));
-    return op;
-}
-
-std::unique_ptr<Operation> OpBuilder::relu(Value* input) {
-    assert(input && "relu: null input");
-    auto op = std::make_unique<Operation>("sc_high.relu");
-    op->addOperand(input);
-    op->addResult("", input->dtype(), input->shape());
     return op;
 }
 

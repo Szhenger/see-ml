@@ -6,9 +6,9 @@
 #include <string_view>
 #include <unordered_map>
 
-#include "compiler/frontend/ingressor/model_format.h"
+#include "source/model_format.h"
 #include "compiler/frontend/parser/graph_build.h"
-#include "compiler/frontend/sir.h"
+#include "compiler/frontend/representation/sir.h"
 
 // =============================================================================
 // ValueResolver — name binding for the parser: resolves SMF tensor names to

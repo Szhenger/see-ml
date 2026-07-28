@@ -8,8 +8,8 @@
 #include <string>
 #include <vector>
 
-#include "compiler/frontend/op_builder.h"
-#include "compiler/frontend/sir.h"
+#include "compiler/frontend/operator/op_builder.h"
+#include "compiler/frontend/representation/sir.h"
 #include "test/framework/seetest.h"
 
 namespace {

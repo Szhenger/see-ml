@@ -4,7 +4,7 @@
 #include <expected>
 #include <string>
 
-#include "compiler/frontend/ingressor/model_format.h"
+#include "source/model_format.h"
 
 // =============================================================================
 // SMF writer — serializes an in-memory model to an SMF container file.

@@ -5,9 +5,9 @@
 #include <expected>
 #include <string>
 
-#include "compiler/frontend/ingressor/model_format.h"
+#include "source/model_format.h"
 #include "compiler/frontend/parser/graph_build.h"
-#include "compiler/frontend/sir.h"
+#include "compiler/frontend/representation/sir.h"
 
 // =============================================================================
 // Parser — the driver of the update compiler's front end: walks a

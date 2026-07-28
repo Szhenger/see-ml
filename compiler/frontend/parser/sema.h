@@ -4,8 +4,8 @@
 #include <expected>
 #include <string>
 
-#include "compiler/frontend/ingressor/model_format.h"
-#include "compiler/frontend/sir.h"
+#include "source/model_format.h"
+#include "compiler/frontend/representation/sir.h"
 
 // =============================================================================
 // Sema — semantic analysis for the forward parser, at two levels:

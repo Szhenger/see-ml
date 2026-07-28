@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "compiler/frontend/parser/graph_build.h"
-#include "compiler/frontend/sir.h"
+#include "compiler/frontend/representation/sir.h"
 #include "source/update_types.h"
 
 // =============================================================================

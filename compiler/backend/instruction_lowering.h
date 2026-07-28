@@ -8,7 +8,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "compiler/frontend/sir.h"
+#include "compiler/frontend/representation/sir.h"
 #include "source/update_types.h"
 
 // =============================================================================

@@ -3,8 +3,8 @@
 
 #include <unordered_map>
 
-#include "compiler/frontend/ingressor/model_format.h"
-#include "compiler/frontend/sir.h"
+#include "source/model_format.h"
+#include "compiler/frontend/representation/sir.h"
 
 namespace seeml::update {
 
