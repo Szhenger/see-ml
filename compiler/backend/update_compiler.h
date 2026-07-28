@@ -24,6 +24,17 @@
 //              ──▶ instruction lowering + plan assembly
 //
 // Every byte the runtime will touch is bound here, at compile time.
+//
+// The backend is partitioned by role; this driver only abstracts the process:
+//   trainer/       code generation for the training program — arena binding,
+//                  instruction lowering, the native C++ host package
+//                  (native_emitter), and GPU kernel source (kernel_emitter)
+//   architecture/  host ISA/microarchitecture analysis (SIMD width, cache
+//                  and core geometry) and the GEMM tiling hints it derives
+//                  for the trainer
+//   tuner/         reinforcement tuning: a UCB1 bandit and the GEMM-tiling
+//                  autotuner that spends a measurement budget to refine the
+//                  architecture hint on the real machine
 // =============================================================================
 
 namespace seeml::update {

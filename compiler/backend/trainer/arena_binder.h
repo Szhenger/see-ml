@@ -1,5 +1,5 @@
-#ifndef SEEML_COMPILER_BACKEND_ARENA_BINDER_H_
-#define SEEML_COMPILER_BACKEND_ARENA_BINDER_H_
+#ifndef SEEML_COMPILER_BACKEND_TRAINER_ARENA_BINDER_H_
+#define SEEML_COMPILER_BACKEND_TRAINER_ARENA_BINDER_H_
 
 #include <cstdint>
 #include <expected>
@@ -77,4 +77,4 @@ uint64_t LinearScanTransients(
 
 }  // namespace seeml::update
 
-#endif  // SEEML_COMPILER_BACKEND_ARENA_BINDER_H_
+#endif  // SEEML_COMPILER_BACKEND_TRAINER_ARENA_BINDER_H_

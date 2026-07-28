@@ -82,10 +82,14 @@ add_library(seeml_update STATIC
     compiler/analysis/calculus/autodiff.cc
     compiler/analysis/calculus/optimizer.cc
     compiler/analysis/reviewer/quantization.cc
-    compiler/backend/arena_binder.cc
-    compiler/backend/instruction_lowering.cc
+    compiler/backend/architecture/host_arch.cc
+    compiler/backend/tuner/bandit.cc
+    compiler/backend/tuner/autotuner.cc
+    compiler/backend/trainer/arena_binder.cc
+    compiler/backend/trainer/instruction_lowering.cc
+    compiler/backend/trainer/kernel_emitter.cc
     compiler/backend/update_compiler.cc
-    compiler/backend/native_emitter.cc
+    compiler/backend/trainer/native_emitter.cc
 )
 target_link_libraries(seeml_update PUBLIC seeml_sir seeml_parallel)
 
@@ -153,6 +157,7 @@ seeml_add_test(seeml_update_passes_test   test/compiler/update_passes_test.cc)
 seeml_add_test(seeml_updater_test         test/compiler/updater_test.cc)
 seeml_add_test(seeml_update_compiler_test test/compiler/update_compiler_test.cc)
 seeml_add_test(seeml_native_emitter_test  test/compiler/native_emitter_test.cc)
+seeml_add_test(seeml_tuner_test           test/compiler/tuner_test.cc)
 seeml_add_test(seeml_kernels_test         test/runtime/kernels_test.cc)
 seeml_add_test(seeml_dataset_test         test/runtime/dataset_test.cc)
 seeml_add_test(seeml_update_engine_test   test/runtime/update_engine_test.cc)

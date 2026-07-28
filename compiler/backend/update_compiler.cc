@@ -8,8 +8,8 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "compiler/backend/arena_binder.h"
-#include "compiler/backend/instruction_lowering.h"
+#include "compiler/backend/trainer/arena_binder.h"
+#include "compiler/backend/trainer/instruction_lowering.h"
 #include "compiler/diagnostics/logger.h"
 #include "compiler/frontend/ingressor/resource_analyzer.h"
 #include "compiler/frontend/parser/parser.h"

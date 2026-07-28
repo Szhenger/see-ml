@@ -1,4 +1,4 @@
-#include "compiler/backend/arena_binder.h"
+#include "compiler/backend/trainer/arena_binder.h"
 
 #include <algorithm>
 #include <cmath>

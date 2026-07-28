@@ -1,0 +1,64 @@
+#include "compiler/backend/tuner/autotuner.h"
+
+#include <algorithm>
+
+#include "compiler/backend/tuner/bandit.h"
+
+namespace seeml::update {
+
+namespace {
+
+/// Keeps a halved/doubled dimension a positive multiple of the SIMD width.
+size_t ClampDim(size_t v, size_t simd) {
+  return std::max(simd, v - v % simd);
+}
+
+}  // namespace
+
+std::vector<GemmTiling> TilingCandidates(const HostArchInfo& arch) {
+  const size_t simd = std::max<size_t>(arch.simd_width_f32, 4);
+  const GemmTiling hint = SuggestGemmTiling(arch);
+
+  std::vector<GemmTiling> candidates{hint};
+  auto add = [&](GemmTiling t) {
+    t.mc = ClampDim(t.mc, simd);
+    t.kc = ClampDim(t.kc, simd);
+    t.nc = ClampDim(t.nc, simd);
+    if (std::find(candidates.begin(), candidates.end(), t) ==
+        candidates.end())
+      candidates.push_back(t);
+  };
+
+  for (const double factor : {0.5, 2.0}) {
+    add({static_cast<size_t>(hint.mc * factor), hint.kc, hint.nc});
+    add({hint.mc, static_cast<size_t>(hint.kc * factor), hint.nc});
+    add({hint.mc, hint.kc, static_cast<size_t>(hint.nc * factor)});
+  }
+  return candidates;
+}
+
+AutotuneResult AutotuneGemmTiling(std::span<const GemmTiling> candidates,
+                                  const TilingBenchmarkFn& measure,
+                                  size_t trials) {
+  AutotuneResult result;
+  if (candidates.empty()) return result;
+
+  Ucb1Bandit bandit(candidates.size());
+  const size_t budget = std::max(trials, candidates.size());
+  for (size_t t = 0; t < budget; ++t) {
+    const size_t arm = bandit.Select();
+    bandit.Update(arm, measure(candidates[arm]));
+  }
+
+  result.best_arm = bandit.BestArm();
+  result.best = candidates[result.best_arm];
+  result.mean_reward.reserve(candidates.size());
+  result.pulls.reserve(candidates.size());
+  for (size_t i = 0; i < candidates.size(); ++i) {
+    result.mean_reward.push_back(bandit.meanReward(i));
+    result.pulls.push_back(bandit.pulls(i));
+  }
+  return result;
+}
+
+}  // namespace seeml::update

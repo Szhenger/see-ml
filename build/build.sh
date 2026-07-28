@@ -32,10 +32,14 @@ compile compiler/analysis/algebra/merge_builder.cc merge_builder.o
 compile compiler/analysis/calculus/autodiff.cc     autodiff.o
 compile compiler/analysis/calculus/optimizer.cc    optimizer_synth.o
 compile compiler/analysis/reviewer/quantization.cc quantization.o
-compile compiler/backend/arena_binder.cc      arena_binder.o
-compile compiler/backend/instruction_lowering.cc instruction_lowering.o
+compile compiler/backend/architecture/host_arch.cc host_arch.o
+compile compiler/backend/tuner/bandit.cc      bandit.o
+compile compiler/backend/tuner/autotuner.cc   autotuner.o
+compile compiler/backend/trainer/arena_binder.cc arena_binder.o
+compile compiler/backend/trainer/instruction_lowering.cc instruction_lowering.o
+compile compiler/backend/trainer/kernel_emitter.cc kernel_emitter.o
 compile compiler/backend/update_compiler.cc   update_compiler.o
-compile compiler/backend/native_emitter.cc    native_emitter.o
+compile compiler/backend/trainer/native_emitter.cc native_emitter.o
 compile runtime/update_kernels.cc             update_kernels.o
 compile runtime/dataset.cc                    dataset.o
 compile runtime/batch_pipeline.cc             batch_pipeline.o
@@ -57,6 +61,8 @@ LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/merge_builder.o build/autodiff.o build/optimizer_synth.o \
       build/quantization.o \
       build/arena_binder.o build/instruction_lowering.o \
+      build/host_arch.o build/bandit.o build/autotuner.o \
+      build/kernel_emitter.o \
       build/update_compiler.o build/native_emitter.o \
       build/sir_type.o build/sir_value.o build/sir_operation.o \
       build/sir_block.o \
@@ -78,7 +84,7 @@ for suite in \
     compiler/sir_test \
     compiler/resource_analyzer_test compiler/parser_test \
     compiler/update_passes_test compiler/updater_test \
-    compiler/update_compiler_test \
+    compiler/update_compiler_test compiler/tuner_test \
     compiler/native_emitter_test runtime/kernels_test runtime/dataset_test \
     runtime/update_engine_test system/update_system_test; do
   name="seeml_$(basename "$suite")"

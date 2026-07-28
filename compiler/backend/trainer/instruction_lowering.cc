@@ -1,4 +1,4 @@
-#include "compiler/backend/instruction_lowering.h"
+#include "compiler/backend/trainer/instruction_lowering.h"
 
 #include <bit>
 
