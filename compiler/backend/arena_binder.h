@@ -23,7 +23,8 @@
 //   IO          batch input + label slots, rewritten every step
 //   TRANSIENT   liveness-scanned workspace, offsets reused across values
 //   RODATA      packed frozen weights (f32, or per-tensor symmetric int8
-//               for weights selected by SelectQuantizedWeights)
+//               for weights selected by the reviewer —
+//               compiler/analysis/reviewer/quantization.h)
 //
 // Everything here runs at compile time; the runtime just does base + offset.
 // =============================================================================
@@ -55,14 +56,6 @@ struct ArenaBinding {
   std::vector<ParamInit> params;  // in allocation order
   std::vector<uint8_t> rodata;    // packed frozen weights
 };
-
-/// Selects frozen weights that can be stored as per-tensor symmetric int8:
-/// every use must be the B operand of a GEMM with a q8 variant (the
-/// student/teacher forward MatMuls and the dX backward). Bias vectors,
-/// LayerNorm affine parameters, and anything feeding another op stay f32.
-/// Returns weight value -> dequantization scale.
-std::unordered_map<const seeml::sir::Value*, float> SelectQuantizedWeights(
-    seeml::sir::Block& block, const GraphBuild& build);
 
 /// Liveness-driven linear-scan allocation for transient values starting at
 /// `base`. Values in `already_bound` are skipped; values in `pinned` are

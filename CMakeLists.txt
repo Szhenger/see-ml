@@ -75,7 +75,13 @@ add_library(seeml_update STATIC
     compiler/frontend/parser/value_resolver.cc
     compiler/frontend/parser/sema.cc
     compiler/frontend/parser/parser.cc
-    compiler/analysis/update_passes.cc
+    compiler/analysis/updater/pass_manager.cc
+    compiler/analysis/updater/conv_lowering.cc
+    compiler/analysis/algebra/lora_grafter.cc
+    compiler/analysis/algebra/merge_builder.cc
+    compiler/analysis/calculus/autodiff.cc
+    compiler/analysis/calculus/optimizer.cc
+    compiler/analysis/reviewer/quantization.cc
     compiler/backend/arena_binder.cc
     compiler/backend/instruction_lowering.cc
     compiler/backend/update_compiler.cc
@@ -144,6 +150,7 @@ seeml_add_test(seeml_parallel_for_test    test/source/parallel_for_test.cc)
 seeml_add_test(seeml_sir_test             test/compiler/sir_test.cc)
 seeml_add_test(seeml_parser_test          test/compiler/parser_test.cc)
 seeml_add_test(seeml_update_passes_test   test/compiler/update_passes_test.cc)
+seeml_add_test(seeml_updater_test         test/compiler/updater_test.cc)
 seeml_add_test(seeml_update_compiler_test test/compiler/update_compiler_test.cc)
 seeml_add_test(seeml_native_emitter_test  test/compiler/native_emitter_test.cc)
 seeml_add_test(seeml_kernels_test         test/runtime/kernels_test.cc)

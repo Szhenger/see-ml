@@ -144,13 +144,27 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
     }
   }
 
-  // --- 3. LoRA grafting. ----------------------------------------------------
-  LoraGrafter grafter(config_.lora);
-  auto adapters = grafter.Run(block);
-  if (!adapters) return std::unexpected(adapters.error());
+  // --- 3. Structural passes (phase A): convolution lowering, then LoRA
+  // grafting — everything that must precede the primal snapshot. The pass
+  // manager re-verifies the block after each pass, so a corrupting rewrite
+  // is reported against its author.
+  std::vector<GraftedAdapter> adapters;
+  {
+    PassManager pm;
+    pm.Add("conv-lowering",
+           [](sir::Block& b) { return ConvLowering().Run(b); });
+    pm.Add("lora-graft",
+           [&](sir::Block& b) -> std::expected<void, std::string> {
+             auto grafted = LoraGrafter(config_.lora).Run(b);
+             if (!grafted) return std::unexpected(grafted.error());
+             adapters = std::move(*grafted);
+             return {};
+           });
+    if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
+  }
 
   std::vector<sir::Value*> trainables;
-  for (const GraftedAdapter& a : *adapters) {
+  for (const GraftedAdapter& a : adapters) {
     trainables.push_back(a.A);
     trainables.push_back(a.B);
   }
@@ -163,25 +177,29 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
   primal_ops.reserve(block.numOps());
   block.walk([&](sir::Operation* op) { primal_ops.push_back(op); });
 
-  // --- 4. Reverse-mode autodiff pruned to the adapters. ---------------------
-  TrainableAutodiff autodiff;
-  auto param_grads = autodiff.Run(block, loss, trainables);
-  if (!param_grads) return std::unexpected(param_grads.error());
-
-  // --- 5. Optimizer synthesis (one program execution == one full step). -----
-  if (config_.emit_optimizer) {
-    OptimizerSynthesizer opt(config_.optimizer);
-    if (auto r = opt.Run(block, *param_grads); !r)
-      return std::unexpected(r.error());
+  // --- 4/5. Calculus passes (phase B): reverse-mode autodiff pruned to the
+  // adapters, then optimizer synthesis (one program execution == one full
+  // step) — again under the per-pass verification gate, which subsumes the
+  // former end-of-pipeline SSA validation.
+  std::unordered_map<sir::Value*, sir::Value*> param_grads;
+  {
+    PassManager pm;
+    pm.Add("autodiff", [&](sir::Block& b) -> std::expected<void, std::string> {
+      auto grads = TrainableAutodiff().Run(b, loss, trainables);
+      if (!grads) return std::unexpected(grads.error());
+      param_grads = std::move(*grads);
+      return {};
+    });
+    if (config_.emit_optimizer)
+      pm.Add("optimizer", [&](sir::Block& b) {
+        return OptimizerSynthesizer(config_.optimizer).Run(b, param_grads);
+      });
+    if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
   }
-
-  if (!block.validate())
-    return std::unexpected("UpdateCompiler: training program failed SSA "
-                           "dominance validation");
 
   // --- 6. Merge program: Δ = (α/r)·A@B (commit adds Δ to the model file). ---
   MergeBuilder merger;
-  auto merge = merger.Run(*adapters);
+  auto merge = merger.Run(adapters);
   if (!merge) return std::unexpected(merge.error());
   if (!merge->block->validate())
     return std::unexpected("UpdateCompiler: merge program failed validation");
@@ -200,7 +218,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
   // program (engine / optimizer-less debug builds) and must survive the step.
   std::unordered_set<const sir::Value*> pinned;
   pinned.insert(loss);
-  for (const auto& [p, g] : *param_grads) pinned.insert(g);
+  for (const auto& [p, g] : param_grads) pinned.insert(g);
 
   auto binding = BindArena(block, build, pinned, quant_scales);
   if (!binding) return std::unexpected(binding.error());
@@ -362,7 +380,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
   merge->block->print(dump);
   result.sir_dump = dump.str();
 
-  for (const auto& [p, g] : *param_grads)
+  for (const auto& [p, g] : param_grads)
     result.params.push_back(
         {.id = std::string(p->id()),
          .param_ref = binding->refs.at(p),
@@ -373,8 +391,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
               return a.id < b.id;
             });
 
-  for (size_t i = 0; i < adapters->size(); ++i) {
-    const GraftedAdapter& a = (*adapters)[i];
+  for (size_t i = 0; i < adapters.size(); ++i) {
+    const GraftedAdapter& a = adapters[i];
     const auto q = quant_scales.find(a.frozen_weight);
     result.adapters.push_back(
         {.weight_name = std::string(a.frozen_weight->id()),

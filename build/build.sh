@@ -25,7 +25,13 @@ compile source/parallel_for.cc                parallel_for.o
 compile compiler/frontend/parser/value_resolver.cc value_resolver.o
 compile compiler/frontend/parser/sema.cc      sema.o
 compile compiler/frontend/parser/parser.cc    parser.o
-compile compiler/analysis/update_passes.cc    update_passes.o
+compile compiler/analysis/updater/pass_manager.cc  pass_manager.o
+compile compiler/analysis/updater/conv_lowering.cc conv_lowering.o
+compile compiler/analysis/algebra/lora_grafter.cc  lora_grafter.o
+compile compiler/analysis/algebra/merge_builder.cc merge_builder.o
+compile compiler/analysis/calculus/autodiff.cc     autodiff.o
+compile compiler/analysis/calculus/optimizer.cc    optimizer_synth.o
+compile compiler/analysis/reviewer/quantization.cc quantization.o
 compile compiler/backend/arena_binder.cc      arena_binder.o
 compile compiler/backend/instruction_lowering.cc instruction_lowering.o
 compile compiler/backend/update_compiler.cc   update_compiler.o
@@ -46,7 +52,10 @@ compile test/support/builders.cc              builders.o
 
 LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/resource_analyzer.o \
-      build/value_resolver.o build/sema.o build/parser.o build/update_passes.o \
+      build/value_resolver.o build/sema.o build/parser.o \
+      build/pass_manager.o build/conv_lowering.o build/lora_grafter.o \
+      build/merge_builder.o build/autodiff.o build/optimizer_synth.o \
+      build/quantization.o \
       build/arena_binder.o build/instruction_lowering.o \
       build/update_compiler.o build/native_emitter.o \
       build/sir_type.o build/sir_value.o build/sir_operation.o \
@@ -68,7 +77,8 @@ for suite in \
     compiler/model_io_test source/hash_test source/parallel_for_test \
     compiler/sir_test \
     compiler/resource_analyzer_test compiler/parser_test \
-    compiler/update_passes_test compiler/update_compiler_test \
+    compiler/update_passes_test compiler/updater_test \
+    compiler/update_compiler_test \
     compiler/native_emitter_test runtime/kernels_test runtime/dataset_test \
     runtime/update_engine_test system/update_system_test; do
   name="seeml_$(basename "$suite")"
