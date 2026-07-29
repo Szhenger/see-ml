@@ -183,7 +183,7 @@ One SeeTest suite per module, organized to mirror this partition
 (`test/compiler/<subsystem>/*_test.cc` — see `test/README.md`), run via
 `ctest` or directly from `build/` (see [usage.md](usage.md)). The
 compiler-side suites: `frontend/` (`model_io`, `resource_analyzer`, `sir`,
-`parser`), `analysis/` (`update_passes`, `updater`), `backend/` (`tuner`,
-`native_emitter`), `driver/` (`update_compiler`, `driver`), and
-`diagnostics/`, plus `source/` suites (`hash`, `parallel_for`) and the
-end-to-end `system/update_system_test`.
+`operator`, `parser`), `analysis/` (`update_passes`, `updater`,
+`reviewer`), `backend/` (`tuner`, `trainer`, `native_emitter`), `driver/`
+(`update_compiler`, `driver`), and `diagnostics/`, plus `source/` suites
+(`hash`, `parallel_for`) and the end-to-end `system/update_system_test`.

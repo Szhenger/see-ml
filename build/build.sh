@@ -96,12 +96,17 @@ eval "$CXX build/seeml_seeu_dump.o -o build/seeml-seeu-dump"
 for suite in \
     source/hash_test source/parallel_for_test \
     compiler/frontend/model_io_test compiler/frontend/resource_analyzer_test \
-    compiler/frontend/sir_test compiler/frontend/parser_test \
+    compiler/frontend/sir_test compiler/frontend/operator_test \
+    compiler/frontend/parser_test \
     compiler/analysis/update_passes_test compiler/analysis/updater_test \
-    compiler/backend/tuner_test compiler/backend/native_emitter_test \
+    compiler/analysis/reviewer_test \
+    compiler/backend/tuner_test compiler/backend/trainer_test \
+    compiler/backend/native_emitter_test \
     compiler/driver/update_compiler_test compiler/driver/driver_test \
     compiler/diagnostics/diagnostics_test \
-    runtime/feeder/dataset_test runtime/executor/kernels_test \
+    runtime/feeder/dataset_test runtime/feeder/batch_pipeline_test \
+    runtime/executor/kernels_test runtime/validator/validator_test \
+    runtime/custodian/custodian_test \
     runtime/engine/engine_test runtime/engine/update_engine_test \
     system/update_system_test; do
   name="seeml_$(basename "$suite")"

@@ -20,14 +20,16 @@ test/
   source/               the shared substrate
     hash_test  parallel_for_test
   compiler/             one folder per compiler subsystem
-    frontend/           model_io  resource_analyzer  sir  parser
-    analysis/           update_passes  updater
-    backend/            tuner  native_emitter
+    frontend/           model_io  resource_analyzer  sir  operator  parser
+    analysis/           update_passes  updater  reviewer
+    backend/            tuner  trainer  native_emitter
     driver/             update_compiler  driver
     diagnostics/        diagnostics
   runtime/              one folder per runtime subsystem
-    feeder/             dataset
+    feeder/             dataset  batch_pipeline
     executor/           kernels
+    validator/          validator
+    custodian/          custodian
     engine/             engine  update_engine
   system/               the cross-half end-to-end update
     update_system_test

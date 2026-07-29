@@ -145,7 +145,11 @@ builds with no access to this repository.
 Runtime suites, organized to mirror this partition
 (`test/runtime/<subsystem>/*_test.cc` — see `test/README.md`):
 `executor/kernels` (per-family numeric checks against references),
-`feeder/dataset`, `engine/engine` (the boundary contracts and the unit
+`feeder/dataset` and `feeder/batch_pipeline` (the staged sequence is
+exactly the serial one), `validator/validator` (per-opcode bounds proofs,
+plus the regression that every compiled instruction validates),
+`custodian/custodian` (durable writes, checkpoint binding and corruption
+rejection), `engine/engine` (the boundary contracts and the unit
 registry), and `engine/update_engine` (the VM lifecycle end to end,
 gradient checks, checkpoint resume), plus the cross-half
 `system/update_system_test` and the emitter suite that verifies the
