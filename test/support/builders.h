@@ -12,8 +12,12 @@
 #include "source/model_format.h"
 
 // =============================================================================
-// Shared fixtures for the SeeML test suites: deterministic model builders,
-// synthetic datasets, and arena introspection helpers for the UpdateEngine.
+// Shared fixtures for the SeeML test suites — the support façade. The
+// implementations are partitioned per discipline, in the fashion of the
+// compiler and runtime subsystems:
+//   models.cc   deterministic SMF model builders + the default UpdateConfig
+//   corpora.cc  synthetic datasets (classification / regression / unlabeled)
+//   probes.cc   engine-arena introspection + the test-run environment
 // Everything is seeded — two calls with the same arguments produce identical
 // bytes, which the determinism tests rely on.
 // =============================================================================

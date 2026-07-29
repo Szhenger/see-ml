@@ -1,4 +1,4 @@
-#include "test/framework/seetest.h"
+#include "test/framework/registry.h"
 
 #include <unistd.h>
 
@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <string_view>
 #include <vector>
 
 namespace seeml::testing {

@@ -139,9 +139,11 @@ add_executable(seeml-seeu-dump tool/seeml_seeu_dump.cc)
 enable_testing()
 
 add_library(seeml_testing STATIC
-    test/framework/seetest.cc
+    test/framework/registry.cc
     test/support/scoped_temp_dir.cc
-    test/support/builders.cc
+    test/support/models.cc
+    test/support/corpora.cc
+    test/support/probes.cc
 )
 target_link_libraries(seeml_testing PUBLIC seeml_update seeml_update_rt)
 # The emitter suite vendors runtime sources out of the repository checkout.
@@ -154,27 +156,27 @@ function(seeml_add_test name src)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-seeml_add_test(seeml_model_io_test        test/compiler/model_io_test.cc)
-seeml_add_test(seeml_resource_analyzer_test test/compiler/resource_analyzer_test.cc)
 seeml_add_test(seeml_hash_test            test/source/hash_test.cc)
 seeml_add_test(seeml_parallel_for_test    test/source/parallel_for_test.cc)
-seeml_add_test(seeml_sir_test             test/compiler/sir_test.cc)
-seeml_add_test(seeml_parser_test          test/compiler/parser_test.cc)
-seeml_add_test(seeml_update_passes_test   test/compiler/update_passes_test.cc)
-seeml_add_test(seeml_updater_test         test/compiler/updater_test.cc)
-seeml_add_test(seeml_diagnostics_test     test/compiler/diagnostics_test.cc)
-seeml_add_test(seeml_driver_test          test/compiler/driver_test.cc)
-seeml_add_test(seeml_update_compiler_test test/compiler/update_compiler_test.cc)
-seeml_add_test(seeml_native_emitter_test  test/compiler/native_emitter_test.cc)
-seeml_add_test(seeml_tuner_test           test/compiler/tuner_test.cc)
-seeml_add_test(seeml_kernels_test         test/runtime/kernels_test.cc)
-seeml_add_test(seeml_dataset_test         test/runtime/dataset_test.cc)
-seeml_add_test(seeml_engine_test          test/runtime/engine_test.cc)
-seeml_add_test(seeml_update_engine_test   test/runtime/update_engine_test.cc)
+seeml_add_test(seeml_model_io_test        test/compiler/frontend/model_io_test.cc)
+seeml_add_test(seeml_resource_analyzer_test test/compiler/frontend/resource_analyzer_test.cc)
+seeml_add_test(seeml_sir_test             test/compiler/frontend/sir_test.cc)
+seeml_add_test(seeml_parser_test          test/compiler/frontend/parser_test.cc)
+seeml_add_test(seeml_update_passes_test   test/compiler/analysis/update_passes_test.cc)
+seeml_add_test(seeml_updater_test         test/compiler/analysis/updater_test.cc)
+seeml_add_test(seeml_tuner_test           test/compiler/backend/tuner_test.cc)
+seeml_add_test(seeml_native_emitter_test  test/compiler/backend/native_emitter_test.cc)
+seeml_add_test(seeml_update_compiler_test test/compiler/driver/update_compiler_test.cc)
+seeml_add_test(seeml_driver_test          test/compiler/driver/driver_test.cc)
+seeml_add_test(seeml_diagnostics_test     test/compiler/diagnostics/diagnostics_test.cc)
+seeml_add_test(seeml_dataset_test         test/runtime/feeder/dataset_test.cc)
+seeml_add_test(seeml_kernels_test         test/runtime/executor/kernels_test.cc)
+seeml_add_test(seeml_engine_test          test/runtime/engine/engine_test.cc)
+seeml_add_test(seeml_update_engine_test   test/runtime/engine/update_engine_test.cc)
 seeml_add_test(seeml_update_system_test   test/system/update_system_test.cc)
 
 if(SEEML_FUZZ)
-    add_executable(seeml_fuzz_formats test/fuzz_binary_formats.cc)
+    add_executable(seeml_fuzz_formats test/fuzz/binary_formats.cc)
     target_compile_options(seeml_fuzz_formats PRIVATE -fsanitize=fuzzer,address)
     target_link_options(seeml_fuzz_formats PRIVATE -fsanitize=fuzzer,address)
     target_link_libraries(seeml_fuzz_formats PRIVATE seeml_update seeml_update_rt)

@@ -56,10 +56,12 @@ compile runtime/engine/contract.cc            engine_contract.o
 compile runtime/engine/update_engine.cc       update_engine.o
 compile tool/seeml_update_compile.cc          seeml_update_compile.o
 compile tool/seeml_seeu_dump.cc               seeml_seeu_dump.o
-compile test/framework/seetest.cc             seetest.o
+compile test/framework/registry.cc            seetest_registry.o
 compile test/framework/seetest_main.cc        seetest_main.o
 compile test/support/scoped_temp_dir.cc       scoped_temp_dir.o
-compile test/support/builders.cc              builders.o
+compile test/support/models.cc                fixtures_models.o
+compile test/support/corpora.cc               fixtures_corpora.o
+compile test/support/probes.cc                fixtures_probes.o
 
 LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/resource_analyzer.o \
@@ -82,8 +84,9 @@ LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/batch_pipeline.o build/durable_io.o build/plan_validator.o \
       build/checkpoint.o build/engine_contract.o build/update_engine.o \
       build/parallel_for.o"
-TESTING="build/seetest.o build/seetest_main.o build/scoped_temp_dir.o \
-         build/builders.o"
+TESTING="build/seetest_registry.o build/seetest_main.o \
+         build/scoped_temp_dir.o build/fixtures_models.o \
+         build/fixtures_corpora.o build/fixtures_probes.o"
 
 echo "  LINK seeml-update-compile"
 eval "$CXX -pthread build/seeml_update_compile.o $LIBS -o build/seeml-update-compile"
@@ -91,15 +94,16 @@ echo "  LINK seeml-seeu-dump"
 eval "$CXX build/seeml_seeu_dump.o -o build/seeml-seeu-dump"
 
 for suite in \
-    compiler/model_io_test source/hash_test source/parallel_for_test \
-    compiler/sir_test \
-    compiler/resource_analyzer_test compiler/parser_test \
-    compiler/update_passes_test compiler/updater_test \
-    compiler/diagnostics_test compiler/driver_test \
-    compiler/update_compiler_test compiler/tuner_test \
-    compiler/native_emitter_test runtime/kernels_test runtime/dataset_test \
-    runtime/engine_test \
-    runtime/update_engine_test system/update_system_test; do
+    source/hash_test source/parallel_for_test \
+    compiler/frontend/model_io_test compiler/frontend/resource_analyzer_test \
+    compiler/frontend/sir_test compiler/frontend/parser_test \
+    compiler/analysis/update_passes_test compiler/analysis/updater_test \
+    compiler/backend/tuner_test compiler/backend/native_emitter_test \
+    compiler/driver/update_compiler_test compiler/driver/driver_test \
+    compiler/diagnostics/diagnostics_test \
+    runtime/feeder/dataset_test runtime/executor/kernels_test \
+    runtime/engine/engine_test runtime/engine/update_engine_test \
+    system/update_system_test; do
   name="seeml_$(basename "$suite")"
   echo "  CXX+LINK $name"
   eval "$CXX $FLAGS -c 'test/$suite.cc' -o 'build/$name.o'"

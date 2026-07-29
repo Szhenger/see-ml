@@ -142,9 +142,11 @@ builds with no access to this repository.
 
 ## Testing
 
-Runtime suites (`test/runtime/*_test.cc`): `kernels` (per-family numeric
-checks against references), `dataset`, `engine` (the boundary contracts
-and the unit registry), `update_engine` (the VM lifecycle end to end,
+Runtime suites, organized to mirror this partition
+(`test/runtime/<subsystem>/*_test.cc` — see `test/README.md`):
+`executor/kernels` (per-family numeric checks against references),
+`feeder/dataset`, `engine/engine` (the boundary contracts and the unit
+registry), and `engine/update_engine` (the VM lifecycle end to end,
 gradient checks, checkpoint resume), plus the cross-half
 `system/update_system_test` and the emitter suite that verifies the
 vendored package layout.
