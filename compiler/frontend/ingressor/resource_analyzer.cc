@@ -10,6 +10,8 @@
 #include <unistd.h>
 #endif
 
+#include "compiler/diagnostics/tokenizing/error.h"
+
 namespace seeml::update {
 
 namespace {
@@ -119,8 +121,8 @@ std::expected<void, std::string> CheckTrainableLocally(
   if (budget == 0) return {};  // cannot prove infeasibility — do not reject
   const uint64_t need = footprint.total_bytes();
   if (need <= budget) return {};
-  return std::unexpected(
-      "Ingressor: model is too big to train locally: weights " +
+  return seeml::diag::tokenizing::IngressError(
+      "model is too big to train locally: weights " +
       FormatMiB(footprint.weight_bytes) + " + activations " +
       FormatMiB(footprint.activation_bytes) + " need at least " +
       FormatMiB(need) + ", but the local memory budget is " +

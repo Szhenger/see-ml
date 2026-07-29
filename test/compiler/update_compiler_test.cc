@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include "compiler/backend/update_compiler.h"
+#include "compiler/driver/update_compiler.h"
 #include "source/update_types.h"
 #include "source/parallel_for.h"
 #include "source/model_format.h"

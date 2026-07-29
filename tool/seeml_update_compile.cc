@@ -40,7 +40,7 @@
 #include <vector>
 
 #include "compiler/backend/trainer/native_emitter.h"
-#include "compiler/backend/update_compiler.h"
+#include "compiler/driver/update_compiler.h"
 #include "compiler/frontend/ingressor/model_reader.h"
 
 namespace {

@@ -3,6 +3,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <expected>
+#include <string>
 #include <string_view>
 
 // =============================================================================
@@ -50,6 +52,18 @@ struct GemmTiling {
 /// to the SIMD width and clamped to sane minima, so the result is always
 /// usable geometry.
 GemmTiling SuggestGemmTiling(const HostArchInfo& arch);
+
+/// Checks a tiling against the contract SuggestGemmTiling documents for
+/// `arch`: every dimension nonzero and a multiple of the SIMD width, the
+/// kc x nc panel of B within half of L1, and the mc x kc panel of A within
+/// half of L2 (cache halves are only enforced when the size was detected).
+/// Errors are formed by diagnostics/architecting — a hint that lies about
+/// fitting the cache hierarchy silently costs every training step, so
+/// consumers should gate handwritten or deserialized tilings through this.
+/// The autotuner's exploratory candidates intentionally probe beyond the
+/// cache-fit half of the contract and are not gated.
+[[nodiscard]] std::expected<void, std::string> ValidateGemmTiling(
+    const GemmTiling& tiling, const HostArchInfo& arch);
 
 }  // namespace seeml::update
 

@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <thread>
 
+#include "compiler/diagnostics/architecting/error.h"
+
 #if defined(__APPLE__)
 #include <sys/sysctl.h>
 #include <sys/types.h>
@@ -85,7 +87,16 @@ HostArchInfo DetectHostArch() {
 }
 
 GemmTiling SuggestGemmTiling(const HostArchInfo& arch) {
+  namespace architecting = seeml::diag::architecting;
   const size_t simd = std::max<size_t>(arch.simd_width_f32, 4);
+  if (arch.l1d_bytes == 0)
+    architecting::DetectionFallback(
+        architecting::kHostArch,
+        "L1d size undetected; assuming 32 KiB for GEMM tiling");
+  if (arch.l2_bytes == 0)
+    architecting::DetectionFallback(
+        architecting::kHostArch,
+        "L2 size undetected; assuming 512 KiB for GEMM tiling");
   const uint64_t l1 = arch.l1d_bytes > 0 ? arch.l1d_bytes : 32u << 10;
   const uint64_t l2 = arch.l2_bytes > 0 ? arch.l2_bytes : 512u << 10;
 
@@ -99,6 +110,44 @@ GemmTiling SuggestGemmTiling(const HostArchInfo& arch) {
   t.mc = RoundToUnit(
       static_cast<size_t>(l2 / 2 / (t.kc * sizeof(float))), simd);
   return t;
+}
+
+std::expected<void, std::string> ValidateGemmTiling(const GemmTiling& tiling,
+                                                    const HostArchInfo& arch) {
+  namespace architecting = seeml::diag::architecting;
+  const size_t simd = std::max<size_t>(arch.simd_width_f32, 4);
+
+  const struct { const char* name; size_t v; } dims[] = {
+      {"mc", tiling.mc}, {"kc", tiling.kc}, {"nc", tiling.nc}};
+  for (const auto& d : dims) {
+    if (d.v == 0)
+      return architecting::Error(architecting::kHostArch,
+                                 std::string(d.name) + " must be nonzero");
+    if (d.v % simd != 0)
+      return architecting::Error(
+          architecting::kHostArch,
+          std::string(d.name) + "=" + std::to_string(d.v) +
+              " is not a multiple of the SIMD width (" + std::to_string(simd) +
+              " f32 lanes)");
+  }
+
+  // The cache halves are only a contract when the geometry was detected —
+  // an all-defaults HostArchInfo must accept the fallback tiling.
+  if (arch.l1d_bytes > 0 &&
+      tiling.kc * tiling.nc * sizeof(float) > arch.l1d_bytes / 2)
+    return architecting::Error(
+        architecting::kHostArch,
+        "kc x nc panel (" + std::to_string(tiling.kc) + " x " +
+            std::to_string(tiling.nc) + " f32) exceeds half of L1d (" +
+            std::to_string(arch.l1d_bytes) + " B)");
+  if (arch.l2_bytes > 0 &&
+      tiling.mc * tiling.kc * sizeof(float) > arch.l2_bytes / 2)
+    return architecting::Error(
+        architecting::kHostArch,
+        "mc x kc panel (" + std::to_string(tiling.mc) + " x " +
+            std::to_string(tiling.kc) + " f32) exceeds half of L2 (" +
+            std::to_string(arch.l2_bytes) + " B)");
+  return {};
 }
 
 }  // namespace seeml::update

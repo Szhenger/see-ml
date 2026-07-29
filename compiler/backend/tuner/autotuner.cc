@@ -3,8 +3,11 @@
 #include <algorithm>
 
 #include "compiler/backend/tuner/bandit.h"
+#include "compiler/diagnostics/architecting/error.h"
 
 namespace seeml::update {
+
+namespace architecting = seeml::diag::architecting;
 
 namespace {
 
@@ -41,10 +44,20 @@ AutotuneResult AutotuneGemmTiling(std::span<const GemmTiling> candidates,
                                   const TilingBenchmarkFn& measure,
                                   size_t trials) {
   AutotuneResult result;
-  if (candidates.empty()) return result;
+  if (candidates.empty()) {
+    architecting::DetectionFallback(
+        architecting::kAutotuner,
+        "no tiling candidates to measure; keeping the architecture hint");
+    return result;
+  }
 
   Ucb1Bandit bandit(candidates.size());
   const size_t budget = std::max(trials, candidates.size());
+  if (budget > trials)
+    architecting::DetectionFallback(
+        architecting::kAutotuner,
+        "trial budget raised to " + std::to_string(budget) +
+            " so every candidate is measured at least once");
   for (size_t t = 0; t < budget; ++t) {
     const size_t arm = bandit.Select();
     bandit.Update(arm, measure(candidates[arm]));

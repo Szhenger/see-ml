@@ -1,18 +1,20 @@
 #include "compiler/frontend/parser/parser.h"
 
+#include "compiler/diagnostics/parsing/error.h"
 #include "compiler/frontend/parser/sema.h"
 #include "compiler/frontend/parser/value_resolver.h"
 
 namespace seeml::update {
 
 namespace sir = seeml::sir;
+namespace parsing = seeml::diag::parsing;
 
 std::expected<sir::Value*, std::string> BuildForward(
     sir::Block& block, const SmfModel& model, const std::string& prefix,
     sir::Value* input, int64_t batch, GraphBuild& build) {
   if (batch < 1)
-    return std::unexpected("UpdateCompiler: batch must be at least 1, got " +
-                           std::to_string(batch));
+    return parsing::Error("batch must be at least 1, got " +
+                          std::to_string(batch));
   // Whole-graph checks first: after this, every op introduces a fresh name,
   // names resolve in topological order, and the model output is known to be
   // producible — the parse loop can fail only on per-op grounds.
@@ -26,8 +28,7 @@ std::expected<sir::Value*, std::string> BuildForward(
     switch (op.kind) {
       case SmfOpKind::kMatMul: {
         if (op.inputs.size() != 2)
-          return std::unexpected("UpdateCompiler: MatMul '" + op.name +
-                                 "' needs 2 inputs");
+          return parsing::OpError("MatMul", op.name, "needs 2 inputs");
         auto x = resolver.Resolve(op.inputs[0]);
         if (!x) return std::unexpected(x.error());
         auto w = resolver.Resolve(op.inputs[1]);
@@ -45,8 +46,7 @@ std::expected<sir::Value*, std::string> BuildForward(
       }
       case SmfOpKind::kAddBias: {
         if (op.inputs.size() != 2)
-          return std::unexpected("UpdateCompiler: AddBias '" + op.name +
-                                 "' needs 2 inputs");
+          return parsing::OpError("AddBias", op.name, "needs 2 inputs");
         auto x = resolver.Resolve(op.inputs[0]);
         if (!x) return std::unexpected(x.error());
         auto b = resolver.Resolve(op.inputs[1]);
@@ -69,8 +69,7 @@ std::expected<sir::Value*, std::string> BuildForward(
                                    ? "sc_high.gelu"
                                    : "sc_high.silu";
         if (op.inputs.size() != 1)
-          return std::unexpected("UpdateCompiler: '" + op.name +
-                                 "' needs 1 input");
+          return parsing::Error("'" + op.name + "' needs 1 input");
         auto x = resolver.Resolve(op.inputs[0]);
         if (!x) return std::unexpected(x.error());
         sir::Operation* r = block.appendOp(mnemonic);
@@ -82,8 +81,7 @@ std::expected<sir::Value*, std::string> BuildForward(
       }
       case SmfOpKind::kMul: {
         if (op.inputs.size() != 2)
-          return std::unexpected("UpdateCompiler: Mul '" + op.name +
-                                 "' needs 2 inputs");
+          return parsing::OpError("Mul", op.name, "needs 2 inputs");
         auto x = resolver.Resolve(op.inputs[0]);
         if (!x) return std::unexpected(x.error());
         auto y = resolver.Resolve(op.inputs[1]);
@@ -100,8 +98,8 @@ std::expected<sir::Value*, std::string> BuildForward(
       }
       case SmfOpKind::kLayerNorm: {
         if (op.inputs.size() != 3)
-          return std::unexpected("UpdateCompiler: LayerNorm '" + op.name +
-                                 "' needs 3 inputs (x, gamma, beta)");
+          return parsing::OpError("LayerNorm", op.name,
+                                  "needs 3 inputs (x, gamma, beta)");
         auto x = resolver.Resolve(op.inputs[0]);
         if (!x) return std::unexpected(x.error());
         auto gamma = resolver.Resolve(op.inputs[1]);
@@ -133,8 +131,8 @@ std::expected<sir::Value*, std::string> BuildForward(
   // invariant, not a reachable error path.
   sir::Value* out = resolver.Lookup(model.output_name);
   if (!out)
-    return std::unexpected("UpdateCompiler: model output '" +
-                           model.output_name + "' was never produced");
+    return parsing::Error("model output '" + model.output_name +
+                          "' was never produced");
   return out;
 }
 

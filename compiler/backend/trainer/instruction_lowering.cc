@@ -2,9 +2,12 @@
 
 #include <bit>
 
+#include "compiler/diagnostics/generating/error.h"
+
 namespace seeml::update {
 
 namespace sir = seeml::sir;
+namespace generating = seeml::diag::generating;
 
 namespace {
 
@@ -220,13 +223,14 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[1] = ref(op->result(0));
       ins.out[0] = vol(op->result(0));
     } else {
-      error = "UpdateCompiler: cannot lower '" + std::string(m) + "'";
+      error = "cannot lower '" + std::string(m) + "'";
       break;
     }
     instrs.push_back(ins);
   }
 
-  if (!error.empty()) return std::unexpected(error);
+  if (!error.empty())
+    return generating::Error(generating::kInstructionLowering, error);
   return instrs;
 }
 

@@ -1,5 +1,7 @@
 #include "compiler/frontend/parser/value_resolver.h"
 
+#include "compiler/diagnostics/parsing/error.h"
+
 namespace seeml::update {
 
 namespace sir = seeml::sir;
@@ -34,8 +36,8 @@ std::expected<sir::Value*, std::string> ValueResolver::MaterializeWeight(
   auto found = tensor_index_.find(name);
   const SmfTensor* t = found == tensor_index_.end() ? nullptr : found->second;
   if (!t || !t->is_const)
-    return std::unexpected("UpdateCompiler: '" + std::string(name) +
-                           "' is not a constant tensor in the model");
+    return seeml::diag::parsing::Error("'" + std::string(name) +
+                                       "' is not a constant tensor in the model");
   sir::Operation* op = block_.appendOp("sc_mem.weight");
   op->setAttribute("smf_offset", static_cast<int64_t>(t->data_offset));
   sir::Value* v = op->addResult(prefix_ + std::string(name),

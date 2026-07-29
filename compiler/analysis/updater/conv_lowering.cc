@@ -3,13 +3,13 @@
 #include <memory>
 #include <vector>
 
-#include "compiler/diagnostics/logger.h"
+#include "compiler/diagnostics/passing/error.h"
 #include "compiler/frontend/operator/op_builder.h"
 
 namespace seeml::update {
 
 namespace sir = seeml::sir;
-using seecpp::utility::Logger;
+namespace passing = seeml::diag::passing;
 
 std::expected<void, std::string> ConvLowering::Run(sir::Block& block) {
   // Snapshot the targets first: lowering mutates the op list.
@@ -31,14 +31,14 @@ std::expected<void, std::string> ConvLowering::Run(sir::Block& block) {
     const auto dilations = conv->getAttrAs<std::vector<int64_t>>("dilations")
                                .value_or(std::vector<int64_t>{1, 1});
     if (group != 1 || dilations != std::vector<int64_t>{1, 1})
-      return std::unexpected("ConvLowering: '" + base +
-                             "' uses group/dilation, which the im2col-GEMM "
-                             "form does not model");
+      return passing::LoweringError(base,
+                                    "uses group/dilation, which the "
+                                    "im2col-GEMM form does not model");
     auto strides = conv->getAttrAs<std::vector<int64_t>>("strides");
     auto pads = conv->getAttrAs<std::vector<int64_t>>("pads");
     if (!strides || !pads)
-      return std::unexpected("ConvLowering: '" + base +
-                             "' lacks stride/pad geometry attributes");
+      return passing::LoweringError(base,
+                                    "lacks stride/pad geometry attributes");
 
     const auto& fd = filter->shape().dims;  // [Cout, Cin, KH, KW]
     const int64_t cout = fd.at(0);
@@ -91,8 +91,9 @@ std::expected<void, std::string> ConvLowering::Run(sir::Block& block) {
     block.removeOp(conv);
   }
 
-  Logger::Info("ConvLowering: lowered " + std::to_string(targets.size()) +
-               " convolution(s) to im2col-GEMM form");
+  seeml::diag::Note(passing::kConvLowering,
+                    "lowered " + std::to_string(targets.size()) +
+                        " convolution(s) to im2col-GEMM form");
   return {};
 }
 

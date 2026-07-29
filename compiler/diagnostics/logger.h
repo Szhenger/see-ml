@@ -1,18 +1,18 @@
-#ifndef SEECPP_COMPILER_DIAGNOSTICS_LOGGER_H_
-#define SEECPP_COMPILER_DIAGNOSTICS_LOGGER_H_
+#ifndef SEEML_COMPILER_DIAGNOSTICS_LOGGER_H_
+#define SEEML_COMPILER_DIAGNOSTICS_LOGGER_H_
 
 #include <cstdint>
 #include <source_location>
 #include <string_view>
 
-namespace seecpp::utility {
+namespace seeml::diag {
 
 // Google Style: Enumerators should be named like constants (kEnumName).
-enum class LogLevel : uint8_t { 
-    kDebug = 0, 
-    kInfo = 1, 
-    kWarn = 2, 
-    kError = 3 
+enum class LogLevel : uint8_t {
+    kDebug = 0,
+    kInfo = 1,
+    kWarn = 2,
+    kError = 3
 };
 
 class Logger {
@@ -36,6 +36,6 @@ class Logger {
     static void Log(LogLevel level, std::string_view msg, const std::source_location& loc);
 };
 
-}  // namespace seecpp::utility
+}  // namespace seeml::diag
 
-#endif  // SEECPP_COMPILER_DIAGNOSTICS_LOGGER_H_
+#endif  // SEEML_COMPILER_DIAGNOSTICS_LOGGER_H_

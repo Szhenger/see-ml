@@ -32,7 +32,7 @@
 #include <string>
 #include <vector>
 
-#include "compiler/backend/update_compiler.h"
+#include "compiler/driver/update_compiler.h"
 #include "runtime/dataset.h"
 #include "runtime/update_engine.h"
 #include "compiler/frontend/ingressor/model_reader.h"

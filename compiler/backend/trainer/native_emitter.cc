@@ -3,9 +3,12 @@
 #include <filesystem>
 #include <fstream>
 
+#include "compiler/diagnostics/generating/error.h"
 #include "source/parallel_for.h"
 
 namespace seeml::update {
+
+namespace generating = seeml::diag::generating;
 
 namespace {
 
@@ -13,9 +16,13 @@ std::expected<void, std::string> WriteFile(const std::string& path,
                                            const std::string& content,
                                            bool executable = false) {
   std::ofstream f(path, std::ios::binary | std::ios::trunc);
-  if (!f) return std::unexpected("NativeEmitter: cannot write '" + path + "'");
+  if (!f)
+    return generating::FileError(generating::kNativeEmitter, "cannot write",
+                                 path);
   f << content;
-  if (!f) return std::unexpected("NativeEmitter: short write to '" + path + "'");
+  if (!f)
+    return generating::FileError(generating::kNativeEmitter, "short write to",
+                                 path);
   f.close();
   if (executable) {
     std::error_code ec;
@@ -295,7 +302,8 @@ std::expected<EmitPaths, std::string> EmitNativePackage(
   std::error_code ec;
   std::filesystem::create_directories(out_dir, ec);
   if (ec)
-    return std::unexpected("NativeEmitter: cannot create '" + out_dir + "'");
+    return generating::FileError(generating::kNativeEmitter,
+                                 "cannot create", out_dir);
 
   EmitPaths paths{
       .plan_file = out_dir + "/update_plan.seeu",
@@ -307,12 +315,13 @@ std::expected<EmitPaths, std::string> EmitNativePackage(
   {
     std::ofstream f(paths.plan_file, std::ios::binary | std::ios::trunc);
     if (!f)
-      return std::unexpected("NativeEmitter: cannot write plan file");
+      return generating::Error(generating::kNativeEmitter,
+                               "cannot write plan file");
     f.write(reinterpret_cast<const char*>(plan.data()),
             static_cast<std::streamsize>(plan.size()));
     if (!f)
-      return std::unexpected("NativeEmitter: short write to '" +
-                             paths.plan_file + "'");
+      return generating::FileError(generating::kNativeEmitter,
+                                   "short write to", paths.plan_file);
   }
   if (auto r = WriteFile(paths.embedded_tu, EmbedPlanAsTU(plan)); !r)
     return std::unexpected(r.error());
@@ -325,13 +334,15 @@ std::expected<EmitPaths, std::string> EmitNativePackage(
     const auto dst = std::filesystem::path(out_dir) / rel;
     std::filesystem::create_directories(dst.parent_path(), ec);
     if (ec)
-      return std::unexpected("NativeEmitter: cannot create '" +
-                             dst.parent_path().string() + "'");
+      return generating::FileError(generating::kNativeEmitter,
+                                   "cannot create",
+                                   dst.parent_path().string());
     std::filesystem::copy_file(
         src, dst, std::filesystem::copy_options::overwrite_existing, ec);
     if (ec)
-      return std::unexpected("NativeEmitter: cannot vendor '" + src.string() +
-                             "' (" + ec.message() + ")");
+      return generating::Error(generating::kNativeEmitter,
+                               "cannot vendor '" + src.string() + "' (" +
+                                   ec.message() + ")");
   }
 
   if (auto r = WriteFile(paths.build_script, BuildScript(),

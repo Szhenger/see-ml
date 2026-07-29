@@ -4,12 +4,12 @@
 #include <string_view>
 #include <unordered_map>
 
-#include "compiler/diagnostics/logger.h"
+#include "compiler/diagnostics/updating/error.h"
 
 namespace seeml::update {
 
 namespace sir = seeml::sir;
-using seecpp::utility::Logger;
+namespace updating = seeml::diag::updating;
 
 namespace {
 
@@ -24,7 +24,7 @@ int64_t Dim(const sir::Value* v, size_t i) { return v->shape().dims.at(i); }
 std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
     sir::Block& block) {
   if (spec_.rank <= 0)
-    return std::unexpected("LoraGrafter: rank must be positive");
+    return updating::Error(updating::kLoraGrafter, "rank must be positive");
 
   // Snapshot the target ops first: grafting mutates the op list.
   std::vector<sir::Operation*> targets;
@@ -46,7 +46,8 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
   });
 
   if (targets.empty())
-    return std::unexpected("LoraGrafter: no eligible MatMul targets found");
+    return updating::Error(updating::kLoraGrafter,
+                           "no eligible MatMul targets found");
 
   std::vector<GraftedAdapter> adapters;
   adapters.reserve(targets.size());
@@ -138,8 +139,9 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
     ++adapter_index;
   }
 
-  Logger::Info("LoraGrafter: grafted " + std::to_string(adapters.size()) +
-               " adapter(s), rank=" + std::to_string(spec_.rank));
+  seeml::diag::Note(updating::kLoraGrafter,
+                    "grafted " + std::to_string(adapters.size()) +
+                        " adapter(s), rank=" + std::to_string(spec_.rank));
   return adapters;
 }
 

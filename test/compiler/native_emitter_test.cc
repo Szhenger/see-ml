@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "compiler/backend/trainer/native_emitter.h"
-#include "compiler/backend/update_compiler.h"
+#include "compiler/driver/update_compiler.h"
 #include "runtime/update_engine.h"
 #include "source/model_format.h"
 #include "test/framework/seetest.h"

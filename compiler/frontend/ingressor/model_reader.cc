@@ -6,10 +6,13 @@
 #include <thread>
 #include <vector>
 
+#include "compiler/diagnostics/tokenizing/error.h"
 #include "source/hash.h"
 #include "source/parallel_for.h"
 
 namespace seeml::update {
+
+namespace tokenizing = seeml::diag::tokenizing;
 
 namespace {
 
@@ -60,27 +63,27 @@ struct Reader {
 
 std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   std::ifstream f(path, std::ios::binary);
-  if (!f) return std::unexpected("SMF: cannot open '" + path + "'");
+  if (!f) return tokenizing::FileError("cannot open", path);
   // Sized single read: stat, size the buffer once, one bulk transfer —
   // model files are the largest artifact the compiler ingests, and the
   // byte-at-a-time istreambuf_iterator form this replaces re-grew the
   // vector all the way up.
   f.seekg(0, std::ios::end);
   const std::streamoff end = f.tellg();
-  if (end < 0) return std::unexpected("SMF: cannot stat '" + path + "'");
+  if (end < 0) return tokenizing::FileError("cannot stat", path);
   f.seekg(0);
   std::vector<uint8_t> bytes(static_cast<size_t>(end));
   if (!bytes.empty() &&
       !f.read(reinterpret_cast<char*>(bytes.data()),
               static_cast<std::streamsize>(bytes.size())))
-    return std::unexpected("SMF: cannot read '" + path + "'");
+    return tokenizing::FileError("cannot read", path);
 
   Reader r{bytes.data(), bytes.size()};
   if (r.Read<uint32_t>() != kSmfMagic)
-    return std::unexpected("SMF: bad magic in '" + path + "'");
+    return tokenizing::FileError("bad magic in", path);
   const uint32_t version = r.Read<uint32_t>();
   if (version < kSmfMinVersion || version > kSmfVersion)
-    return std::unexpected("SMF: unsupported version in '" + path + "'");
+    return tokenizing::FileError("unsupported version in", path);
 
   const uint32_t num_tensors = r.Read<uint32_t>();
   const uint32_t num_ops = r.Read<uint32_t>();
@@ -121,7 +124,7 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
       }
     }
     if (!dims_ok)
-      return std::unexpected("SMF: tensor '" + t.name + "' has invalid dims");
+      return tokenizing::TensorError(t.name, "has invalid dims");
 
     if (t.is_const) {
       // The instruction stream sizes reads from dims while rodata packing and
@@ -129,13 +132,12 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
       uint64_t expected_bytes = 0;
       if (!MulU64(volume, sizeof(float), &expected_bytes) ||
           t.byte_size != expected_bytes)
-        return std::unexpected("SMF: tensor '" + t.name +
-                               "' byte size disagrees with its dims");
+        return tokenizing::TensorError(t.name,
+                                       "byte size disagrees with its dims");
       // Overflow-safe range check: offset + size may wrap in u64.
       if (t.data_offset > bytes.size() ||
           t.byte_size > bytes.size() - t.data_offset)
-        return std::unexpected("SMF: tensor '" + t.name +
-                               "' data range exceeds file size");
+        return tokenizing::TensorError(t.name, "data range exceeds file size");
       // Payload copies are deferred: the scan pass touches metadata only, so
       // every blob is validated before the first byte moves and the copies
       // can be fanned out together afterwards.
@@ -151,8 +153,8 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     // Range-check before the cast: an unknown kind must be a load error, not
     // an out-of-range enum that a downstream switch silently skips.
     if (kind > kSmfOpKindMax)
-      return std::unexpected("SMF: unknown op kind " + std::to_string(kind) +
-                             " in '" + path + "'");
+      return tokenizing::Error("unknown op kind " + std::to_string(kind) +
+                               " in '" + path + "'");
     op.kind = static_cast<SmfOpKind>(kind);
     op.name = r.ReadStr();
     const uint8_t n_in = r.Read<uint8_t>();
@@ -161,7 +163,7 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     model.ops.push_back(std::move(op));
   }
 
-  if (!r.ok) return std::unexpected("SMF: truncated file '" + path + "'");
+  if (!r.ok) return tokenizing::FileError("truncated file", path);
 
   // Materialize the validated constant payloads. Each copy writes only its
   // own tensor, so large models fan the copies out over ParallelFor

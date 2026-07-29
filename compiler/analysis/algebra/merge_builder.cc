@@ -1,13 +1,16 @@
 #include "compiler/analysis/algebra/merge_builder.h"
 
+#include "compiler/diagnostics/updating/error.h"
+
 namespace seeml::update {
 
 namespace sir = seeml::sir;
+namespace updating = seeml::diag::updating;
 
 std::expected<MergeProgram, std::string> MergeBuilder::Run(
     const std::vector<GraftedAdapter>& adapters) {
   if (adapters.empty())
-    return std::unexpected("MergeBuilder: no adapters to merge");
+    return updating::Error(updating::kMergeBuilder, "no adapters to merge");
 
   MergeProgram program;
   program.block = std::make_unique<sir::Block>();

@@ -38,7 +38,8 @@ compile compiler/backend/tuner/autotuner.cc   autotuner.o
 compile compiler/backend/trainer/arena_binder.cc arena_binder.o
 compile compiler/backend/trainer/instruction_lowering.cc instruction_lowering.o
 compile compiler/backend/trainer/kernel_emitter.cc kernel_emitter.o
-compile compiler/backend/update_compiler.cc   update_compiler.o
+compile compiler/driver/contract.cc           driver_contract.o
+compile compiler/driver/update_compiler.cc    update_compiler.o
 compile compiler/backend/trainer/native_emitter.cc native_emitter.o
 compile runtime/update_kernels.cc             update_kernels.o
 compile runtime/dataset.cc                    dataset.o
@@ -63,7 +64,7 @@ LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/arena_binder.o build/instruction_lowering.o \
       build/host_arch.o build/bandit.o build/autotuner.o \
       build/kernel_emitter.o \
-      build/update_compiler.o build/native_emitter.o \
+      build/driver_contract.o build/update_compiler.o build/native_emitter.o \
       build/sir_type.o build/sir_value.o build/sir_operation.o \
       build/sir_block.o \
       build/op_convolution.o build/op_linear.o build/op_normalization.o \
@@ -84,6 +85,7 @@ for suite in \
     compiler/sir_test \
     compiler/resource_analyzer_test compiler/parser_test \
     compiler/update_passes_test compiler/updater_test \
+    compiler/diagnostics_test compiler/driver_test \
     compiler/update_compiler_test compiler/tuner_test \
     compiler/native_emitter_test runtime/kernels_test runtime/dataset_test \
     runtime/update_engine_test system/update_system_test; do

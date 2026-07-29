@@ -8,7 +8,7 @@
 #include <mutex>
 #include <sstream>
 
-namespace seecpp::utility {
+namespace seeml::diag {
 
 namespace {
 // Google Style: Hide internal static state in an anonymous namespace 
@@ -93,4 +93,4 @@ void Logger::Log(LogLevel level, std::string_view msg, const std::source_locatio
     }
 }
 
-}  // namespace seecpp::utility
+}  // namespace seeml::diag

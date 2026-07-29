@@ -1,5 +1,5 @@
-#ifndef SEEML_COMPILER_BACKEND_UPDATE_COMPILER_H_
-#define SEEML_COMPILER_BACKEND_UPDATE_COMPILER_H_
+#ifndef SEEML_COMPILER_DRIVER_UPDATE_COMPILER_H_
+#define SEEML_COMPILER_DRIVER_UPDATE_COMPILER_H_
 
 #include <cstdint>
 #include <expected>
@@ -25,16 +25,19 @@
 //
 // Every byte the runtime will touch is bound here, at compile time.
 //
-// The backend is partitioned by role; this driver only abstracts the process:
-//   trainer/       code generation for the training program — arena binding,
-//                  instruction lowering, the native C++ host package
-//                  (native_emitter), and GPU kernel source (kernel_emitter)
-//   architecture/  host ISA/microarchitecture analysis (SIMD width, cache
-//                  and core geometry) and the GEMM tiling hints it derives
-//                  for the trainer
-//   tuner/         reinforcement tuning: a UCB1 bandit and the GEMM-tiling
-//                  autotuner that spends a measurement budget to refine the
-//                  architecture hint on the real machine
+// The driver owns the compilation *process*, nothing else: it sequences the
+// subsystems and verifies at every boundary that each was used correctly
+// (contract.h):
+//   frontend/     ingest feasibility (ingressor) and SMF graph -> forward
+//                 SIR (parser) — gated by VerifyFrontendContract
+//   analysis/     the pass-managed structural and calculus phases (updater/
+//                 algebra/calculus) plus quantization review (reviewer) —
+//                 gated by VerifyAnalysisContract
+//   backend/      arena binding, instruction lowering, plan assembly, and
+//                 native packaging (trainer, informed by architecture and
+//                 tuner) — gated by VerifyGeneratedPlan
+//   diagnostics/  every error crossing the driver's boundary must be
+//                 attributable to a registered unit (WellFormedDiagnostic)
 // =============================================================================
 
 namespace seeml::update {
@@ -80,10 +83,17 @@ class UpdateCompiler {
 
   /// `teacher` may be null; it is required for kKLDistill / kXEntPlusKL.
   /// The teacher must share the source model's input dimensionality.
+  /// Any error returned is a well-formed diagnostic ("<unit>: <message>"
+  /// for a unit registered in diagnostics/) — the driver enforces this at
+  /// its boundary.
   [[nodiscard]] std::expected<CompiledUpdate, std::string> Compile(
       const SmfModel& source, const SmfModel* teacher = nullptr);
 
  private:
+  /// The pipeline itself; Compile wraps it with the diagnostics contract.
+  [[nodiscard]] std::expected<CompiledUpdate, std::string> CompileImpl(
+      const SmfModel& source, const SmfModel* teacher);
+
   UpdateConfig config_;
 };
 

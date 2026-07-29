@@ -7,6 +7,7 @@
 // For kWeightSweepGrain: the int8 pack below sweeps with the same chunk
 // geometry as the reviewer's max-abs scan that selected the weights.
 #include "compiler/analysis/reviewer/quantization.h"
+#include "compiler/diagnostics/generating/error.h"
 #include "source/parallel_for.h"
 
 namespace seeml::update {
@@ -162,8 +163,9 @@ std::expected<ArenaBinding, std::string> BindArena(
       missing_source = true;
   });
   if (missing_source)
-    return std::unexpected(
-        "UpdateCompiler: frozen weight without SMF backing data");
+    return seeml::diag::generating::Error(
+        seeml::diag::generating::kArenaBinder,
+        "frozen weight without SMF backing data");
 
   // --- TRANSIENT segment: liveness-scanned workspace after the IO prefix.
   binding.arena_size =

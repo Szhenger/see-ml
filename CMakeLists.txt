@@ -88,7 +88,8 @@ add_library(seeml_update STATIC
     compiler/backend/trainer/arena_binder.cc
     compiler/backend/trainer/instruction_lowering.cc
     compiler/backend/trainer/kernel_emitter.cc
-    compiler/backend/update_compiler.cc
+    compiler/driver/contract.cc
+    compiler/driver/update_compiler.cc
     compiler/backend/trainer/native_emitter.cc
 )
 target_link_libraries(seeml_update PUBLIC seeml_sir seeml_parallel)
@@ -155,6 +156,8 @@ seeml_add_test(seeml_sir_test             test/compiler/sir_test.cc)
 seeml_add_test(seeml_parser_test          test/compiler/parser_test.cc)
 seeml_add_test(seeml_update_passes_test   test/compiler/update_passes_test.cc)
 seeml_add_test(seeml_updater_test         test/compiler/updater_test.cc)
+seeml_add_test(seeml_diagnostics_test     test/compiler/diagnostics_test.cc)
+seeml_add_test(seeml_driver_test          test/compiler/driver_test.cc)
 seeml_add_test(seeml_update_compiler_test test/compiler/update_compiler_test.cc)
 seeml_add_test(seeml_native_emitter_test  test/compiler/native_emitter_test.cc)
 seeml_add_test(seeml_tuner_test           test/compiler/tuner_test.cc)

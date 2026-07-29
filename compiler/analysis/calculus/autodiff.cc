@@ -5,12 +5,12 @@
 #include <string_view>
 #include <unordered_set>
 
-#include "compiler/diagnostics/logger.h"
+#include "compiler/diagnostics/updating/error.h"
 
 namespace seeml::update {
 
 namespace sir = seeml::sir;
-using seecpp::utility::Logger;
+namespace updating = seeml::diag::updating;
 
 namespace {
 
@@ -278,9 +278,9 @@ const std::unordered_map<std::string_view, VjpRule>& VjpRegistry() {
 std::expected<std::unordered_map<sir::Value*, sir::Value*>, std::string>
 TrainableAutodiff::Run(sir::Block& block, sir::Value* loss,
                        const std::vector<sir::Value*>& trainables) {
-  if (!loss) return std::unexpected("TrainableAutodiff: null loss value");
+  if (!loss) return updating::Error(updating::kAutodiff, "null loss value");
   if (trainables.empty())
-    return std::unexpected("TrainableAutodiff: empty trainable set");
+    return updating::Error(updating::kAutodiff, "empty trainable set");
 
   AdContext ctx{.block = &block};
 
@@ -299,8 +299,9 @@ TrainableAutodiff::Run(sir::Block& block, sir::Value* loss,
   });
 
   if (!ctx.Needs(loss))
-    return std::unexpected(
-        "TrainableAutodiff: loss does not depend on any trainable parameter");
+    return updating::Error(
+        updating::kAutodiff,
+        "loss does not depend on any trainable parameter");
 
   // --- Seed dL/dL = 1.0 ----------------------------------------------------
   sir::Operation* fill = block.appendOp("sc_low.fill");
@@ -330,11 +331,13 @@ TrainableAutodiff::Run(sir::Block& block, sir::Value* loss,
 
     auto rule = registry.find(mnemonic);
     if (rule == registry.end())
-      return std::unexpected("TrainableAutodiff: no VJP rule for '" +
-                             std::string(mnemonic) + "'");
+      return updating::Error(updating::kAutodiff,
+                             "no VJP rule for '" +
+                                 std::string(mnemonic) + "'");
     if (!rule->second(op, ctx))
-      return std::unexpected("TrainableAutodiff: VJP failed for '" +
-                             std::string(mnemonic) + "'");
+      return updating::Error(updating::kAutodiff,
+                             "VJP failed for '" +
+                                 std::string(mnemonic) + "'");
   }
 
   // --- Collect the parameter gradients. ------------------------------------
@@ -343,13 +346,16 @@ TrainableAutodiff::Run(sir::Block& block, sir::Value* loss,
   for (sir::Value* p : trainables) {
     sir::Value* g = ctx.GradOf(p);
     if (!g)
-      return std::unexpected("TrainableAutodiff: no gradient reached '" +
-                             std::string(p->id()) + "'");
+      return updating::Error(updating::kAutodiff,
+                             "no gradient reached '" +
+                                 std::string(p->id()) + "'");
     param_grads[p] = g;
   }
 
-  Logger::Info("TrainableAutodiff: built adjoints for " +
-               std::to_string(param_grads.size()) + " trainable parameter(s)");
+  seeml::diag::Note(updating::kAutodiff,
+                    "built adjoints for " +
+                        std::to_string(param_grads.size()) +
+                        " trainable parameter(s)");
   return param_grads;
 }
 

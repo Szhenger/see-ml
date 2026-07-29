@@ -4,9 +4,12 @@
 #include <fstream>
 #include <vector>
 
+#include "compiler/diagnostics/tokenizing/error.h"
 #include "source/hash.h"
 
 namespace seeml::update {
+
+namespace tokenizing = seeml::diag::tokenizing;
 
 namespace {
 
@@ -68,8 +71,8 @@ std::expected<void, std::string> SaveSmf(const std::string& path,
   for (auto& t : model.tensors) {
     if (!t.is_const) continue;
     if (t.data.empty())
-      return std::unexpected("SMF: constant tensor '" + t.name +
-                             "' has no data to serialize");
+      return tokenizing::Error("constant tensor '" + t.name +
+                               "' has no data to serialize");
     t.byte_size = t.data.size();
     t.data_offset = cursor;
     cursor = AlignUp(cursor + t.byte_size, kDataAlignment);
@@ -88,10 +91,10 @@ std::expected<void, std::string> SaveSmf(const std::string& path,
   }
 
   std::ofstream f(path, std::ios::binary | std::ios::trunc);
-  if (!f) return std::unexpected("SMF: cannot write '" + path + "'");
+  if (!f) return tokenizing::FileError("cannot write", path);
   f.write(reinterpret_cast<const char*>(w.buf.data()),
           static_cast<std::streamsize>(w.buf.size()));
-  if (!f) return std::unexpected("SMF: short write to '" + path + "'");
+  if (!f) return tokenizing::FileError("short write to", path);
   // The model now corresponds to the saved bytes: bind its identity so a
   // plan compiled from this in-memory model patches this exact file.
   model.content_hash = ContentHash64(w.buf.data(), w.buf.size());

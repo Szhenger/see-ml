@@ -1,4 +1,4 @@
-#include "compiler/backend/update_compiler.h"
+#include "compiler/driver/update_compiler.h"
 
 #include <algorithm>
 #include <cstddef>
@@ -10,7 +10,8 @@
 
 #include "compiler/backend/trainer/arena_binder.h"
 #include "compiler/backend/trainer/instruction_lowering.h"
-#include "compiler/diagnostics/logger.h"
+#include "compiler/diagnostics/generating/error.h"
+#include "compiler/driver/contract.h"
 #include "compiler/frontend/ingressor/resource_analyzer.h"
 #include "compiler/frontend/parser/parser.h"
 #include "compiler/frontend/representation/sir.h"
@@ -21,7 +22,7 @@
 namespace seeml::update {
 
 namespace sir = seeml::sir;
-using seecpp::utility::Logger;
+namespace generating = seeml::diag::generating;
 
 // =============================================================================
 // UpdateCompiler::Compile
@@ -29,15 +30,28 @@ using seecpp::utility::Logger;
 
 std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
     const SmfModel& source, const SmfModel* teacher) {
+  auto compiled = CompileImpl(source, teacher);
+  // The diagnostics contract: every error that crosses the driver boundary
+  // must name a registered unit, or the failing process cannot be delimited.
+  if (!compiled && !WellFormedDiagnostic(compiled.error()))
+    return generating::Error(
+        generating::kDriver,
+        "unattributed diagnostic escaped a subsystem: " + compiled.error());
+  return compiled;
+}
+
+std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
+    const SmfModel& source, const SmfModel* teacher) {
   const bool wants_teacher = config_.loss == LossKind::kKLDistill ||
                              config_.loss == LossKind::kXEntPlusKL;
   if (wants_teacher && !teacher)
-    return std::unexpected(
-        "UpdateCompiler: the selected loss requires a teacher model");
+    return generating::Error(generating::kDriver,
+                             "the selected loss requires a teacher model");
 
   const SmfTensor* in_tensor = source.FindTensor(source.input_name);
   if (!in_tensor || in_tensor->dims.empty())
-    return std::unexpected("UpdateCompiler: source model lacks input metadata");
+    return generating::Error(generating::kDriver,
+                             "source model lacks input metadata");
   const int64_t in_dim = in_tensor->dims.back();
   const int64_t batch = config_.batch;
 
@@ -64,15 +78,20 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
   if (wants_teacher) {
     const SmfTensor* t_in = teacher->FindTensor(teacher->input_name);
     if (!t_in || t_in->dims.empty() || t_in->dims.back() != in_dim)
-      return std::unexpected(
-          "UpdateCompiler: teacher input dimensionality mismatch");
+      return generating::Error(generating::kDriver,
+                               "teacher input dimensionality mismatch");
     auto t_out = BuildForward(block, *teacher, "t::", build.input, batch, build);
     if (!t_out) return std::unexpected(t_out.error());
     teacher_out = *t_out;
     if (teacher_out->shape().dims.at(1) != out_dim)
-      return std::unexpected(
-          "UpdateCompiler: teacher output dimensionality mismatch");
+      return generating::Error(generating::kDriver,
+                               "teacher output dimensionality mismatch");
   }
+
+  // Frontend boundary: the forward SIR and graph-build state must be fit
+  // for analysis before anything is grafted onto them.
+  if (auto ok = VerifyFrontendContract(block, build); !ok)
+    return std::unexpected(ok.error());
 
   // --- 2. Loss grafting. ----------------------------------------------------
   sir::Value* labels = nullptr;
@@ -201,16 +220,19 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
   MergeBuilder merger;
   auto merge = merger.Run(adapters);
   if (!merge) return std::unexpected(merge.error());
-  if (!merge->block->validate())
-    return std::unexpected("UpdateCompiler: merge program failed validation");
+  // Analysis boundary: grafts, gradients, and the merge program must be fit
+  // for code generation (subsumes the former ad-hoc merge validation).
+  if (auto ok = VerifyAnalysisContract(block, adapters, param_grads, *merge);
+      !ok)
+    return std::unexpected(ok.error());
 
   // --- 7. Frozen-weight quantization selection. ------------------------------
   std::unordered_map<const sir::Value*, float> quant_scales;
   if (config_.quantize_base) {
     quant_scales = SelectQuantizedWeights(block, build);
-    Logger::Info("UpdateCompiler: quantized " +
-                 std::to_string(quant_scales.size()) +
-                 " frozen weight(s) to int8 rodata");
+    seeml::diag::Note(generating::kDriver,
+                      "quantized " + std::to_string(quant_scales.size()) +
+                          " frozen weight(s) to int8 rodata");
   }
 
   // --- 8. Segmented arena binding. -------------------------------------------
@@ -233,7 +255,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
   for (const auto& [mirror, original] : merge->aliases) {
     auto it = binding->refs.find(original);
     if (it == binding->refs.end())
-      return std::unexpected("UpdateCompiler: merge alias to unbound value");
+      return generating::Error(generating::kDriver,
+                               "merge alias to unbound value");
     merge_bound[mirror] = it->second;
   }
   const uint64_t merge_high = LinearScanTransients(
@@ -246,8 +269,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
       [&](const sir::Value* v) -> std::expected<uint64_t, std::string> {
     if (auto it = binding->refs.find(v); it != binding->refs.end())
       return it->second;
-    return std::unexpected("UpdateCompiler: unbound value '" +
-                           std::string(v->id()) + "'");
+    return generating::Error(generating::kDriver,
+                             "unbound value '" + std::string(v->id()) + "'");
   };
   std::vector<sir::Operation*> train_ops;
   train_ops.reserve(block.numOps());
@@ -262,8 +285,9 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
       [&](const sir::Value* v) -> std::expected<uint64_t, std::string> {
     if (auto it = merge_bound.find(v); it != merge_bound.end())
       return it->second;
-    return std::unexpected("UpdateCompiler: unbound merge value '" +
-                           std::string(v->id()) + "'");
+    return generating::Error(
+        generating::kDriver,
+        "unbound merge value '" + std::string(v->id()) + "'");
   };
   std::vector<sir::Operation*> merge_ops;
   merge_ops.reserve(merge->block->numOps());
@@ -295,7 +319,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
   for (const auto& [delta, adapter] : merge->outputs) {
     auto src = build.weight_sources.find(adapter->frozen_weight);
     if (src == build.weight_sources.end())
-      return std::unexpected("UpdateCompiler: adapter weight lacks SMF source");
+      return generating::Error(generating::kDriver,
+                               "adapter weight lacks SMF source");
     emit_table.push_back({.smf_data_offset = src->second->data_offset,
                           .byte_size = src->second->byte_size,
                           .arena_offset = RefOffset(merge_bound.at(delta))});
@@ -414,13 +439,18 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
   result.eval_instruction_count = header.eval_instr_count;
   result.rodata_size = header.rodata_size;
 
-  Logger::Info("UpdateCompiler: plan compiled — " +
+  seeml::diag::Note(generating::kDriver, "plan compiled — " +
                std::to_string(header.train_instr_count) + " train + " +
                std::to_string(header.eval_instr_count) + " eval + " +
                std::to_string(header.merge_instr_count) + " merge instrs, " +
                "arena " + std::to_string(header.arena_size) + " B (" +
                std::to_string(header.persistent_size) + " B persistent), " +
                "rodata " + std::to_string(header.rodata_size) + " B");
+
+  // Backend boundary: the assembled plan must be internally consistent with
+  // the adapters and gradients it claims to train.
+  if (auto ok = VerifyGeneratedPlan(result, adapters.size()); !ok)
+    return std::unexpected(ok.error());
   return result;
 }
 

@@ -5,7 +5,7 @@
 
 #include <cstdint>
 
-#include "compiler/backend/update_compiler.h"
+#include "compiler/driver/update_compiler.h"
 #include "compiler/frontend/ingressor/resource_analyzer.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
