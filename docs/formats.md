@@ -57,7 +57,7 @@ records[num_samples]: f32 input[input_dim], then the label
 The fully AOT-compiled update: three instruction streams (train / eval /
 merge), the frozen weights, the persistent segment's initial image, and the
 emit table, addressed by a single `PlanHeader` (authoritative definition:
-`compiler/backend/update_types.h`).
+`source/update_types.h`).
 
 Key v2 header fields:
 
