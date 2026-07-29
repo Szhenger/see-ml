@@ -1,5 +1,5 @@
-#ifndef SEEML_RUNTIME_PLAN_VALIDATOR_H_
-#define SEEML_RUNTIME_PLAN_VALIDATOR_H_
+#ifndef SEEML_RUNTIME_VALIDATOR_PLAN_VALIDATOR_H_
+#define SEEML_RUNTIME_VALIDATOR_PLAN_VALIDATOR_H_
 
 #include <cstdint>
 #include <expected>
@@ -42,4 +42,4 @@ inline bool RangeOk(uint64_t off, uint64_t bytes, uint64_t size) {
 
 }  // namespace seeml::update_rt
 
-#endif  // SEEML_RUNTIME_PLAN_VALIDATOR_H_
+#endif  // SEEML_RUNTIME_VALIDATOR_PLAN_VALIDATOR_H_

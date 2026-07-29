@@ -1,4 +1,4 @@
-#include "runtime/update_engine.h"
+#include "runtime/engine/update_engine.h"
 
 #include <bit>
 #include <cmath>
@@ -6,11 +6,13 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "runtime/batch_pipeline.h"
-#include "runtime/checkpoint.h"
-#include "runtime/durable_io.h"
-#include "runtime/plan_validator.h"
-#include "runtime/update_kernels.h"
+#include "runtime/custodian/checkpoint.h"
+#include "runtime/custodian/durable_io.h"
+#include "runtime/diagnostics/executing/error.h"
+#include "runtime/engine/contract.h"
+#include "runtime/executor/update_kernels.h"
+#include "runtime/feeder/batch_pipeline.h"
+#include "runtime/validator/plan_validator.h"
 #include "source/hash.h"
 
 namespace seeml::update_rt {
@@ -67,12 +69,12 @@ std::expected<void, std::string> UpdateEngine::LoadFromFile(
 
 std::expected<void, std::string> UpdateEngine::Initialize() {
   if (plan_size_ < sizeof(up::PlanHeader))
-    return std::unexpected("UpdateEngine: plan smaller than its header");
+    return diag::executing::Error("plan smaller than its header");
   std::memcpy(&header_, plan_, sizeof(header_));
   if (header_.magic != up::kSeeuMagic)
-    return std::unexpected("UpdateEngine: bad plan magic");
+    return diag::executing::Error("bad plan magic");
   if (header_.version != up::kSeeuVersion)
-    return std::unexpected("UpdateEngine: unsupported plan version");
+    return diag::executing::Error("unsupported plan version");
 
   // Integrity: the plan hashes over itself with the hash field zeroed.
   // A flipped bit anywhere — header, instructions, frozen weights — fails
@@ -86,35 +88,23 @@ std::expected<void, std::string> UpdateEngine::Initialize() {
     state = up::Fnv1a64(plan_ + kHashAt + sizeof(uint64_t),
                         plan_size_ - kHashAt - sizeof(uint64_t), state);
     if (state != header_.plan_hash)
-      return std::unexpected(
-          "UpdateEngine: plan hash mismatch — the .seeu blob is corrupt");
+      return diag::executing::Error(
+          "plan hash mismatch — the .seeu blob is corrupt");
   }
 
-  uint64_t train_bytes = 0, merge_bytes = 0, eval_bytes = 0, emit_bytes = 0;
-  if (!MulOk(header_.train_instr_count, sizeof(up::UpdateInstruction),
-             &train_bytes) ||
-      !MulOk(header_.merge_instr_count, sizeof(up::UpdateInstruction),
-             &merge_bytes) ||
-      !MulOk(header_.eval_instr_count, sizeof(up::UpdateInstruction),
-             &eval_bytes) ||
-      !MulOk(header_.emit_count, sizeof(up::EmitEntry), &emit_bytes))
-    return std::unexpected("UpdateEngine: plan section size overflows");
-  if (!RangeOk(header_.train_instr_offset, train_bytes, plan_size_) ||
-      !RangeOk(header_.merge_instr_offset, merge_bytes, plan_size_) ||
-      !RangeOk(header_.eval_instr_offset, eval_bytes, plan_size_) ||
-      !RangeOk(header_.rodata_offset, header_.rodata_size, plan_size_) ||
-      !RangeOk(header_.persist_init_offset, header_.persist_init_size,
-               plan_size_) ||
-      !RangeOk(header_.emit_table_offset, emit_bytes, plan_size_))
-    return std::unexpected("UpdateEngine: plan section out of bounds");
-
-  // The arena is the target of the persistent image, the checkpoints, and
-  // every arena ref below — its size must dominate all of them.
-  if (header_.arena_size > UINT64_MAX - 63)
-    return std::unexpected("UpdateEngine: arena size overflows");
-  if (header_.persist_init_size > header_.arena_size ||
-      header_.persistent_size > header_.arena_size)
-    return std::unexpected("UpdateEngine: persistent segment exceeds arena");
+  // Plan boundary: the header must be self-consistent with the blob (and
+  // its I/O slots with the arena) before any section is decoded. The
+  // contract also proves every section size overflow-free, so the byte
+  // counts below are plain multiplies.
+  if (auto ok = VerifyPlanContract(header_, plan_size_); !ok)
+    return std::unexpected(ok.error());
+  const uint64_t train_bytes =
+      header_.train_instr_count * sizeof(up::UpdateInstruction);
+  const uint64_t merge_bytes =
+      header_.merge_instr_count * sizeof(up::UpdateInstruction);
+  const uint64_t eval_bytes =
+      header_.eval_instr_count * sizeof(up::UpdateInstruction);
+  const uint64_t emit_bytes = header_.emit_count * sizeof(up::EmitEntry);
 
   // Decode the instruction streams once; per-step execution touches only the
   // decoded vectors and the arena.
@@ -131,37 +121,13 @@ std::expected<void, std::string> UpdateEngine::Initialize() {
   std::memcpy(emit_table_.data(), plan_ + header_.emit_table_offset,
               emit_bytes);
 
-  // Validate every operand ref of every instruction against the address
-  // space it targets — after this, Execute() can trust the programs blindly.
-  for (const auto* program : {&train_program_, &merge_program_, &eval_program_})
-    for (const up::UpdateInstruction& ins : *program)
-      if (auto r = ValidateInstruction(ins, header_.arena_size,
-                                       header_.rodata_size);
-          !r)
-        return r;
-
-  // The emit table's arena side is fixed at compile time; its file side is
-  // validated against the actual model in CommitToModel().
-  for (const up::EmitEntry& e : emit_table_)
-    if (!RangeOk(e.arena_offset, e.byte_size, header_.arena_size))
-      return std::unexpected("UpdateEngine: emit entry outside the arena");
-
-  // The header's I/O slots are written by the data feeder each step.
-  uint64_t input_bytes = 0;
-  if (up::IsRodataRef(header_.input_ref) ||
-      !MulOk(header_.input_floats, sizeof(float), &input_bytes) ||
-      !RangeOk(up::RefOffset(header_.input_ref), input_bytes,
-               header_.arena_size))
-    return std::unexpected("UpdateEngine: plan input slot out of bounds");
-  if (header_.label_kind != 0 &&
-      (up::IsRodataRef(header_.label_ref) ||
-       !RangeOk(up::RefOffset(header_.label_ref), header_.label_bytes,
-                header_.arena_size)))
-    return std::unexpected("UpdateEngine: plan label slot out of bounds");
-  if (up::IsRodataRef(header_.loss_ref) ||
-      !RangeOk(up::RefOffset(header_.loss_ref), sizeof(float),
-               header_.arena_size))
-    return std::unexpected("UpdateEngine: plan loss slot out of bounds");
+  // Executor boundary: every operand ref of every instruction is
+  // bounds-proven by the validator and every emit entry targets the arena —
+  // after this, Execute() dispatches the programs blindly.
+  if (auto ok = VerifyExecutorContract(train_program_, merge_program_,
+                                       eval_program_, emit_table_, header_);
+      !ok)
+    return std::unexpected(ok.error());
 
   // Class count for validating class-index labels at Train() time (the
   // softmax kernels index rows of this width with raw dataset labels).
@@ -177,7 +143,7 @@ std::expected<void, std::string> UpdateEngine::Initialize() {
   std::free(arena_);
   const size_t arena_bytes = (header_.arena_size + 63) & ~size_t{63};
   arena_ = static_cast<uint8_t*>(std::aligned_alloc(64, arena_bytes));
-  if (!arena_) return std::unexpected("UpdateEngine: arena allocation failed");
+  if (!arena_) return diag::executing::Error("arena allocation failed");
   std::memset(arena_, 0, arena_bytes);
   std::memcpy(arena_, plan_ + header_.persist_init_offset,
               header_.persist_init_size);
@@ -358,34 +324,14 @@ void UpdateEngine::ExecuteTrainOnce() {
 
 std::expected<void, std::string> UpdateEngine::ValidateDataset(
     Dataset& data) const {
-  uint64_t expected_floats = 0;
-  if (!MulOk(header_.batch, data.input_dim(), &expected_floats) ||
-      expected_floats != header_.input_floats)
-    return std::unexpected(
-        "UpdateEngine: dataset input width does not match the compiled plan");
-  if (header_.label_kind != 0) {
-    if (data.label_kind() != header_.label_kind)
-      return std::unexpected(
-          "UpdateEngine: dataset label kind does not match the compiled plan");
-    // Same kind is not enough: FillBatch copies the dataset's per-sample
-    // width into the plan's fixed label slot, so the widths must agree too.
-    uint64_t batch_label_bytes = 0;
-    if (!MulOk(header_.batch, data.label_bytes_per_sample(),
-               &batch_label_bytes) ||
-        batch_label_bytes != header_.label_bytes)
-      return std::unexpected(
-          "UpdateEngine: dataset label width does not match the compiled plan");
-  }
-  if (header_.label_kind == 1)
-    if (auto r = data.ValidateClassLabels(num_classes_); !r)
-      return std::unexpected(r.error());
-  return {};
+  // Feeder boundary: the corpus must match the compiled plan's geometry.
+  return VerifyFeederContract(header_, data, num_classes_);
 }
 
 std::expected<float, std::string> UpdateEngine::Evaluate(Dataset& data) {
-  if (!arena_) return std::unexpected("UpdateEngine: no plan loaded");
+  if (!arena_) return diag::executing::Error("no plan loaded");
   if (eval_program_.empty())
-    return std::unexpected("UpdateEngine: plan carries no eval program");
+    return diag::executing::Error("plan carries no eval program");
   if (auto r = ValidateDataset(data); !r) return std::unexpected(r.error());
 
   float* input_slot = WritePtr(header_.input_ref);
@@ -410,11 +356,23 @@ std::expected<float, std::string> UpdateEngine::Evaluate(Dataset& data) {
 
 std::expected<TrainReport, std::string> UpdateEngine::Train(
     Dataset& data, uint64_t steps, const TrainOptions& options) {
-  if (!arena_) return std::unexpected("UpdateEngine: no plan loaded");
+  auto report = TrainImpl(data, steps, options);
+  // The diagnostics contract at the engine's main boundary: every error
+  // must name a registered unit, or the failing process cannot be
+  // delimited (mirrors the driver's Compile boundary).
+  if (!report && !WellFormedDiagnostic(report.error()))
+    return diag::executing::Error(
+        "unattributed diagnostic escaped a subsystem: " + report.error());
+  return report;
+}
+
+std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
+    Dataset& data, uint64_t steps, const TrainOptions& options) {
+  if (!arena_) return diag::executing::Error("no plan loaded");
   if (steps == 0) steps = header_.default_steps;
   if (steps == 0)
-    return std::unexpected(
-        "UpdateEngine: no steps requested and the plan has no default");
+    return diag::executing::Error(
+        "no steps requested and the plan has no default");
   if (auto r = ValidateDataset(data); !r) return std::unexpected(r.error());
   if (options.validation)
     if (auto r = ValidateDataset(*options.validation); !r)
@@ -471,8 +429,8 @@ std::expected<TrainReport, std::string> UpdateEngine::Train(
       // already poisoned; continuing can only burn energy. Fail the update —
       // the source model on disk is untouched by construction.
       if (!std::isfinite(loss))
-        return std::unexpected(
-            "UpdateEngine: loss became non-finite at step " +
+        return diag::executing::Error(
+            "loss became non-finite at step " +
             std::to_string(step_) + " — aborting the update");
       if (options.record_loss_curve) report.loss_curve.push_back(loss);
       if (s - start < window) {
@@ -509,7 +467,7 @@ std::expected<TrainReport, std::string> UpdateEngine::Train(
 }
 
 std::expected<void, std::string> UpdateEngine::RunMerge() {
-  if (!arena_) return std::unexpected("UpdateEngine: no plan loaded");
+  if (!arena_) return diag::executing::Error("no plan loaded");
   Execute(merge_program_);
   merged_ = true;
   return {};
@@ -518,7 +476,7 @@ std::expected<void, std::string> UpdateEngine::RunMerge() {
 std::expected<void, std::string> UpdateEngine::CommitToModel(
     const std::string& source_model_path, const std::string& out_path) const {
   if (!merged_)
-    return std::unexpected("UpdateEngine: RunMerge() must precede commit");
+    return diag::executing::Error("RunMerge() must precede commit");
 
   auto bytes = ReadFileBytes(source_model_path);
   if (!bytes) return std::unexpected(bytes.error());
@@ -529,8 +487,8 @@ std::expected<void, std::string> UpdateEngine::CommitToModel(
   if (header_.source_model_hash != 0 &&
       up::ContentHash64(bytes->data(), bytes->size()) !=
           header_.source_model_hash)
-    return std::unexpected(
-        "UpdateEngine: source model does not match the plan's "
+    return diag::executing::Error(
+        "source model does not match the plan's "
         "source_model_hash — refusing to patch '" +
         source_model_path + "'");
 
@@ -540,8 +498,8 @@ std::expected<void, std::string> UpdateEngine::CommitToModel(
   for (const up::EmitEntry& e : emit_table_) {
     if (!RangeOk(e.smf_data_offset, e.byte_size, bytes->size()) ||
         e.byte_size % sizeof(float) != 0)
-      return std::unexpected(
-          "UpdateEngine: emit entry exceeds the source model file — plan and "
+      return diag::executing::Error(
+          "emit entry exceeds the source model file — plan and "
           "model are out of sync");
     const auto* delta =
         reinterpret_cast<const float*>(arena_ + e.arena_offset);

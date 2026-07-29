@@ -1,16 +1,20 @@
-#ifndef SEEML_RUNTIME_UPDATE_KERNELS_H_
-#define SEEML_RUNTIME_UPDATE_KERNELS_H_
+#ifndef SEEML_RUNTIME_EXECUTOR_UPDATE_KERNELS_H_
+#define SEEML_RUNTIME_EXECUTOR_UPDATE_KERNELS_H_
 
 #include <cstddef>
 #include <cstdint>
 
 // =============================================================================
-// The training kernel library executed by the UpdateEngine dispatcher.
+// The training kernel library executed by the UpdateEngine dispatcher —
+// the executor's façade. The implementations are partitioned per kernel
+// family (gemm / elementwise / activation / normalization / loss /
+// optimizer), all sharing the decomposition policy of kernel_policy.h.
 //
 // These are the portable reference implementations; architecture-tuned
-// variants (AVX-512 / NEON, mirroring backend/kernels/) are swapped in at
-// link time. Every kernel is allocation-free and operates on caller-provided
-// arena/rodata pointers — the zero-allocation contract of the update runtime.
+// variants (AVX-512 / NEON, informed by compiler/backend/architecture/) are
+// swapped in at link time. Every kernel is allocation-free and operates on
+// caller-provided arena/rodata pointers — the zero-allocation contract of
+// the update runtime.
 //
 // Aliasing contract: distinct pointer parameters never overlap (the
 // compiler's arena allocator does not reuse an operand's slot for a result
@@ -94,4 +98,4 @@ void Copy(const float* src, float* dst, size_t n);
 
 }  // namespace seeml::update_rt::kernels
 
-#endif  // SEEML_RUNTIME_UPDATE_KERNELS_H_
+#endif  // SEEML_RUNTIME_EXECUTOR_UPDATE_KERNELS_H_

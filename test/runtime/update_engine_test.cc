@@ -12,8 +12,8 @@
 
 #include "compiler/driver/update_compiler.h"
 #include "source/update_types.h"
-#include "runtime/dataset.h"
-#include "runtime/update_engine.h"
+#include "runtime/feeder/dataset.h"
+#include "runtime/engine/update_engine.h"
 #include "source/hash.h"
 #include "source/parallel_for.h"
 #include "compiler/frontend/ingressor/model_reader.h"

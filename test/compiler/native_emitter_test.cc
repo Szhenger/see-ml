@@ -11,7 +11,7 @@
 
 #include "compiler/backend/trainer/native_emitter.h"
 #include "compiler/driver/update_compiler.h"
-#include "runtime/update_engine.h"
+#include "runtime/engine/update_engine.h"
 #include "source/model_format.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
@@ -67,20 +67,26 @@ TEST(NativeEmitter, EmitsCompletePackage) {
   // the build script compiles them from the package directory, never from
   // the repository checkout.
   for (const char* rel :
-       {"runtime/update_engine.cc", "runtime/update_kernels.cc",
-        "runtime/dataset.cc", "runtime/batch_pipeline.cc",
-        "runtime/durable_io.cc", "runtime/plan_validator.cc",
-        "runtime/checkpoint.cc", "source/update_types.h", "source/hash.h",
-        "source/parallel_for.h", "source/parallel_for.cc"}) {
+       {"runtime/engine/update_engine.cc", "runtime/engine/contract.cc",
+        "runtime/executor/update_kernels.h", "runtime/executor/gemm.cc",
+        "runtime/executor/elementwise.cc", "runtime/executor/activation.cc",
+        "runtime/executor/normalization.cc", "runtime/executor/loss.cc",
+        "runtime/executor/optimizer.cc", "runtime/feeder/dataset.cc",
+        "runtime/feeder/batch_pipeline.cc", "runtime/custodian/durable_io.cc",
+        "runtime/validator/plan_validator.cc",
+        "runtime/custodian/checkpoint.cc",
+        "runtime/diagnostics/diagnostic.h",
+        "runtime/diagnostics/executing/error.h", "source/update_types.h",
+        "source/hash.h", "source/parallel_for.h", "source/parallel_for.cc"}) {
     EXPECT_TRUE(std::filesystem::exists(
         std::filesystem::path(out_dir) / rel));
   }
   const std::string script = ReadText(paths.build_script);
-  EXPECT_STR_CONTAINS(script, "runtime/update_engine.cc");
+  EXPECT_STR_CONTAINS(script, "engine/update_engine");
   // The vendored runtime is threaded: the script must compile the parallel
   // substrate and link with -pthread.
   EXPECT_STR_CONTAINS(script, "source/parallel_for.cc");
-  EXPECT_STR_CONTAINS(script, "runtime/batch_pipeline.cc");
+  EXPECT_STR_CONTAINS(script, "feeder/batch_pipeline");
   EXPECT_STR_CONTAINS(script, "-pthread");
 
   // The build script is marked executable.

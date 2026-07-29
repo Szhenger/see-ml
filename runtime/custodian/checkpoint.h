@@ -1,5 +1,5 @@
-#ifndef SEEML_RUNTIME_CHECKPOINT_H_
-#define SEEML_RUNTIME_CHECKPOINT_H_
+#ifndef SEEML_RUNTIME_CUSTODIAN_CHECKPOINT_H_
+#define SEEML_RUNTIME_CUSTODIAN_CHECKPOINT_H_
 
 #include <cstdint>
 #include <expected>
@@ -40,4 +40,4 @@ namespace seeml::update_rt {
 
 }  // namespace seeml::update_rt
 
-#endif  // SEEML_RUNTIME_CHECKPOINT_H_
+#endif  // SEEML_RUNTIME_CUSTODIAN_CHECKPOINT_H_

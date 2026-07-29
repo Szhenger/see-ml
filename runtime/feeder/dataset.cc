@@ -1,4 +1,6 @@
-#include "runtime/dataset.h"
+#include "runtime/feeder/dataset.h"
+
+#include "runtime/diagnostics/feeding/error.h"
 
 #include <algorithm>
 #include <cstring>
@@ -38,27 +40,27 @@ std::expected<Dataset, std::string> Dataset::FromMemory(
   d.label_dim_ = label_dim;
   d.inputs_ = std::move(inputs);
   d.labels_ = std::move(labels);
-  if (num_samples == 0) return std::unexpected("Dataset: zero samples");
+  if (num_samples == 0) return diag::feeding::Error("zero samples");
   uint64_t want_inputs = 0, want_labels = 0;
   if (!MulU64(num_samples, input_dim, &want_inputs) ||
       d.inputs_.size() != want_inputs)
-    return std::unexpected("Dataset: input buffer size mismatch");
+    return diag::feeding::Error("input buffer size mismatch");
   if (!MulU64(num_samples, d.label_bytes_per_sample(), &want_labels) ||
       d.labels_.size() != want_labels)
-    return std::unexpected("Dataset: label buffer size mismatch");
+    return diag::feeding::Error("label buffer size mismatch");
   return d;
 }
 
 std::expected<Dataset, std::string> Dataset::LoadFromFile(
     const std::string& path) {
   std::ifstream f(path, std::ios::binary);
-  if (!f) return std::unexpected("Dataset: cannot open '" + path + "'");
+  if (!f) return diag::feeding::Error("cannot open '" + path + "'");
 
   // The file size bounds every allocation below: a corrupt header cannot ask
   // for more sample data than the file actually holds.
   f.seekg(0, std::ios::end);
   const std::streamoff end_pos = f.tellg();
-  if (end_pos < 0) return std::unexpected("Dataset: cannot stat '" + path + "'");
+  if (end_pos < 0) return diag::feeding::Error("cannot stat '" + path + "'");
   const uint64_t file_size = static_cast<uint64_t>(end_pos);
   f.seekg(0);
 
@@ -70,12 +72,12 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
   uint32_t magic = 0, version = 0, label_kind = 0, pad = 0;
   uint64_t num_samples = 0, input_dim = 0, label_dim = 0;
   if (!read(&magic, 4) || magic != kSdsMagic)
-    return std::unexpected("Dataset: bad magic in '" + path + "'");
+    return diag::feeding::Error("bad magic in '" + path + "'");
   if (!read(&version, 4) || version != 1)
-    return std::unexpected("Dataset: unsupported version");
+    return diag::feeding::Error("unsupported version");
   if (!read(&num_samples, 8) || !read(&input_dim, 8) || !read(&label_kind, 4) ||
       !read(&pad, 4) || !read(&label_dim, 8))
-    return std::unexpected("Dataset: truncated header");
+    return diag::feeding::Error("truncated header");
 
   Dataset d;
   d.num_samples_ = num_samples;
@@ -83,12 +85,12 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
   d.label_kind_ = label_kind;
   d.label_dim_ = label_dim;
   if (num_samples == 0 || input_dim == 0)
-    return std::unexpected("Dataset: empty dataset");
+    return diag::feeding::Error("empty dataset");
   if (label_kind > 2)
-    return std::unexpected("Dataset: unknown label kind");
+    return diag::feeding::Error("unknown label kind");
   if (label_kind == 2 &&
       (label_dim == 0 || label_dim > UINT64_MAX / sizeof(float)))
-    return std::unexpected("Dataset: label dim out of range");
+    return diag::feeding::Error("label dim out of range");
 
   // Overflow-safe sizing, cross-checked against the actual file size before
   // any allocation.
@@ -98,7 +100,7 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
       input_bytes > UINT64_MAX - lbytes ||
       !MulU64(num_samples, input_bytes + lbytes, &payload) ||
       payload > file_size - kSdsHeaderBytes)
-    return std::unexpected("Dataset: sample section exceeds file size");
+    return diag::feeding::Error("sample section exceeds file size");
 
   d.inputs_.resize(num_samples * input_dim);
   d.labels_.resize(num_samples * lbytes);
@@ -108,7 +110,7 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
     // straight into place, a single bulk transfer instead of one syscall
     // per sample.
     if (!read(d.inputs_.data(), num_samples * input_bytes))
-      return std::unexpected("Dataset: truncated inputs");
+      return diag::feeding::Error("truncated inputs");
     return d;
   }
 
@@ -124,7 +126,7 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
   for (uint64_t i = 0; i < num_samples;) {
     const uint64_t n = std::min(per_chunk, num_samples - i);
     if (!read(chunk.data(), n * record))
-      return std::unexpected("Dataset: truncated inputs");
+      return diag::feeding::Error("truncated inputs");
     for (uint64_t s = 0; s < n; ++s) {
       const uint8_t* rec = chunk.data() + s * record;
       std::memcpy(d.inputs_.data() + (i + s) * input_dim, rec, input_bytes);
@@ -142,8 +144,8 @@ std::expected<void, std::string> Dataset::ValidateClassLabels(
   const auto* labels = reinterpret_cast<const int32_t*>(labels_.data());
   for (uint64_t i = 0; i < num_samples_; ++i)
     if (labels[i] < 0 || static_cast<uint64_t>(labels[i]) >= num_classes)
-      return std::unexpected(
-          "Dataset: class label " + std::to_string(labels[i]) + " at sample " +
+      return diag::feeding::Error(
+          "class label " + std::to_string(labels[i]) + " at sample " +
           std::to_string(i) + " outside [0, " + std::to_string(num_classes) +
           ")");
   return {};
@@ -152,7 +154,7 @@ std::expected<void, std::string> Dataset::ValidateClassLabels(
 std::expected<void, std::string> Dataset::SaveToFile(
     const std::string& path) const {
   std::ofstream f(path, std::ios::binary | std::ios::trunc);
-  if (!f) return std::unexpected("Dataset: cannot write '" + path + "'");
+  if (!f) return diag::feeding::Error("cannot write '" + path + "'");
   auto write = [&](const void* src, size_t n) {
     f.write(reinterpret_cast<const char*>(src),
             static_cast<std::streamsize>(n));
@@ -190,7 +192,7 @@ std::expected<void, std::string> Dataset::SaveToFile(
       i += n;
     }
   }
-  if (!f) return std::unexpected("Dataset: short write to '" + path + "'");
+  if (!f) return diag::feeding::Error("short write to '" + path + "'");
   return {};
 }
 
@@ -266,11 +268,11 @@ void Dataset::Reshuffle() {
 
 std::expected<Dataset, std::string> Dataset::SplitValidation(double fraction) {
   if (!(fraction > 0.0) || fraction >= 1.0)
-    return std::unexpected("Dataset: validation fraction must be in (0, 1)");
+    return diag::feeding::Error("validation fraction must be in (0, 1)");
   if (num_samples_ < 2)
-    return std::unexpected("Dataset: too few samples to split");
+    return diag::feeding::Error("too few samples to split");
   if (!order_.empty())
-    return std::unexpected("Dataset: split before enabling shuffle");
+    return diag::feeding::Error("split before enabling shuffle");
 
   uint64_t val_n = static_cast<uint64_t>(
       static_cast<double>(num_samples_) * fraction);

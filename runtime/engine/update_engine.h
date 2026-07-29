@@ -1,5 +1,5 @@
-#ifndef SEEML_RUNTIME_UPDATE_ENGINE_H_
-#define SEEML_RUNTIME_UPDATE_ENGINE_H_
+#ifndef SEEML_RUNTIME_ENGINE_UPDATE_ENGINE_H_
+#define SEEML_RUNTIME_ENGINE_UPDATE_ENGINE_H_
 
 #include <cstdint>
 #include <expected>
@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "source/update_types.h"
-#include "runtime/dataset.h"
+#include "runtime/feeder/dataset.h"
 
 // =============================================================================
 // UpdateEngine — the bare-metal virtual machine that executes a compiled
@@ -24,6 +24,18 @@
 //   Commit     patches the merged weights into a copy of the source model
 //              file and atomically renames it into place. The source model
 //              is never modified — a failed update leaves the device intact.
+//
+// The runtime is partitioned by role; the engine only abstracts the update
+// process, verifying at every boundary that each subsystem was used
+// correctly (contract.h):
+//   feeder/       SDS corpus decode and pipelined batch staging — gated by
+//                 VerifyFeederContract
+//   executor/     the kernel families the dispatcher executes — gated by
+//                 VerifyExecutorContract (via validator/)
+//   validator/    load-time bounds proof of every instruction operand
+//   custodian/    durable state: checkpoints and the atomic commit path
+//   diagnostics/  every error crossing the engine's Train boundary must be
+//                 attributable to a registered unit (WellFormedDiagnostic)
 // =============================================================================
 
 namespace seeml::update_rt {
@@ -120,6 +132,9 @@ class UpdateEngine {
 
  private:
   [[nodiscard]] std::expected<void, std::string> Initialize();
+  /// The training loop itself; Train wraps it with the diagnostics contract.
+  [[nodiscard]] std::expected<TrainReport, std::string> TrainImpl(
+      Dataset& data, uint64_t steps, const TrainOptions& options);
   [[nodiscard]] std::expected<void, std::string> ValidateDataset(
       Dataset& data) const;
   void Execute(const std::vector<seeml::update::UpdateInstruction>& program);
@@ -148,4 +163,4 @@ class UpdateEngine {
 
 }  // namespace seeml::update_rt
 
-#endif  // SEEML_RUNTIME_UPDATE_ENGINE_H_
+#endif  // SEEML_RUNTIME_ENGINE_UPDATE_ENGINE_H_

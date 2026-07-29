@@ -1,4 +1,6 @@
-#include "runtime/plan_validator.h"
+#include "runtime/validator/plan_validator.h"
+
+#include "runtime/diagnostics/validating/error.h"
 
 namespace seeml::update_rt {
 
@@ -21,7 +23,7 @@ std::expected<void, std::string> ValidateInstruction(
     return ref_ok_w(ref, elems, write, sizeof(float));
   };
   auto fail = [&] {
-    return std::unexpected("UpdateEngine: instruction operand out of bounds "
+    return diag::validating::Error("instruction operand out of bounds "
                            "(opcode " +
                            std::to_string(ins.opcode) + ")");
   };
@@ -150,7 +152,7 @@ std::expected<void, std::string> ValidateInstruction(
       if (!ref_ok(ins.in[0], d0, true)) return fail();
       return {};
   }
-  return std::unexpected("UpdateEngine: unknown opcode " +
+  return diag::validating::Error("unknown opcode " +
                          std::to_string(ins.opcode));
 }
 

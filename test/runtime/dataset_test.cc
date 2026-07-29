@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include "runtime/dataset.h"
+#include "runtime/feeder/dataset.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 #include "test/support/scoped_temp_dir.h"

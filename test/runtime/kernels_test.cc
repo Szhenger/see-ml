@@ -10,7 +10,7 @@
 #include <cstring>
 #include <vector>
 
-#include "runtime/update_kernels.h"
+#include "runtime/executor/update_kernels.h"
 #include "source/parallel_for.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"

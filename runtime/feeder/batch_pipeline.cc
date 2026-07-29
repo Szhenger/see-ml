@@ -1,4 +1,4 @@
-#include "runtime/batch_pipeline.h"
+#include "runtime/feeder/batch_pipeline.h"
 
 #include <cstring>
 

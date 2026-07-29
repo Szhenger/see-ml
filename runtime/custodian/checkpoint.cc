@@ -1,10 +1,11 @@
-#include "runtime/checkpoint.h"
+#include "runtime/custodian/checkpoint.h"
 
 #include <cstring>
 #include <fstream>
 #include <vector>
 
-#include "runtime/durable_io.h"
+#include "runtime/custodian/durable_io.h"
+#include "runtime/diagnostics/persisting/error.h"
 #include "source/hash.h"
 
 namespace seeml::update_rt {
@@ -51,24 +52,24 @@ std::expected<uint64_t, std::string> LoadCheckpointFile(
     const std::string& path, uint64_t plan_hash, uint64_t persistent_size,
     uint8_t* dst) {
   std::ifstream f(path, std::ios::binary);
-  if (!f) return std::unexpected("UpdateEngine: no checkpoint at '" + path + "'");
+  if (!f) return diag::persisting::Error(diag::persisting::kCheckpoint, "no checkpoint at '" + path + "'");
   CkptHeader h;
   f.read(reinterpret_cast<char*>(&h), sizeof(h));
   if (!f || h.magic != kCkptMagic || h.version != kCkptVersion)
-    return std::unexpected("UpdateEngine: not a v2 checkpoint: '" + path + "'");
+    return diag::persisting::Error(diag::persisting::kCheckpoint, "not a v2 checkpoint: '" + path + "'");
   // Binding: a checkpoint carries adapter and optimizer state laid out by
   // one specific plan. Resuming it under any other plan is silent corruption.
   if (h.plan_hash != plan_hash)
-    return std::unexpected(
-        "UpdateEngine: checkpoint belongs to a different plan");
+    return diag::persisting::Error(
+        diag::persisting::kCheckpoint, "checkpoint belongs to a different plan");
   if (h.persistent_size != persistent_size)
-    return std::unexpected("UpdateEngine: checkpoint incompatible with plan");
+    return diag::persisting::Error(diag::persisting::kCheckpoint, "checkpoint incompatible with plan");
   std::vector<uint8_t> payload(h.persistent_size);
   f.read(reinterpret_cast<char*>(payload.data()),
          static_cast<std::streamsize>(payload.size()));
-  if (!f) return std::unexpected("UpdateEngine: truncated checkpoint");
+  if (!f) return diag::persisting::Error(diag::persisting::kCheckpoint, "truncated checkpoint");
   if (up::Fnv1a64(payload.data(), payload.size()) != h.payload_hash)
-    return std::unexpected("UpdateEngine: checkpoint payload is corrupt");
+    return diag::persisting::Error(diag::persisting::kCheckpoint, "checkpoint payload is corrupt");
   std::memcpy(dst, payload.data(), payload.size());
   return h.step;
 }

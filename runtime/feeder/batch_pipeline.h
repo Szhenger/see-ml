@@ -1,5 +1,5 @@
-#ifndef SEEML_RUNTIME_BATCH_PIPELINE_H_
-#define SEEML_RUNTIME_BATCH_PIPELINE_H_
+#ifndef SEEML_RUNTIME_FEEDER_BATCH_PIPELINE_H_
+#define SEEML_RUNTIME_FEEDER_BATCH_PIPELINE_H_
 
 #include <condition_variable>
 #include <cstdint>
@@ -7,7 +7,7 @@
 #include <thread>
 #include <vector>
 
-#include "runtime/dataset.h"
+#include "runtime/feeder/dataset.h"
 
 // =============================================================================
 // BatchPipeline — overlaps data feeding with training compute.
@@ -72,4 +72,4 @@ class BatchPipeline {
 
 }  // namespace seeml::update_rt
 
-#endif  // SEEML_RUNTIME_BATCH_PIPELINE_H_
+#endif  // SEEML_RUNTIME_FEEDER_BATCH_PIPELINE_H_

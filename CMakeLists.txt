@@ -101,13 +101,19 @@ target_link_libraries(seeml_update PUBLIC seeml_sir seeml_parallel)
 # ==============================================================================
 
 add_library(seeml_update_rt STATIC
-    runtime/update_kernels.cc
-    runtime/dataset.cc
-    runtime/batch_pipeline.cc
-    runtime/durable_io.cc
-    runtime/plan_validator.cc
-    runtime/checkpoint.cc
-    runtime/update_engine.cc
+    runtime/executor/gemm.cc
+    runtime/executor/elementwise.cc
+    runtime/executor/activation.cc
+    runtime/executor/normalization.cc
+    runtime/executor/loss.cc
+    runtime/executor/optimizer.cc
+    runtime/feeder/dataset.cc
+    runtime/feeder/batch_pipeline.cc
+    runtime/custodian/durable_io.cc
+    runtime/validator/plan_validator.cc
+    runtime/custodian/checkpoint.cc
+    runtime/engine/contract.cc
+    runtime/engine/update_engine.cc
 )
 target_link_libraries(seeml_update_rt PUBLIC seeml_parallel)
 
@@ -163,6 +169,7 @@ seeml_add_test(seeml_native_emitter_test  test/compiler/native_emitter_test.cc)
 seeml_add_test(seeml_tuner_test           test/compiler/tuner_test.cc)
 seeml_add_test(seeml_kernels_test         test/runtime/kernels_test.cc)
 seeml_add_test(seeml_dataset_test         test/runtime/dataset_test.cc)
+seeml_add_test(seeml_engine_test          test/runtime/engine_test.cc)
 seeml_add_test(seeml_update_engine_test   test/runtime/update_engine_test.cc)
 seeml_add_test(seeml_update_system_test   test/system/update_system_test.cc)
 

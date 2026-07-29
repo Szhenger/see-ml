@@ -1,5 +1,5 @@
-#ifndef SEEML_RUNTIME_DURABLE_IO_H_
-#define SEEML_RUNTIME_DURABLE_IO_H_
+#ifndef SEEML_RUNTIME_CUSTODIAN_DURABLE_IO_H_
+#define SEEML_RUNTIME_CUSTODIAN_DURABLE_IO_H_
 
 #include <cstddef>
 #include <cstdint>
@@ -42,4 +42,4 @@ struct ByteSpan {
 
 }  // namespace seeml::update_rt
 
-#endif  // SEEML_RUNTIME_DURABLE_IO_H_
+#endif  // SEEML_RUNTIME_CUSTODIAN_DURABLE_IO_H_

@@ -41,13 +41,19 @@ compile compiler/backend/trainer/kernel_emitter.cc kernel_emitter.o
 compile compiler/driver/contract.cc           driver_contract.o
 compile compiler/driver/update_compiler.cc    update_compiler.o
 compile compiler/backend/trainer/native_emitter.cc native_emitter.o
-compile runtime/update_kernels.cc             update_kernels.o
-compile runtime/dataset.cc                    dataset.o
-compile runtime/batch_pipeline.cc             batch_pipeline.o
-compile runtime/durable_io.cc                 durable_io.o
-compile runtime/plan_validator.cc             plan_validator.o
-compile runtime/checkpoint.cc                 checkpoint.o
-compile runtime/update_engine.cc              update_engine.o
+compile runtime/executor/gemm.cc              rt_gemm.o
+compile runtime/executor/elementwise.cc       rt_elementwise.o
+compile runtime/executor/activation.cc        rt_activation.o
+compile runtime/executor/normalization.cc     rt_normalization.o
+compile runtime/executor/loss.cc              rt_loss.o
+compile runtime/executor/optimizer.cc         rt_optimizer.o
+compile runtime/feeder/dataset.cc             dataset.o
+compile runtime/feeder/batch_pipeline.cc      batch_pipeline.o
+compile runtime/custodian/durable_io.cc       durable_io.o
+compile runtime/validator/plan_validator.cc   plan_validator.o
+compile runtime/custodian/checkpoint.cc       checkpoint.o
+compile runtime/engine/contract.cc            engine_contract.o
+compile runtime/engine/update_engine.cc       update_engine.o
 compile tool/seeml_update_compile.cc          seeml_update_compile.o
 compile tool/seeml_seeu_dump.cc               seeml_seeu_dump.o
 compile test/framework/seetest.cc             seetest.o
@@ -69,9 +75,13 @@ LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/sir_block.o \
       build/op_convolution.o build/op_linear.o build/op_normalization.o \
       build/op_activation.o \
-      build/logger.o build/update_kernels.o build/dataset.o \
+      build/logger.o \
+      build/rt_gemm.o build/rt_elementwise.o build/rt_activation.o \
+      build/rt_normalization.o build/rt_loss.o build/rt_optimizer.o \
+      build/dataset.o \
       build/batch_pipeline.o build/durable_io.o build/plan_validator.o \
-      build/checkpoint.o build/update_engine.o build/parallel_for.o"
+      build/checkpoint.o build/engine_contract.o build/update_engine.o \
+      build/parallel_for.o"
 TESTING="build/seetest.o build/seetest_main.o build/scoped_temp_dir.o \
          build/builders.o"
 
@@ -88,6 +98,7 @@ for suite in \
     compiler/diagnostics_test compiler/driver_test \
     compiler/update_compiler_test compiler/tuner_test \
     compiler/native_emitter_test runtime/kernels_test runtime/dataset_test \
+    runtime/engine_test \
     runtime/update_engine_test system/update_system_test; do
   name="seeml_$(basename "$suite")"
   echo "  CXX+LINK $name"

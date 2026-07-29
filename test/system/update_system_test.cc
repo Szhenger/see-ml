@@ -33,8 +33,8 @@
 #include <vector>
 
 #include "compiler/driver/update_compiler.h"
-#include "runtime/dataset.h"
-#include "runtime/update_engine.h"
+#include "runtime/feeder/dataset.h"
+#include "runtime/engine/update_engine.h"
 #include "compiler/frontend/ingressor/model_reader.h"
 #include "compiler/frontend/ingressor/model_writer.h"
 #include "test/framework/seetest.h"

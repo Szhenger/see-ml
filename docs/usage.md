@@ -6,8 +6,9 @@ as a fixed instruction stream bound to a pre-planned arena, and the result is
 executed on-device by a zero-dependency VM. One `.seeu` plan = one complete,
 gated, resumable, atomically-committed update.
 
-How the compiler is organized internally: [compiler.md](compiler.md).
-The binary formats it reads and writes: [formats.md](formats.md).
+How the compiler is organized internally: [compiler.md](compiler.md);
+the on-device runtime: [runtime.md](runtime.md).
+The binary formats they read and write: [formats.md](formats.md).
 
 ## 1. Export the model (build host, PyTorch)
 

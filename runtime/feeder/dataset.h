@@ -1,5 +1,5 @@
-#ifndef SEEML_RUNTIME_DATASET_H_
-#define SEEML_RUNTIME_DATASET_H_
+#ifndef SEEML_RUNTIME_FEEDER_DATASET_H_
+#define SEEML_RUNTIME_FEEDER_DATASET_H_
 
 #include <bit>
 #include <cstdint>
@@ -96,4 +96,4 @@ class Dataset {
 
 }  // namespace seeml::update_rt
 
-#endif  // SEEML_RUNTIME_DATASET_H_
+#endif  // SEEML_RUNTIME_FEEDER_DATASET_H_
