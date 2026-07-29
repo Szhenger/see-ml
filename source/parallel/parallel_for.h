@@ -1,5 +1,5 @@
-#ifndef SEEML_SOURCE_PARALLEL_FOR_H_
-#define SEEML_SOURCE_PARALLEL_FOR_H_
+#ifndef SEEML_SOURCE_PARALLEL_PARALLEL_FOR_H_
+#define SEEML_SOURCE_PARALLEL_PARALLEL_FOR_H_
 
 #include <cstddef>
 #include <type_traits>
@@ -100,4 +100,4 @@ void ParallelFor(size_t n, size_t grain, Body&& body) {
 
 }  // namespace seeml::update
 
-#endif  // SEEML_SOURCE_PARALLEL_FOR_H_
+#endif  // SEEML_SOURCE_PARALLEL_PARALLEL_FOR_H_

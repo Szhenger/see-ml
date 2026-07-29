@@ -17,8 +17,9 @@ test/
     corpora.cc          synthetic datasets (classification/regression/unlabeled)
     probes.cc           engine-arena introspection + the test-run environment
     scoped_temp_dir     filesystem sandbox for I/O suites
-  source/               the shared substrate
-    hash_test  parallel_for_test
+  source/               one folder per source-language subsystem
+    parallel/           parallel_for
+    identity/           hash
   compiler/             one folder per compiler subsystem
     frontend/           model_io  resource_analyzer  sir  operator  parser
     analysis/           update_passes  updater  reviewer

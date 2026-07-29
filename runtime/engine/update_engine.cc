@@ -13,7 +13,7 @@
 #include "runtime/executor/update_kernels.h"
 #include "runtime/feeder/batch_pipeline.h"
 #include "runtime/validator/plan_validator.h"
-#include "source/hash.h"
+#include "source/identity/hash.h"
 
 namespace seeml::update_rt {
 

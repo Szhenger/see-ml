@@ -6,8 +6,8 @@
 #include <string>
 #include <vector>
 
-#include "source/model_format.h"
-#include "source/update_types.h"
+#include "source/language/model_format.h"
+#include "source/plan/update_types.h"
 
 // =============================================================================
 // UpdateCompiler — the AOT driver that turns

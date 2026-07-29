@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "runtime/executor/update_kernels.h"
-#include "source/parallel_for.h"
+#include "source/parallel/parallel_for.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 

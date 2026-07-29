@@ -6,7 +6,7 @@
 
 #include "runtime/custodian/durable_io.h"
 #include "runtime/diagnostics/persisting/error.h"
-#include "source/hash.h"
+#include "source/identity/hash.h"
 
 namespace seeml::update_rt {
 

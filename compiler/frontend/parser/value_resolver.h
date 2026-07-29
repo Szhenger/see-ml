@@ -6,7 +6,7 @@
 #include <string_view>
 #include <unordered_map>
 
-#include "source/model_format.h"
+#include "source/language/model_format.h"
 #include "compiler/frontend/parser/graph_build.h"
 #include "compiler/frontend/representation/sir.h"
 

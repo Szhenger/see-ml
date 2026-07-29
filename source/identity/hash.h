@@ -1,10 +1,10 @@
-#ifndef SEEML_SOURCE_HASH_H_
-#define SEEML_SOURCE_HASH_H_
+#ifndef SEEML_SOURCE_IDENTITY_HASH_H_
+#define SEEML_SOURCE_IDENTITY_HASH_H_
 
 #include <cstddef>
 #include <cstdint>
 
-#include "source/parallel_for.h"
+#include "source/parallel/parallel_for.h"
 
 // =============================================================================
 // The integrity primitives shared by the compiler and the runtime.
@@ -119,4 +119,4 @@ inline uint64_t ContentHash64(const uint8_t* data, size_t size) {
 
 }  // namespace seeml::update
 
-#endif  // SEEML_SOURCE_HASH_H_
+#endif  // SEEML_SOURCE_IDENTITY_HASH_H_

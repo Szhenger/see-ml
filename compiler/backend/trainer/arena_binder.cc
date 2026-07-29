@@ -8,7 +8,7 @@
 // geometry as the reviewer's max-abs scan that selected the weights.
 #include "compiler/analysis/reviewer/quantization.h"
 #include "compiler/diagnostics/generating/error.h"
-#include "source/parallel_for.h"
+#include "source/parallel/parallel_for.h"
 
 namespace seeml::update {
 

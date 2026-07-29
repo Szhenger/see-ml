@@ -8,7 +8,7 @@
 #include <string_view>
 
 #include "runtime/feeder/dataset.h"
-#include "source/update_types.h"
+#include "source/plan/update_types.h"
 
 // =============================================================================
 // Subsystem usage contracts — the engine's verification layer, mirroring

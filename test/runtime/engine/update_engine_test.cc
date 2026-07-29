@@ -11,11 +11,11 @@
 #include <vector>
 
 #include "compiler/driver/update_compiler.h"
-#include "source/update_types.h"
+#include "source/plan/update_types.h"
 #include "runtime/feeder/dataset.h"
 #include "runtime/engine/update_engine.h"
-#include "source/hash.h"
-#include "source/parallel_for.h"
+#include "source/identity/hash.h"
+#include "source/parallel/parallel_for.h"
 #include "compiler/frontend/ingressor/model_reader.h"
 #include "compiler/frontend/ingressor/model_writer.h"
 #include "test/framework/seetest.h"

@@ -22,10 +22,10 @@
 #include <string>
 #include <vector>
 
-#include "source/update_types.h"
+#include "source/plan/update_types.h"
 #include "runtime/feeder/dataset.h"
 #include "runtime/engine/update_engine.h"
-#include "source/hash.h"
+#include "source/identity/hash.h"
 #include "compiler/frontend/ingressor/model_reader.h"
 
 namespace {

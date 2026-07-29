@@ -3,7 +3,7 @@
 All formats are little-endian; loaders reject big-endian hosts at compile
 time. Every multi-byte integer is packed without padding unless a struct is
 shown (structs are `#pragma pack(1)` and part of the ABI). Integrity hashing
-is 64-bit FNV-1a (`source/hash.h`) — a corruption/mismatch detector, not a
+is 64-bit FNV-1a (`source/identity/hash.h`) — a corruption/mismatch detector, not a
 signature; authenticate plans in your update transport.
 
 ## SMF — SeeML Model Format (`.smf`, v2)
@@ -57,7 +57,7 @@ records[num_samples]: f32 input[input_dim], then the label
 The fully AOT-compiled update: three instruction streams (train / eval /
 merge), the frozen weights, the persistent segment's initial image, and the
 emit table, addressed by a single `PlanHeader` (authoritative definition:
-`source/update_types.h`).
+`source/plan/schema.h`).
 
 Key v2 header fields:
 

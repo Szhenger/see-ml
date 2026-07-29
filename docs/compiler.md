@@ -43,16 +43,21 @@ SMF ingest ──▶ feasibility gate ──▶ forward SIR (+ frozen teacher)
 
 Not under `compiler/` on purpose: these are the abstractions of the *source
 language* and the substrate both the compiler and runtime share, not any
-stage of compilation.
+stage of compilation. Partitioned by functionality in the same fashion:
 
-- `model_format.{h,cc}` — the SMF container structs (`SmfModel`,
-  `SmfTensor`, `SmfOp`); the byte format is specified in
+- **`language/`** — `model_format.{h,cc}`, the SMF container structs
+  (`SmfModel`, `SmfTensor`, `SmfOp`); the byte format is specified in
   [formats.md](formats.md).
-- `update_types.h` — the plan ABI (`PlanHeader`, `UpdateInstruction`,
-  opcodes) and compiler configuration (`UpdateConfig`).
-- `parallel_for.{h,cc}` — deterministic chunked data-parallelism; chunk
-  geometry depends only on the problem shape, never the thread count.
-- `hash.h` — 64-bit FNV-1a, the integrity identity of every artifact.
+- **`plan/`** — the update-plan ABI behind the `update_types.h` façade,
+  split per discipline: `config.h` (the compilation request —
+  `UpdateConfig` and its specs), `instruction.h` (tensor refs, the opcode
+  vocabulary, the 64-byte `UpdateInstruction`), `schema.h` (magic/version,
+  `PlanHeader`, `EmitEntry`).
+- **`parallel/`** — `parallel_for.{h,cc}`, deterministic chunked
+  data-parallelism; chunk geometry depends only on the problem shape,
+  never the thread count.
+- **`identity/`** — `hash.h`, 64-bit FNV-1a and the parallel
+  `ContentHash64`: the integrity identity of every artifact.
 
 ## compiler/frontend/ — SMF bytes to forward SIR
 

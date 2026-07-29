@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "compiler/frontend/representation/sir.h"
-#include "source/update_types.h"
+#include "source/plan/update_types.h"
 
 // =============================================================================
 // LoraGrafter — the low-rank adapter algebra: rewrites C = X@W into

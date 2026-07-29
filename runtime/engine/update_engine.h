@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "source/update_types.h"
+#include "source/plan/update_types.h"
 #include "runtime/feeder/dataset.h"
 
 // =============================================================================

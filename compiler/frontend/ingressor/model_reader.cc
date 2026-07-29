@@ -7,8 +7,8 @@
 #include <vector>
 
 #include "compiler/diagnostics/tokenizing/error.h"
-#include "source/hash.h"
-#include "source/parallel_for.h"
+#include "source/identity/hash.h"
+#include "source/parallel/parallel_for.h"
 
 namespace seeml::update {
 

@@ -4,7 +4,7 @@
 #include <fstream>
 
 #include "compiler/diagnostics/generating/error.h"
-#include "source/parallel_for.h"
+#include "source/parallel/parallel_for.h"
 
 namespace seeml::update {
 
@@ -268,8 +268,10 @@ constexpr const char* kVendoredSources[] = {
     "runtime/diagnostics/validating/error.h",
     "runtime/diagnostics/executing/error.h",
     "runtime/diagnostics/persisting/error.h",
-    "source/update_types.h",              "source/hash.h",
-    "source/parallel_for.h",              "source/parallel_for.cc",
+    "source/plan/update_types.h",         "source/plan/config.h",
+    "source/plan/instruction.h",          "source/plan/schema.h",
+    "source/identity/hash.h",
+    "source/parallel/parallel_for.h",     "source/parallel/parallel_for.cc",
 };
 
 std::string BuildScript() {
@@ -287,7 +289,7 @@ std::string BuildScript() {
   s += "FLAGS=\"-std=c++23 -O2 -Wall -Wextra -pthread -I.\"\n";
   s += "$CXX $FLAGS -c update_plan_embedded.cc -o update_plan_embedded.o\n";
   s += "$CXX $FLAGS -c update_main.cc -o update_main.o\n";
-  s += "$CXX $FLAGS -c source/parallel_for.cc -o parallel_for.o\n";
+  s += "$CXX $FLAGS -c source/parallel/parallel_for.cc -o parallel_for.o\n";
   s += "for unit in executor/gemm executor/elementwise executor/activation "
        "executor/normalization executor/loss executor/optimizer "
        "feeder/dataset feeder/batch_pipeline validator/plan_validator "

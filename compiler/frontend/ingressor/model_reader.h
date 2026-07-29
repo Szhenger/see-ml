@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "source/model_format.h"
+#include "source/language/model_format.h"
 
 // =============================================================================
 // SMF reader — deserializes and validates an SMF container file.

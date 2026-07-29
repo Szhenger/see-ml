@@ -16,8 +16,8 @@
 #include "compiler/frontend/parser/parser.h"
 #include "compiler/frontend/representation/sir.h"
 #include "compiler/analysis/update_passes.h"
-#include "source/hash.h"
-#include "source/parallel_for.h"
+#include "source/identity/hash.h"
+#include "source/parallel/parallel_for.h"
 
 namespace seeml::update {
 

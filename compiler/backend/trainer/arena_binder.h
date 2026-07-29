@@ -10,7 +10,7 @@
 
 #include "compiler/frontend/parser/graph_build.h"
 #include "compiler/frontend/representation/sir.h"
-#include "source/update_types.h"
+#include "source/plan/update_types.h"
 
 // =============================================================================
 // Segmented arena binding — the memory planner of the update compiler.

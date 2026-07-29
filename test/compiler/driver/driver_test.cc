@@ -12,8 +12,8 @@
 #include "compiler/driver/contract.h"
 #include "compiler/driver/update_compiler.h"
 #include "compiler/frontend/representation/sir.h"
-#include "source/model_format.h"
-#include "source/update_types.h"
+#include "source/language/model_format.h"
+#include "source/plan/update_types.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 

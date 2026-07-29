@@ -15,7 +15,7 @@
 #include "compiler/backend/trainer/arena_binder.h"
 #include "compiler/backend/trainer/instruction_lowering.h"
 #include "compiler/frontend/representation/sir.h"
-#include "source/update_types.h"
+#include "source/plan/update_types.h"
 #include "test/framework/seetest.h"
 
 namespace {

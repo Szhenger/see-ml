@@ -7,8 +7,8 @@
 #include <cstdint>
 #include <vector>
 
-#include "source/hash.h"
-#include "source/parallel_for.h"
+#include "source/identity/hash.h"
+#include "source/parallel/parallel_for.h"
 #include "test/framework/seetest.h"
 
 namespace {

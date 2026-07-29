@@ -1,5 +1,5 @@
-#ifndef SEEML_SOURCE_MODEL_FORMAT_H_
-#define SEEML_SOURCE_MODEL_FORMAT_H_
+#ifndef SEEML_SOURCE_LANGUAGE_MODEL_FORMAT_H_
+#define SEEML_SOURCE_LANGUAGE_MODEL_FORMAT_H_
 
 #include <bit>
 #include <cstdint>
@@ -99,4 +99,4 @@ struct SmfModel {
 
 }  // namespace seeml::update
 
-#endif  // SEEML_SOURCE_MODEL_FORMAT_H_
+#endif  // SEEML_SOURCE_LANGUAGE_MODEL_FORMAT_H_

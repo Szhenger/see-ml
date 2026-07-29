@@ -2,7 +2,7 @@
 
 #include "runtime/executor/kernel_policy.h"
 #include "runtime/executor/update_kernels.h"
-#include "source/parallel_for.h"
+#include "source/parallel/parallel_for.h"
 
 // =============================================================================
 // Optimizer family: gradient conditioning and the in-place parameter steps.

@@ -12,7 +12,7 @@
 #include "compiler/analysis/reviewer/quantization.h"
 #include "compiler/frontend/parser/graph_build.h"
 #include "compiler/frontend/representation/sir.h"
-#include "source/model_format.h"
+#include "source/language/model_format.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 

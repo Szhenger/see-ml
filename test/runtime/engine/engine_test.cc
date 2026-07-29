@@ -11,7 +11,7 @@
 #include "compiler/driver/update_compiler.h"
 #include "runtime/engine/contract.h"
 #include "runtime/engine/update_engine.h"
-#include "source/update_types.h"
+#include "source/plan/update_types.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 

@@ -12,7 +12,7 @@
 #include <thread>
 #include <vector>
 
-#include "source/parallel_for.h"
+#include "source/parallel/parallel_for.h"
 #include "test/framework/seetest.h"
 
 namespace {

@@ -1,4 +1,4 @@
-#include "source/model_format.h"
+#include "source/language/model_format.h"
 
 namespace seeml::update {
 

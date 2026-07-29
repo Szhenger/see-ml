@@ -17,11 +17,11 @@ compile compiler/frontend/operator/linear.cc          op_linear.o
 compile compiler/frontend/operator/normalization.cc   op_normalization.o
 compile compiler/frontend/operator/activation.cc      op_activation.o
 compile compiler/diagnostics/logger.cc        logger.o
-compile source/model_format.cc model_format.o
+compile source/language/model_format.cc model_format.o
 compile compiler/frontend/ingressor/model_reader.cc model_reader.o
 compile compiler/frontend/ingressor/model_writer.cc model_writer.o
 compile compiler/frontend/ingressor/resource_analyzer.cc resource_analyzer.o
-compile source/parallel_for.cc                parallel_for.o
+compile source/parallel/parallel_for.cc       parallel_for.o
 compile compiler/frontend/parser/value_resolver.cc value_resolver.o
 compile compiler/frontend/parser/sema.cc      sema.o
 compile compiler/frontend/parser/parser.cc    parser.o
@@ -94,7 +94,7 @@ echo "  LINK seeml-seeu-dump"
 eval "$CXX build/seeml_seeu_dump.o -o build/seeml-seeu-dump"
 
 for suite in \
-    source/hash_test source/parallel_for_test \
+    source/identity/hash_test source/parallel/parallel_for_test \
     compiler/frontend/model_io_test compiler/frontend/resource_analyzer_test \
     compiler/frontend/sir_test compiler/frontend/operator_test \
     compiler/frontend/parser_test \

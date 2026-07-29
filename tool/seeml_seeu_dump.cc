@@ -15,8 +15,8 @@
 #include <fstream>
 #include <vector>
 
-#include "source/update_types.h"
-#include "source/hash.h"
+#include "source/plan/update_types.h"
+#include "source/identity/hash.h"
 
 namespace {
 

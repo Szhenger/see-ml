@@ -10,9 +10,9 @@
 #include <vector>
 
 #include "compiler/driver/update_compiler.h"
-#include "source/update_types.h"
-#include "source/parallel_for.h"
-#include "source/model_format.h"
+#include "source/plan/update_types.h"
+#include "source/parallel/parallel_for.h"
+#include "source/language/model_format.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 

@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "compiler/diagnostics/tokenizing/error.h"
-#include "source/hash.h"
+#include "source/identity/hash.h"
 
 namespace seeml::update {
 

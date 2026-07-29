@@ -5,7 +5,7 @@
 #include <expected>
 #include <string>
 
-#include "source/update_types.h"
+#include "source/plan/update_types.h"
 
 // =============================================================================
 // Load-time validation of a .seeu plan's instruction streams.

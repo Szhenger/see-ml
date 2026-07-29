@@ -5,7 +5,7 @@
 #include <expected>
 #include <string>
 
-#include "source/model_format.h"
+#include "source/language/model_format.h"
 
 // =============================================================================
 // Resource analyzer — fail-fast static feasibility analysis for local

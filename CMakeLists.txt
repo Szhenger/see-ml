@@ -40,7 +40,7 @@ find_package(Threads REQUIRED)
 # ==============================================================================
 
 add_library(seeml_parallel STATIC
-    source/parallel_for.cc
+    source/parallel/parallel_for.cc
 )
 target_link_libraries(seeml_parallel PUBLIC Threads::Threads)
 
@@ -68,7 +68,7 @@ add_library(seeml_sir STATIC
 # ==============================================================================
 
 add_library(seeml_update STATIC
-    source/model_format.cc
+    source/language/model_format.cc
     compiler/frontend/ingressor/model_reader.cc
     compiler/frontend/ingressor/model_writer.cc
     compiler/frontend/ingressor/resource_analyzer.cc
@@ -156,8 +156,8 @@ function(seeml_add_test name src)
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-seeml_add_test(seeml_hash_test            test/source/hash_test.cc)
-seeml_add_test(seeml_parallel_for_test    test/source/parallel_for_test.cc)
+seeml_add_test(seeml_hash_test            test/source/identity/hash_test.cc)
+seeml_add_test(seeml_parallel_for_test    test/source/parallel/parallel_for_test.cc)
 seeml_add_test(seeml_model_io_test        test/compiler/frontend/model_io_test.cc)
 seeml_add_test(seeml_resource_analyzer_test test/compiler/frontend/resource_analyzer_test.cc)
 seeml_add_test(seeml_sir_test             test/compiler/frontend/sir_test.cc)

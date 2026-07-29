@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "compiler/frontend/representation/sir.h"
-#include "source/update_types.h"
+#include "source/plan/update_types.h"
 
 // =============================================================================
 // Instruction lowering — SIR ops to the .seeu UpdateInstruction stream.

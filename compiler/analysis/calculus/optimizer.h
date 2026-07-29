@@ -6,7 +6,7 @@
 #include <unordered_map>
 
 #include "compiler/frontend/representation/sir.h"
-#include "source/update_types.h"
+#include "source/plan/update_types.h"
 
 // =============================================================================
 // OptimizerSynthesizer — appends the optimizer step (SGD / AdamW) as

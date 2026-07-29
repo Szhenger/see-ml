@@ -2,7 +2,7 @@
 
 #include "runtime/executor/kernel_policy.h"
 #include "runtime/executor/update_kernels.h"
-#include "source/parallel_for.h"
+#include "source/parallel/parallel_for.h"
 
 // =============================================================================
 // Normalization family: LayerNorm over the last dim, forward caching

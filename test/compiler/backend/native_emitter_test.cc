@@ -12,7 +12,7 @@
 #include "compiler/backend/trainer/native_emitter.h"
 #include "compiler/driver/update_compiler.h"
 #include "runtime/engine/update_engine.h"
-#include "source/model_format.h"
+#include "source/language/model_format.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 #include "test/support/scoped_temp_dir.h"
@@ -76,8 +76,11 @@ TEST(NativeEmitter, EmitsCompletePackage) {
         "runtime/validator/plan_validator.cc",
         "runtime/custodian/checkpoint.cc",
         "runtime/diagnostics/diagnostic.h",
-        "runtime/diagnostics/executing/error.h", "source/update_types.h",
-        "source/hash.h", "source/parallel_for.h", "source/parallel_for.cc"}) {
+        "runtime/diagnostics/executing/error.h", "source/plan/update_types.h",
+        "source/plan/config.h", "source/plan/instruction.h",
+        "source/plan/schema.h", "source/identity/hash.h",
+        "source/parallel/parallel_for.h",
+        "source/parallel/parallel_for.cc"}) {
     EXPECT_TRUE(std::filesystem::exists(
         std::filesystem::path(out_dir) / rel));
   }
@@ -85,7 +88,7 @@ TEST(NativeEmitter, EmitsCompletePackage) {
   EXPECT_STR_CONTAINS(script, "engine/update_engine");
   // The vendored runtime is threaded: the script must compile the parallel
   // substrate and link with -pthread.
-  EXPECT_STR_CONTAINS(script, "source/parallel_for.cc");
+  EXPECT_STR_CONTAINS(script, "source/parallel/parallel_for.cc");
   EXPECT_STR_CONTAINS(script, "feeder/batch_pipeline");
   EXPECT_STR_CONTAINS(script, "-pthread");
 

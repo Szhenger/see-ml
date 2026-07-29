@@ -2,7 +2,7 @@
 
 #include <cstring>
 
-#include "source/parallel_for.h"
+#include "source/parallel/parallel_for.h"
 
 namespace seeml::update_rt {
 

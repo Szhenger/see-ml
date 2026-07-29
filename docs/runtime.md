@@ -134,8 +134,8 @@ no logger).
 
 ## Vendoring
 
-Every unit above (plus `source/update_types.h`, `source/hash.h`, and the
-`ParallelFor` substrate) is vendored into the emitted package by the
+Every unit above (plus the `source/plan/` ABI headers,
+`source/identity/hash.h`, and the `source/parallel/` substrate) is vendored into the emitted package by the
 compiler's `native_emitter`, whose generated `build.sh` compiles the
 thirteen runtime translation units and links `model_update` — the package
 builds with no access to this repository.
