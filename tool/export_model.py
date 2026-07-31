@@ -97,6 +97,7 @@ class _SmfBuilder:
 
 def export_smf(model, path: str, input_name: str = "x"):
     """Export an nn.Sequential of Linear/ReLU/GELU/SiLU/LayerNorm to SMF."""
+    import torch
     import torch.nn as nn
 
     linears = [m for m in model if isinstance(m, nn.Linear)]
@@ -108,12 +109,18 @@ def export_smf(model, path: str, input_name: str = "x"):
     for pos, m in enumerate(model):
         if isinstance(m, nn.Linear):
             w = m.weight.detach().t().contiguous().float()  # [in, out]
-            bias = m.bias.detach().float()
             b.add_tensor(f"w{idx}", list(w.shape), w.numpy().tobytes())
-            b.add_tensor(f"b{idx}", [bias.numel()], bias.numpy().tobytes())
             b.add_op(OP_MATMUL, f"mm{idx}", [prev, f"w{idx}"], f"z{idx}")
-            b.add_op(OP_ADDBIAS, f"ab{idx}", [f"z{idx}", f"b{idx}"], f"zb{idx}")
-            prev = f"zb{idx}"
+            if m.bias is not None:
+                bias = m.bias.detach().float()
+                b.add_tensor(f"b{idx}", [bias.numel()], bias.numpy().tobytes())
+                b.add_op(OP_ADDBIAS, f"ab{idx}", [f"z{idx}", f"b{idx}"],
+                         f"zb{idx}")
+                prev = f"zb{idx}"
+            else:
+                # nn.Linear(bias=False): the matmul output feeds forward
+                # directly — no zero-bias tensor bloating the model.
+                prev = f"z{idx}"
             idx += 1
         elif isinstance(m, (nn.ReLU, nn.GELU, nn.SiLU)):
             # Name by module position: consecutive activations must not collide.
@@ -125,8 +132,13 @@ def export_smf(model, path: str, input_name: str = "x"):
             if len(m.normalized_shape) != 1:
                 raise ValueError("export_smf: LayerNorm must normalize the "
                                  "last dimension only")
-            gamma = m.weight.detach().float()
-            beta = m.bias.detach().float()
+            # elementwise_affine=False has weight/bias of None; the SMF op
+            # always takes gamma/beta, so synthesize the identity affine.
+            d = m.normalized_shape[0]
+            gamma = (m.weight.detach().float() if m.weight is not None
+                     else torch.ones(d))
+            beta = (m.bias.detach().float() if m.bias is not None
+                    else torch.zeros(d))
             b.add_tensor(f"ln_g{pos}", [gamma.numel()], gamma.numpy().tobytes())
             b.add_tensor(f"ln_b{pos}", [beta.numel()], beta.numpy().tobytes())
             b.add_op(OP_LAYERNORM, f"ln{pos}",

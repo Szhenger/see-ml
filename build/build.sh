@@ -93,7 +93,8 @@ TESTING="build/seetest_registry.o build/seetest_main.o \
 echo "  LINK seeml-update-compile"
 eval "$CXX -pthread build/seeml_update_compile.o $LIBS -o build/seeml-update-compile"
 echo "  LINK seeml-seeu-dump"
-eval "$CXX build/seeml_seeu_dump.o -o build/seeml-seeu-dump"
+# PlanSelfHash (the v4 integrity seal) runs on the parallel substrate.
+eval "$CXX -pthread build/seeml_seeu_dump.o build/parallel_for.o -o build/seeml-seeu-dump"
 
 for suite in \
     source/identity/hash_test source/parallel/parallel_for_test \

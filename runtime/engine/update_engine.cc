@@ -14,6 +14,7 @@
 #include "runtime/feeder/batch_pipeline.h"
 #include "runtime/validator/plan_validator.h"
 #include "source/identity/hash.h"
+#include "source/parallel/parallel_for.h"
 
 namespace seeml::update_rt {
 
@@ -52,26 +53,39 @@ float* UpdateEngine::WritePtr(uint64_t ref) {
 
 std::expected<void, std::string> UpdateEngine::LoadFromMemory(
     const uint8_t* plan, size_t size) {
-  plan_ = plan;
-  plan_size_ = size;
-  return Initialize();
+  if (auto r = Initialize(plan, size); !r) return r;
+  // The committed plan is borrowed; a previously file-owned plan is no
+  // longer referenced by plan_/rodata_ and can be released.
+  owned_plan_.clear();
+  owned_plan_.shrink_to_fit();
+  return {};
 }
 
 std::expected<void, std::string> UpdateEngine::LoadFromFile(
     const std::string& path) {
   auto bytes = ReadFileBytes(path);
   if (!bytes) return std::unexpected(bytes.error());
+  // Initialize against the candidate buffer first: replacing owned_plan_ up
+  // front would free the buffer a still-loaded previous plan's rodata_
+  // points into even when the candidate is rejected. The move below keeps
+  // the heap buffer (and the just-committed plan_/rodata_) stable.
+  if (auto r = Initialize(bytes->data(), bytes->size()); !r) return r;
   owned_plan_ = std::move(*bytes);
-  plan_ = owned_plan_.data();
-  plan_size_ = owned_plan_.size();
-  return Initialize();
+  return {};
 }
 
-std::expected<void, std::string> UpdateEngine::Initialize() {
-  if (plan_size_ < sizeof(up::PlanHeader))
+std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
+                                                          size_t plan_size) {
+  // Everything below validates into locals; engine members are only
+  // assigned in the commit block at the end, after every contract has
+  // passed. A failed re-Load must leave the previous plan fully usable —
+  // not a half-overwritten mixture of two plans that the `if (!arena_)`
+  // guards would happily execute.
+  up::PlanHeader header{};
+  if (plan_size < sizeof(header))
     return diag::executing::Error("plan smaller than its header");
-  std::memcpy(&header_, plan_, sizeof(header_));
-  if (header_.magic != up::kSeeuMagic)
+  std::memcpy(&header, plan, sizeof(header));
+  if (header.magic != up::kSeeuMagic)
     return diag::executing::Error("bad plan magic");
   // Version negotiation (schema.h): additive format bumps stay readable,
   // semantic breaks raise the floor, unknown-future formats are rejected.
@@ -81,19 +95,16 @@ std::expected<void, std::string> UpdateEngine::Initialize() {
         "unsupported plan version " + std::to_string(header_.version) +
         " (this runtime reads v" + std::to_string(up::kSeeuOldestReadable) +
         "..v" + std::to_string(up::kSeeuVersion) + ")");
+=======
+  if (header.version != up::kSeeuVersion)
+    return diag::executing::Error("unsupported plan version");
 
   // Integrity: the plan hashes over itself with the hash field zeroed.
   // A flipped bit anywhere — header, instructions, frozen weights — fails
   // here instead of surfacing as silent numerical garbage on-device.
   {
-    uint64_t state = up::kFnvOffsetBasis;
     constexpr size_t kHashAt = offsetof(up::PlanHeader, plan_hash);
-    constexpr uint8_t kZero[sizeof(uint64_t)] = {};
-    state = up::Fnv1a64(plan_, kHashAt, state);
-    state = up::Fnv1a64(kZero, sizeof(kZero), state);
-    state = up::Fnv1a64(plan_ + kHashAt + sizeof(uint64_t),
-                        plan_size_ - kHashAt - sizeof(uint64_t), state);
-    if (state != header_.plan_hash)
+    if (up::PlanSelfHash(plan, plan_size, kHashAt) != header.plan_hash)
       return diag::executing::Error(
           "plan hash mismatch — the .seeu blob is corrupt");
   }
@@ -102,37 +113,31 @@ std::expected<void, std::string> UpdateEngine::Initialize() {
   // its I/O slots with the arena) before any section is decoded. The
   // contract also proves every section size overflow-free, so the byte
   // counts below are plain multiplies.
-  if (auto ok = VerifyPlanContract(header_, plan_size_); !ok)
+  if (auto ok = VerifyPlanContract(header, plan_size); !ok)
     return std::unexpected(ok.error());
   const uint64_t train_bytes =
-      header_.train_instr_count * sizeof(up::UpdateInstruction);
+      header.train_instr_count * sizeof(up::UpdateInstruction);
   const uint64_t merge_bytes =
-      header_.merge_instr_count * sizeof(up::UpdateInstruction);
+      header.merge_instr_count * sizeof(up::UpdateInstruction);
   const uint64_t eval_bytes =
-      header_.eval_instr_count * sizeof(up::UpdateInstruction);
-  const uint64_t emit_bytes = header_.emit_count * sizeof(up::EmitEntry);
+      header.eval_instr_count * sizeof(up::UpdateInstruction);
+  const uint64_t emit_bytes = header.emit_count * sizeof(up::EmitEntry);
 
   // Decode the instruction streams once; per-step execution touches only the
   // decoded vectors and the arena.
-  train_program_.resize(header_.train_instr_count);
-  std::memcpy(train_program_.data(), plan_ + header_.train_instr_offset,
-              train_bytes);
-  merge_program_.resize(header_.merge_instr_count);
-  std::memcpy(merge_program_.data(), plan_ + header_.merge_instr_offset,
-              merge_bytes);
-  eval_program_.resize(header_.eval_instr_count);
-  std::memcpy(eval_program_.data(), plan_ + header_.eval_instr_offset,
-              eval_bytes);
-  emit_table_.resize(header_.emit_count);
-  std::memcpy(emit_table_.data(), plan_ + header_.emit_table_offset,
-              emit_bytes);
+  std::vector<up::UpdateInstruction> train(header.train_instr_count);
+  std::memcpy(train.data(), plan + header.train_instr_offset, train_bytes);
+  std::vector<up::UpdateInstruction> merge(header.merge_instr_count);
+  std::memcpy(merge.data(), plan + header.merge_instr_offset, merge_bytes);
+  std::vector<up::UpdateInstruction> eval(header.eval_instr_count);
+  std::memcpy(eval.data(), plan + header.eval_instr_offset, eval_bytes);
+  std::vector<up::EmitEntry> emit(header.emit_count);
+  std::memcpy(emit.data(), plan + header.emit_table_offset, emit_bytes);
 
   // Executor boundary: every operand ref of every instruction is
   // bounds-proven by the validator and every emit entry targets the arena —
   // after this, Execute() dispatches the programs blindly.
-  if (auto ok = VerifyExecutorContract(train_program_, merge_program_,
-                                       eval_program_, emit_table_, header_);
-      !ok)
+  if (auto ok = VerifyExecutorContract(train, merge, eval, emit, header); !ok)
     return std::unexpected(ok.error());
 
   // Class count for validating class-index labels at Train() time (the
@@ -156,16 +161,44 @@ std::expected<void, std::string> UpdateEngine::Initialize() {
     }
 
   rodata_ = plan_ + header_.rodata_offset;
+  // Class count for validating class-index labels at Train() time. The raw
+  // dataset labels feed every softmax kernel in every program, so the check
+  // must hold for the narrowest width anywhere — not just the train
+  // program's last softmax, which would leave a narrower eval softmax
+  // indexing past its validated rows.
+  uint64_t num_classes = 0;
+  for (const auto* program : {&train, &merge, &eval})
+    for (const up::UpdateInstruction& ins : *program) {
+      const auto op = static_cast<up::OpCode>(ins.opcode);
+      if (op != up::OpCode::kSoftmaxXEntFwd &&
+          op != up::OpCode::kSoftmaxXEntBwd)
+        continue;
+      const uint64_t classes = ins.out[1];
+      if (classes != 0 && (num_classes == 0 || classes < num_classes))
+        num_classes = classes;
+    }
 
   // The single allocation of the update: the pre-planned arena. Its size was
   // known at compile time — the device's resource contract.
+  const size_t arena_bytes = (header.arena_size + 63) & ~size_t{63};
+  uint8_t* arena = static_cast<uint8_t*>(std::aligned_alloc(64, arena_bytes));
+  if (!arena) return diag::executing::Error("arena allocation failed");
+  std::memset(arena, 0, arena_bytes);
+  std::memcpy(arena, plan + header.persist_init_offset,
+              header.persist_init_size);
+
+  // Commit — nothing below can fail.
   std::free(arena_);
-  const size_t arena_bytes = (header_.arena_size + 63) & ~size_t{63};
-  arena_ = static_cast<uint8_t*>(std::aligned_alloc(64, arena_bytes));
-  if (!arena_) return diag::executing::Error("arena allocation failed");
-  std::memset(arena_, 0, arena_bytes);
-  std::memcpy(arena_, plan_ + header_.persist_init_offset,
-              header_.persist_init_size);
+  arena_ = arena;
+  header_ = header;
+  train_program_ = std::move(train);
+  merge_program_ = std::move(merge);
+  eval_program_ = std::move(eval);
+  emit_table_ = std::move(emit);
+  num_classes_ = num_classes;
+  plan_ = plan;
+  plan_size_ = plan_size;
+  rodata_ = plan + header.rodata_offset;
   step_ = 0;
   merged_ = false;
   return {};
@@ -372,9 +405,19 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
       header_.label_kind == 1 && label_slot != nullptr &&
       eval_probs_ref_ != up::kNullRef && eval_softmax_cols_ > 0 &&
       eval_softmax_rows_ >= header_.batch;
+  // Deterministic gate: rewind so every evaluation consumes the identical
+  // sample multiset. With a partial final batch, the wrapped samples that
+  // get double-counted depend on the entry cursor — the pre- and
+  // post-training evals would otherwise average different multisets and the
+  // regression gate would compare incomparable numbers.
+  data.Rewind();
 
   // One pass over the set in compiled-batch chunks (final partial batch
-  // wraps — the fixed-shape contract admits no ragged batch).
+  // wraps — the fixed-shape contract admits no ragged batch). The feeder
+  // stages batch b+1 while batch b evaluates, exactly as TrainImpl
+  // pipelines; the batch sequence is identical to the serial one, and the
+  // eval program never mutates the dataset. Scoped so the feeder joins
+  // before the caller sees the dataset single-threaded again.
   const uint64_t batches =
       std::max<uint64_t>(1, (data.num_samples() + header_.batch - 1) /
                                 header_.batch);
@@ -404,6 +447,13 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
           ++correct;
       }
       counted += real;
+  {
+    BatchPipeline feeder(data, header_.batch, header_.input_floats,
+                         header_.label_kind == 0 ? 0 : header_.label_bytes);
+    for (uint64_t b = 0; b < batches; ++b) {
+      feeder.NextBatch(input_slot, label_slot);
+      Execute(eval_program_);
+      total += LossValue();
     }
   }
   EvalMetrics m;
@@ -469,6 +519,12 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
 
   const uint64_t start = step_;
   uint64_t executed = 0;
+  // Training is about to move the adapter parameters, so any previously
+  // materialized merge deltas are stale: commit must be preceded by a fresh
+  // RunMerge. Cleared before the first step, not after the loop — the error
+  // exits inside the loop (non-finite loss, checkpoint failure) leave
+  // mutated parameters behind too.
+  merged_ = false;
   {
     // The feeder thread stages batch s+1 (shuffle gather + epoch reshuffles)
     // while step s computes; the batch sequence is exactly the serial one, so
@@ -599,6 +655,32 @@ std::expected<void, std::string> UpdateEngine::CommitToModel(
                                  n * sizeof(float));
           !r)
         return std::unexpected(r.error());
+    uint8_t* base = bytes->data() + e.smf_data_offset;
+    // Each chunk adds into a disjoint element range of this entry's weight
+    // span, so fanning the add over the pool is race-free — and the hottest
+    // commit-path work for large adapters. Grain keeps small deltas serial.
+    constexpr size_t kCommitGrain = 64 * 1024;
+    if (reinterpret_cast<uintptr_t>(base) % alignof(float) == 0) {
+      // The SMF data section is 64-aligned, so this is the path that runs in
+      // practice: a straight vectorizable add over the weight range.
+      auto* w = reinterpret_cast<float*>(base);
+      up::ParallelFor(count, kCommitGrain,
+                      [&](size_t begin, size_t end, size_t /*chunk*/) {
+                        for (size_t i = begin; i < end; ++i) w[i] += delta[i];
+                      });
+    } else {
+      // Fallback for a container that broke the alignment contract: memcpy
+      // keeps the patch correct regardless.
+      up::ParallelFor(count, kCommitGrain,
+                      [&](size_t begin, size_t end, size_t /*chunk*/) {
+                        for (size_t i = begin; i < end; ++i) {
+                          float w;
+                          uint8_t* at = base + i * sizeof(float);
+                          std::memcpy(&w, at, sizeof(float));
+                          w += delta[i];
+                          std::memcpy(at, &w, sizeof(float));
+                        }
+                      });
     }
   }
 
@@ -618,6 +700,10 @@ std::expected<void, std::string> UpdateEngine::LoadCheckpoint(
                                  header_.persistent_size, arena_);
   if (!step) return std::unexpected(step.error());
   step_ = *step;
+  // The restored persistent segment replaces the adapter state any earlier
+  // RunMerge materialized deltas from; committing those would patch deltas
+  // that no longer match the parameters.
+  merged_ = false;
   return {};
 }
 

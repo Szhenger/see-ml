@@ -14,6 +14,8 @@
 #include <fcntl.h>
 #include <sys/file.h>
 #include <unistd.h>
+#else
+#include <windows.h>
 #endif
 
 namespace seeml::update_rt {
@@ -58,20 +60,42 @@ std::expected<void, std::string> WriteFileDurable(
   }
   return {};
 #else
-  {
-    std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-    if (!out)
-      return diag::persisting::Error(diag::persisting::kDurableIo, "cannot write '" + tmp + "'");
-    for (const ByteSpan& part : parts) {
-      out.write(reinterpret_cast<const char*>(part.data),
-                static_cast<std::streamsize>(part.size));
-      if (!out)
-        return diag::persisting::Error(diag::persisting::kDurableIo, "short write to '" + tmp + "'");
+  // Raw Win32, mirroring the POSIX branch's guarantees: every byte's write
+  // status is checked (no ofstream buffer whose final flush nobody sees),
+  // FlushFileBuffers is the fsync the durability contract demands, and
+  // MoveFileEx with MOVEFILE_REPLACE_EXISTING installs over an existing
+  // file — CRT rename() refuses that, which broke every checkpoint after
+  // the first.
+  HANDLE h = ::CreateFileA(tmp.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE)
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "cannot write '" + tmp + "'");
+  for (const ByteSpan& part : parts) {
+    size_t written = 0;
+    while (written < part.size) {
+      const DWORD want = static_cast<DWORD>(
+          std::min<size_t>(part.size - written, 1u << 30));
+      DWORD got = 0;
+      if (!::WriteFile(h, part.data + written, want, &got, nullptr) ||
+          got == 0) {
+        ::CloseHandle(h);
+        return diag::persisting::Error(diag::persisting::kDurableIo,
+                                       "short write to '" + tmp + "'");
+      }
+      written += got;
     }
   }
-  if (std::rename(tmp.c_str(), path.c_str()) != 0)
-    return diag::persisting::Error(diag::persisting::kDurableIo, "atomic rename to '" + path +
-                           "' failed");
+  if (!::FlushFileBuffers(h)) {
+    ::CloseHandle(h);
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "fsync of '" + tmp + "' failed");
+  }
+  ::CloseHandle(h);
+  if (!::MoveFileExA(tmp.c_str(), path.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "atomic rename to '" + path + "' failed");
   return {};
 #endif
 }

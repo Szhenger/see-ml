@@ -94,10 +94,17 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   model.input_name = r.ReadStr();
   model.output_name = r.ReadStr();
   // Counts are validated implicitly by the bounded Reader; reserving to the
-  // declared sizes (capped against the file size so a hostile header cannot
-  // demand gigabytes) avoids re-growth during the parse.
-  model.tensors.reserve(std::min<size_t>(num_tensors, bytes.size()));
-  model.ops.reserve(std::min<size_t>(num_ops, bytes.size()));
+  // declared sizes (capped against what the file could physically contain,
+  // so a hostile header cannot demand gigabytes) avoids re-growth during the
+  // parse. The caps divide by the minimum on-disk record size — capping at
+  // bytes.size() *elements* would still let a small file demand
+  // bytes.size() * sizeof(SmfTensor) of capacity up front.
+  constexpr size_t kMinTensorRecordBytes = 28;  // name len + rank + flags +
+                                                // 1 dim + offset + size
+  constexpr size_t kMinOpRecordBytes = 6;  // kind + 2 empty names + input cnt
+  model.tensors.reserve(
+      std::min<size_t>(num_tensors, bytes.size() / kMinTensorRecordBytes));
+  model.ops.reserve(std::min<size_t>(num_ops, bytes.size() / kMinOpRecordBytes));
 
   for (uint32_t i = 0; i < num_tensors && r.ok; ++i) {
     SmfTensor t;

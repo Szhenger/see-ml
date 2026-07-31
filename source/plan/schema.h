@@ -22,7 +22,10 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // v3: source_model_hash is computed with ContentHash64 (the parallel model
 // identity hash, source/identity/hash.h) instead of plain Fnv1a64. Older
 // plans are rejected by the version gate; recompile the plan.
-inline constexpr uint32_t kSeeuVersion = 3;
+// v4: plan_hash is computed with PlanSelfHash (the chunked parallel form of
+// the same fold, hash field zeroed) instead of a serial Fnv1a64 pass over
+// the whole blob. Older plans are rejected by the version gate; recompile.
+inline constexpr uint32_t kSeeuVersion = 4;
 
 // Version negotiation policy. The runtime accepts every version in
 // [kSeeuOldestReadable, kSeeuVersion], not just the version it was built

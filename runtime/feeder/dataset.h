@@ -61,6 +61,12 @@ class Dataset {
   /// (pure distillation).
   void FillBatch(uint64_t batch, float* input_slot, uint8_t* label_slot);
 
+  /// Restarts batch serving from the beginning of the current order (the
+  /// current permutation, if shuffling). Evaluation passes rewind first so
+  /// every pass consumes the identical sample multiset regardless of where
+  /// earlier passes left the cursor.
+  void Rewind() { cursor_ = 0; }
+
   /// Switches batch serving to a seeded random permutation, re-shuffled at
   /// every epoch boundary. Deterministic for a given (seed, epoch) pair.
   void EnableShuffle(uint64_t seed);

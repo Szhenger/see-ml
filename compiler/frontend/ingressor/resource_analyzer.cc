@@ -26,7 +26,11 @@ uint64_t SatMul(uint64_t a, uint64_t b) {
 }
 
 std::string FormatMiB(uint64_t bytes) {
-  return std::to_string((bytes + (1 << 20) - 1) >> 20) + " MiB";
+  // Round up without the additive form: bytes near UINT64_MAX (exactly what
+  // SatAdd/SatMul saturate to) would wrap and print "0 MiB".
+  const uint64_t whole = bytes >> 20;
+  const uint64_t frac = bytes & ((uint64_t{1} << 20) - 1);
+  return std::to_string(whole + (frac != 0 ? 1 : 0)) + " MiB";
 }
 
 }  // namespace

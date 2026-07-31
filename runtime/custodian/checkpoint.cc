@@ -15,7 +15,13 @@ namespace up = seeml::update;
 namespace {
 
 inline constexpr uint32_t kCkptMagic = 0x504B4553;  // "SEKP"
-inline constexpr uint32_t kCkptVersion = 2;
+// v3: payload_hash uses ContentHash64 — the deterministic parallel identity
+// hash — instead of serial byte-at-a-time Fnv1a64. The persistent segment
+// (parameters + AdamW moments) is the largest thing the custodian hashes,
+// every checkpoint_every steps; the buffer is immutable for the duration of
+// the call, so the chunked hash is race-free. v2 checkpoints are rejected
+// by the version gate (resume restarts from the plan's initial state).
+inline constexpr uint32_t kCkptVersion = 3;
 
 #pragma pack(push, 1)
 struct CkptHeader {
@@ -37,7 +43,7 @@ std::expected<void, std::string> SaveCheckpointFile(
   h.plan_hash = plan_hash;
   h.step = step;
   h.persistent_size = persistent_size;
-  h.payload_hash = up::Fnv1a64(persistent, persistent_size);
+  h.payload_hash = up::ContentHash64(persistent, persistent_size);
 
   // Durable: a checkpoint that can vanish in a power cut is not a checkpoint.
   // Gather-write header + persistent segment straight from the arena — no
@@ -56,7 +62,7 @@ std::expected<uint64_t, std::string> LoadCheckpointFile(
   CkptHeader h;
   f.read(reinterpret_cast<char*>(&h), sizeof(h));
   if (!f || h.magic != kCkptMagic || h.version != kCkptVersion)
-    return diag::persisting::Error(diag::persisting::kCheckpoint, "not a v2 checkpoint: '" + path + "'");
+    return diag::persisting::Error(diag::persisting::kCheckpoint, "not a v3 checkpoint: '" + path + "'");
   // Binding: a checkpoint carries adapter and optimizer state laid out by
   // one specific plan. Resuming it under any other plan is silent corruption.
   if (h.plan_hash != plan_hash)
@@ -68,7 +74,7 @@ std::expected<uint64_t, std::string> LoadCheckpointFile(
   f.read(reinterpret_cast<char*>(payload.data()),
          static_cast<std::streamsize>(payload.size()));
   if (!f) return diag::persisting::Error(diag::persisting::kCheckpoint, "truncated checkpoint");
-  if (up::Fnv1a64(payload.data(), payload.size()) != h.payload_hash)
+  if (up::ContentHash64(payload.data(), payload.size()) != h.payload_hash)
     return diag::persisting::Error(diag::persisting::kCheckpoint, "checkpoint payload is corrupt");
   std::memcpy(dst, payload.data(), payload.size());
   return h.step;

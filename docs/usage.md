@@ -70,8 +70,9 @@ What happens, in order:
    (checkpoints are hash-bound to the plan and fsync-durable); aborts on a
    non-finite loss.
 4. **Gate** — validation loss is evaluated before and after with the plan's
-   eval program. No improvement → exit 3, device untouched (`--force`
-   overrides).
+   eval program; both passes rewind the held-out set so they average the
+   identical sample multiset. No improvement → exit 3, device untouched
+   (`--force` overrides).
 5. **Merge + commit** — deltas `Δ = (α/r)·A@B` are materialized and added to
    the pristine f32 weights of the source file (which must hash-match the
    plan), written durably, renamed atomically.
@@ -90,6 +91,10 @@ current step computes. Control it with `SEEML_THREADS`:
 SEEML_THREADS=1 model_update ...   # fully serial: no thread is ever created
 SEEML_THREADS=4 model_update ...   # pin the pool width; default = all cores
 ```
+
+Negative, zero, or malformed values (including `-1`, some tools' "all
+cores" convention) fall back to hardware concurrency rather than being
+taken literally.
 
 Parallel execution is **bitwise-deterministic**: work is split into chunks
 whose boundaries depend only on the problem shape (never the thread count),

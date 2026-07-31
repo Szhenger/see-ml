@@ -30,6 +30,11 @@ std::expected<void, std::string> ValidateInstruction(
     if (write && up::IsRodataRef(ref)) return false;
     uint64_t bytes = 0;
     if (!MulOk(elems, elem_bytes, &bytes)) return false;
+    // Execute() reinterpret_casts the ref to its element type and
+    // dereferences directly, so alignment is part of "safe to dispatch
+    // blindly": a misaligned offset is UB, and a bus error on the
+    // strict-alignment targets this runtime ships to.
+    if (up::RefOffset(ref) % elem_bytes != 0) return false;
     const uint64_t space = up::IsRodataRef(ref) ? rodata_size : arena_size;
     if (!RangeOk(up::RefOffset(ref), bytes, space)) return false;
     ranges[num_ranges++] = {up::RefOffset(ref), bytes, write,
