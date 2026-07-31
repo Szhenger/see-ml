@@ -53,6 +53,16 @@ uint64_t DetectLocalMemoryBytes();
 [[nodiscard]] std::expected<void, std::string> CheckTrainableLocally(
     const TrainingFootprint& footprint, uint64_t budget_bytes);
 
+/// Final gate, run after code generation has bound every byte: errors when
+/// what the runtime will actually keep resident — the plan blob (rodata and
+/// the persistent image live inside it) plus the arena it allocates —
+/// exceeds the budget. The early estimate is a lower bound that knows
+/// nothing of gradients, optimizer state, or transients; this check is
+/// exact for the compiled artifact, so admissions become trustworthy too
+/// (the corpus and the source model at commit remain extra).
+[[nodiscard]] std::expected<void, std::string> CheckPlanFitsLocally(
+    uint64_t arena_bytes, uint64_t plan_bytes, uint64_t budget_bytes);
+
 }  // namespace seeml::update
 
 #endif  // SEEML_COMPILER_FRONTEND_INGRESSOR_RESOURCE_ANALYZER_H_

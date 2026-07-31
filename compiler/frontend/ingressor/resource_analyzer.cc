@@ -133,4 +133,18 @@ std::expected<void, std::string> CheckTrainableLocally(
       FormatMiB(budget));
 }
 
+std::expected<void, std::string> CheckPlanFitsLocally(uint64_t arena_bytes,
+                                                      uint64_t plan_bytes,
+                                                      uint64_t budget_bytes) {
+  const uint64_t budget =
+      budget_bytes != 0 ? budget_bytes : DetectLocalMemoryBytes();
+  if (budget == 0) return {};  // cannot prove infeasibility — do not reject
+  const uint64_t need = SatAdd(arena_bytes, plan_bytes);
+  if (need <= budget) return {};
+  return seeml::diag::tokenizing::IngressError(
+      "compiled update cannot run locally: arena " + FormatMiB(arena_bytes) +
+      " + plan " + FormatMiB(plan_bytes) + " need " + FormatMiB(need) +
+      ", but the local memory budget is " + FormatMiB(budget));
+}
+
 }  // namespace seeml::update

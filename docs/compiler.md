@@ -148,6 +148,17 @@ All seven units re-exported by the `update_passes.h` façade.
   description, and `ValidateGemmTiling` enforces that contract —
   overflow-safely, since it is the trust boundary for deserialized
   tilings — on any tiling handed in from outside.
+=======
+  target for this compiler) and cache/core geometry from sysctl/sysconf,
+  warning and falling back when a probe comes back empty.
+  `SuggestGemmTiling` derives BLIS-style blocking (kc×nc panel in half of
+  L1, mc×kc in half of L2) as a pure function of the host description, and
+  `ValidateGemmTiling` enforces that contract on any tiling handed in from
+  outside. The suggested (and validated) tiling reaches the delivered
+  program through `native_emitter`: the generated `build.sh` bakes it into
+  the vendored GEMM as build-line defines, overridable via
+  `SEEML_TILE_FLAGS` when cross-compiling for a device with different
+  caches.
 - **`tuner/`** — reinforcement tuning that refines the architecture hint on
   the real machine. `Ucb1Bandit` is a deterministic UCB1 multi-armed bandit
   (no RNG; ties break to the lowest index). `TilingCandidates` spans the

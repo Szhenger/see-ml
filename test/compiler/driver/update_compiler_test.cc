@@ -260,6 +260,27 @@ TEST(UpdateCompiler, HyperparametersReachThePlanHeader) {
   EXPECT_EQ(h.default_steps, 123u);
 }
 
+TEST(UpdateCompiler, RegatesTheBudgetOnTheExactCompiledFootprint) {
+  // The step-0 estimate is a lower bound blind to gradients, optimizer
+  // state, and transients; the driver must re-prove the budget against the
+  // bytes the runtime actually keeps resident — arena + plan blob.
+  SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 1);
+  UpdateConfig config = BaseConfig(kBatch);
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+  const uint64_t need = compiled.arena_size + compiled.plan.size();
+
+  config.memory_budget_bytes = need;
+  EXPECT_OK(UpdateCompiler(config).Compile(model));
+
+  // One byte short of the real footprint: the early lower bound admits it,
+  // the final gate must not.
+  config.memory_budget_bytes = need - 1;
+  const auto r = UpdateCompiler(config).Compile(model);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_STR_CONTAINS(r.error(), "cannot run locally");
+}
+
 TEST(UpdateCompiler, RejectsModelWithoutInputMetadata) {
   SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 15);
   model.input_name = "not_a_tensor";
