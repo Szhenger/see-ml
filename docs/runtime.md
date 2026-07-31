@@ -114,6 +114,14 @@ math is written.
 
 - **`durable_io`** — the runtime's only path for bytes that must survive a
   power cut: fsync'd sidecar, atomic rename, best-effort directory fsync.
+  Also the commit path's scaling and concurrency primitives:
+  `HashFileContent` streams a file's ContentHash64 one deterministic chunk
+  at a time, `DurableFileEdit` is a copy-on-write editor that patches byte
+  ranges of a sidecar and durably renames it into place, and `CommitLock`
+  (an OS-level flock, released even on crash) refuses a second update
+  committing to the same target instead of letting the rename race decide.
+  Commit memory is O(chunk), never O(model), and the hash is verified on
+  the exact copy being patched — no check-to-patch window.
 - **`checkpoint`** — the SEKP container: the arena's persistent segment,
   hash-bound to the exact plan that laid it out; fully verified before a
   byte reaches the arena.

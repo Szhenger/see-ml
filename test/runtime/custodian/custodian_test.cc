@@ -12,6 +12,7 @@
 
 #include "runtime/custodian/checkpoint.h"
 #include "runtime/custodian/durable_io.h"
+#include "source/identity/hash.h"
 #include "runtime/engine/contract.h"
 #include "test/framework/seetest.h"
 #include "test/support/scoped_temp_dir.h"
@@ -73,6 +74,81 @@ std::vector<uint8_t> Segment() {
   std::vector<uint8_t> seg(kBytes);
   std::iota(seg.begin(), seg.end(), 0);
   return seg;
+}
+
+TEST(DurableIo, StreamingFileHashMatchesContentHash64) {
+  ScopedTempDir dir;
+  // Cross the parallel hash's 1 MiB chunk boundary so the streamed fold
+  // reproduces the multi-chunk geometry, not just the single-chunk case.
+  std::vector<uint8_t> bytes((1u << 20) * 2 + 12345);
+  for (size_t i = 0; i < bytes.size(); ++i)
+    bytes[i] = static_cast<uint8_t>((i * 131) ^ (i >> 7));
+  const std::string path = dir.File("blob.bin");
+  ASSERT_OK(WriteFileDurable(path, bytes.data(), bytes.size()));
+
+  ASSERT_OK_AND_ASSIGN(uint64_t streamed, HashFileContent(path));
+  EXPECT_EQ(streamed, seeml::update::ContentHash64(bytes.data(), bytes.size()));
+
+  // Empty file: identical to hashing an empty buffer.
+  const std::string empty = dir.File("empty.bin");
+  ASSERT_OK(WriteFileDurable(empty, nullptr, 0));
+  ASSERT_OK_AND_ASSIGN(uint64_t empty_hash, HashFileContent(empty));
+  EXPECT_EQ(empty_hash, seeml::update::ContentHash64(nullptr, 0));
+}
+
+TEST(DurableIo, CommitLockIsExclusivePerTarget) {
+  ScopedTempDir dir;
+  const std::string target = dir.File("model.smf");
+  auto first = CommitLock::Acquire(target);
+  ASSERT_TRUE(first.has_value());
+  // Second committer to the same target is refused with a diagnostic.
+  auto second = CommitLock::Acquire(target);
+  ASSERT_FALSE(second.has_value());
+  EXPECT_STR_CONTAINS(second.error(), "another update is committing");
+  EXPECT_TRUE(WellFormedDiagnostic(second.error()));
+  // A different target is independent.
+  EXPECT_TRUE(CommitLock::Acquire(dir.File("other.smf")).has_value());
+  // Releasing the first lock frees the target.
+  first = CommitLock::Acquire(dir.File("third.smf"));
+  EXPECT_TRUE(CommitLock::Acquire(target).has_value());
+}
+
+TEST(DurableIo, DurableFileEditPatchesACopyAndDiscardsOnAbort) {
+  ScopedTempDir dir;
+  const std::string src = dir.File("src.bin");
+  const std::string dst = dir.File("dst.bin");
+  std::vector<uint8_t> bytes(256);
+  std::iota(bytes.begin(), bytes.end(), 0);
+  ASSERT_OK(WriteFileDurable(src, bytes.data(), bytes.size()));
+
+  {
+    // Abort path: destruction without Commit leaves no destination and no
+    // sidecar behind.
+    ASSERT_OK_AND_ASSIGN(auto edit, DurableFileEdit::Begin(src, dst));
+    EXPECT_EQ(edit.size(), bytes.size());
+    const uint8_t patch[4] = {0xAA, 0xBB, 0xCC, 0xDD};
+    ASSERT_OK(edit.WriteAt(16, patch, sizeof(patch)));
+  }
+  EXPECT_FALSE(std::ifstream(dst).good());
+  EXPECT_FALSE(std::ifstream(dst + ".tmp").good());
+
+  {
+    ASSERT_OK_AND_ASSIGN(auto edit, DurableFileEdit::Begin(src, dst));
+    // Bounds are enforced on the sidecar's size.
+    uint8_t two[2] = {0, 0};
+    EXPECT_ERROR(edit.ReadAt(bytes.size(), two, 1));
+    EXPECT_ERROR(edit.WriteAt(bytes.size() - 1, two, 2));
+    const uint8_t patch[4] = {0xAA, 0xBB, 0xCC, 0xDD};
+    ASSERT_OK(edit.WriteAt(16, patch, sizeof(patch)));
+    ASSERT_OK(edit.Commit());
+  }
+  ASSERT_OK_AND_ASSIGN(auto committed, ReadFileBytes(dst));
+  std::vector<uint8_t> expect = bytes;
+  expect[16] = 0xAA; expect[17] = 0xBB; expect[18] = 0xCC; expect[19] = 0xDD;
+  EXPECT_TRUE(committed == expect);
+  // The source is untouched.
+  ASSERT_OK_AND_ASSIGN(auto src_bytes, ReadFileBytes(src));
+  EXPECT_TRUE(src_bytes == bytes);
 }
 
 TEST(Checkpoint, RoundTripsTheSegmentAndStep) {

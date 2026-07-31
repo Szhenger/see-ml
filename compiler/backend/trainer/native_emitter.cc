@@ -214,6 +214,9 @@ int main(int argc, char** argv) {
   if (report->has_validation)
     std::fprintf(stderr, "seeml-update: validation loss %.6f -> %.6f\n",
                  report->val_initial_loss, report->val_final_loss);
+  if (report->has_val_accuracy)
+    std::fprintf(stderr, "seeml-update: validation accuracy %.4f -> %.4f\n",
+                 report->val_initial_accuracy, report->val_final_accuracy);
 
   if (!loss_log.empty()) {
     std::FILE* f = std::fopen(loss_log.c_str(), "w");
