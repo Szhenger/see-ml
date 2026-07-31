@@ -3,8 +3,11 @@
 All formats are little-endian; loaders reject big-endian hosts at compile
 time. Every multi-byte integer is packed without padding unless a struct is
 shown (structs are `#pragma pack(1)` and part of the ABI). Integrity hashing
-is 64-bit FNV-1a (`source/identity/hash.h`) — a corruption/mismatch detector, not a
-signature; authenticate plans in your update transport.
+comes from `source/identity/hash.h` — the deterministic parallel
+`ContentHash64` for whole-artifact identity, and its sibling `PlanSelfHash`
+for a blob whose hash field lives inside the sealed bytes — a
+corruption/mismatch detector, not a signature; authenticate plans in your
+update transport.
 
 ## SMF — SeeML Model Format (`.smf`, v2)
 
@@ -40,7 +43,11 @@ Op signatures: `MatMul(x, W)`, `AddBias(x, b)`, unary activations `(x)`,
 
 The absolute `data_offset` of every weight is preserved through compilation:
 it is how the emit table addresses the byte ranges that commit patches.
-`LoadSmf` records the whole file's FNV-1a as the model's identity.
+`LoadSmf` records the whole file's `ContentHash64` as the model's identity.
+`SaveSmf` refuses any value that would not fit its length/count field
+(names over 64 KiB, ranks or op-input counts over 255) rather than writing
+a truncated prefix ahead of a full payload, and reports success only after
+the stream has flushed and closed cleanly.
 
 ## SDS — SeeML Dataset (`.sds`, v1)
 
@@ -52,22 +59,29 @@ u32 pad; u64 label_dim
 records[num_samples]: f32 input[input_dim], then the label
 ```
 
-## SEEU — Update Plan (`.seeu`, v2)
+## SEEU — Update Plan (`.seeu`, v4)
 
 The fully AOT-compiled update: three instruction streams (train / eval /
 merge), the frozen weights, the persistent segment's initial image, and the
 emit table, addressed by a single `PlanHeader` (authoritative definition:
 `source/plan/schema.h`).
 
-Key v2 header fields:
+Key header fields:
 
 | field | meaning |
 |---|---|
-| `plan_hash` | FNV-1a of the blob with this field zeroed; verified on load |
-| `source_model_hash` | FNV-1a of the source `.smf`; commit refuses other files (0 = unbound) |
+| `plan_hash` | `PlanSelfHash` of the blob with this field zeroed; verified on load |
+| `source_model_hash` | `ContentHash64` of the source `.smf`; commit refuses other files (0 = unbound) |
 | `eval_instr_offset/count` | forward+loss program for validation gating |
 | `lr_schedule, warmup_steps, min_lr_factor` | runtime LR schedule (0 = constant) |
 | `clip_norm` | informational; clip instructions are baked into the stream |
+
+Version history: v2 added the eval program, integrity hashes, LR schedule,
+and int8 rodata opcodes; v3 moved `source_model_hash` to `ContentHash64`;
+v4 moved `plan_hash` to the chunked-parallel `PlanSelfHash`. The version
+gate rejects older plans — recompile. Loaders additionally prove `batch`
+nonzero and every I/O slot and instruction operand ref element-aligned;
+misaligned refs are load errors, not UB at dispatch.
 
 Tensor references are 64-bit words: bit 63 selects the address space
 (0 = mutable arena, 1 = read-only rodata), bits 0..62 are a byte offset.
@@ -82,14 +96,14 @@ the source `.smf`. Commit applies `W' = W + Δ` onto the file's pristine
 weights — a quantized plan never bakes quantization error into the committed
 model.
 
-## Checkpoint (`SEKP`, v2)
+## Checkpoint (`SEKP`, v3)
 
 ```
-u32 magic "SEKP"; u32 version = 2
+u32 magic "SEKP"; u32 version = 3
 u64 plan_hash        must match the plan's PlanHeader::plan_hash
 u64 step             1-indexed AdamW timestep at save
 u64 persistent_size  payload length
-u64 payload_hash     FNV-1a of the payload
+u64 payload_hash     ContentHash64 of the payload (v3; v2 used serial FNV-1a)
 payload              the arena's persistent segment (adapters + moments)
 ```
 
@@ -100,4 +114,9 @@ bit-flipped checkpoint is rejected before any byte reaches the arena.
 
 Model commits and checkpoints are written as `fsync`'d sidecar files followed
 by an atomic `rename` and a best-effort directory `fsync` — a power cut leaves
-either the old file or the new file, never a torn one.
+either the old file or the new file, never a torn one. Both platform branches
+honor the same contract: POSIX uses raw `write`/`fsync`/`rename`; Windows
+uses checked `WriteFile` calls, `FlushFileBuffers` (the fsync equivalent),
+and `MoveFileEx(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`, which —
+unlike CRT `rename` — can replace an existing file, so repeated checkpoints
+to one path work.
