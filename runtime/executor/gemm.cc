@@ -21,8 +21,28 @@ namespace {
 // + one B panel + one C panel) inside L1/L2 for typical embedded cache
 // geometries; the row-major inner loops vectorize under -O2 without
 // intrinsics, keeping the reference kernels portable.
-constexpr size_t kTileK = 64;
-constexpr size_t kTileN = 256;
+//
+// The defaults suit a generic embedded target; a package emitted by
+// seeml-update-compile overrides them on the build line with the geometry
+// the compiler's architecture analysis derived for the machine at hand
+// (see the generated build.sh). Tile choice affects throughput only, never
+// bits: the N tile picks traversal order, not reduction grouping, and the
+// K tile keeps the 4-wide unroll groups aligned as long as it stays a
+// multiple of the unroll width — enforced below, so a mistuned override
+// is a build error rather than a silent reproducibility break.
+#ifndef SEEML_GEMM_TILE_K
+#define SEEML_GEMM_TILE_K 64
+#endif
+#ifndef SEEML_GEMM_TILE_N
+#define SEEML_GEMM_TILE_N 256
+#endif
+constexpr size_t kTileK = SEEML_GEMM_TILE_K;
+constexpr size_t kTileN = SEEML_GEMM_TILE_N;
+static_assert(kTileK > 0 && kTileK % 4 == 0,
+              "the K tile must be a positive multiple of the 4-wide unroll "
+              "so reduction grouping — and therefore every bit of every "
+              "result — is independent of the tiling");
+static_assert(kTileN > 0, "the N tile must be positive");
 
 // Shared blocked core over the C-row range [m_begin, m_end):
 // C[m,N] (+)= alpha * A[m,K] @ B[K,N] with B row-major. GemmNN/GemmAccNN/
