@@ -213,6 +213,27 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
       pm.Add("optimizer", [&](sir::Block& b) {
         return OptimizerSynthesizer(config_.optimizer).Run(b, param_grads);
       });
+    // Phase C, the optimization phase's sweep: no op whose results nothing
+    // reads may survive to lowering. The driver builds its programs
+    // minimally, so today this proves an invariant (0 removed) more than it
+    // shrinks programs — and it is the seam where rewriting passes (fusion,
+    // simplification) get to leave dead ops behind. Roots are every value
+    // read outside the stream: the loss slot, the parameter gradients, and
+    // the whole primal snapshot, which lowers again as the eval program.
+    pm.Add("dce", [&](sir::Block& b) -> std::expected<void, std::string> {
+      std::unordered_set<const sir::Value*> roots;
+      roots.insert(loss);
+      for (const auto& [p, g] : param_grads) roots.insert(g);
+      for (const sir::Operation* op : primal_ops)
+        for (const auto& r : op->results()) roots.insert(r.get());
+      auto removed = DeadCodeElimination().Run(b, roots);
+      if (!removed) return std::unexpected(removed.error());
+      if (*removed != 0)
+        seeml::diag::Note(generating::kDriver,
+                          "dce removed " + std::to_string(*removed) +
+                              " dead op(s)");
+      return {};
+    });
     if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
   }
 

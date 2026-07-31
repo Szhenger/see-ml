@@ -61,6 +61,15 @@ records[num_samples]: f32 input[input_dim], then the label
 
 ## SEEU — Update Plan (`.seeu`, v4)
 
+**Version negotiation.** The runtime accepts every plan version in
+`[kSeeuOldestReadable, kSeeuVersion]` (`source/plan/schema.h`), not only the
+version it was built at. Additive format changes — new header fields carved
+out of `reserved`, zero meaning "feature absent" — bump `kSeeuVersion` only,
+so already-deployed runtimes keep reading newer-compiled-but-compatible
+plans' predecessors; semantic breaks (a field changing meaning or layout)
+raise `kSeeuOldestReadable`, because misreading an old plan is worse than
+rejecting it. Plans newer than the runtime are always rejected.
+
 The fully AOT-compiled update: three instruction streams (train / eval /
 merge), the frozen weights, the persistent segment's initial image, and the
 emit table, addressed by a single `PlanHeader` (authoritative definition:

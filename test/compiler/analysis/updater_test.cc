@@ -6,6 +6,7 @@
 
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 #include "compiler/analysis/update_passes.h"
@@ -105,6 +106,51 @@ TEST(PassManager, NamesThePassThatViolatesInvariants) {
 // =============================================================================
 // ConvLowering
 // =============================================================================
+
+TEST(DeadCodeElimination, SweepsDeadChainsKeepsRootsUsesAndEffects) {
+  sir::Block block;
+  sir::Value* x = block.addArgument(sir::DataType::F32, sir::Shape{2, 4});
+
+  // Live: rooted result.
+  sir::Operation* live = block.appendOp("sc_high.relu");
+  live->addOperand(x);
+  sir::Value* rooted =
+      live->addResult("live.y", sir::DataType::F32, sir::Shape{2, 4});
+
+  // Dead chain: a -> b, b unused and unrooted; the backward sweep must
+  // remove b first and then the now-useless a in the same run.
+  sir::Operation* a = block.appendOp("sc_high.gelu");
+  a->addOperand(x);
+  sir::Value* av =
+      a->addResult("dead.a", sir::DataType::F32, sir::Shape{2, 4});
+  sir::Operation* b = block.appendOp("sc_high.silu");
+  b->addOperand(av);
+  b->addResult("dead.b", sir::DataType::F32, sir::Shape{2, 4});
+
+  // Effectful with an unused result: must survive on the effect alone.
+  sir::Operation* step = block.appendOp("sc_low.sgd_step");
+  step->addOperand(rooted);
+  step->addResult("step.tick", sir::DataType::F32, sir::Shape{});
+
+  // Storage declaration with no users: kept — the binder holds its name.
+  sir::Operation* mem = block.appendOp("sc_mem.param");
+  mem->addResult("orphan.param", sir::DataType::F32, sir::Shape{4});
+
+  std::unordered_set<const sir::Value*> roots{rooted};
+  ASSERT_OK_AND_ASSIGN(size_t removed,
+                       DeadCodeElimination().Run(block, roots));
+  EXPECT_EQ(removed, 2u);
+  EXPECT_EQ(CountOps(block, "sc_high.gelu"), 0u);
+  EXPECT_EQ(CountOps(block, "sc_high.silu"), 0u);
+  EXPECT_EQ(CountOps(block, "sc_high.relu"), 1u);
+  EXPECT_EQ(CountOps(block, "sc_low.sgd_step"), 1u);
+  EXPECT_EQ(CountOps(block, "sc_mem.param"), 1u);
+  ASSERT_OK(block.verify());
+
+  // Idempotent: a second sweep finds nothing.
+  ASSERT_OK_AND_ASSIGN(size_t again, DeadCodeElimination().Run(block, roots));
+  EXPECT_EQ(again, 0u);
+}
 
 TEST(ConvLowering, LowersConvToIm2colGemm) {
   sir::Block block;

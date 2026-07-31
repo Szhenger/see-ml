@@ -27,6 +27,24 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // the whole blob. Older plans are rejected by the version gate; recompile.
 inline constexpr uint32_t kSeeuVersion = 4;
 
+// Version negotiation policy. The runtime accepts every version in
+// [kSeeuOldestReadable, kSeeuVersion], not just the version it was built
+// at — a fleet's deployed runtimes must not be stranded by every format
+// bump. The two constants move under different rules:
+//   - An ADDITIVE change — new fields carved out of `reserved`, with zero
+//     meaning "feature absent" — bumps kSeeuVersion only. Older plans keep
+//     loading; their zeroed fields select the pre-change behavior.
+//   - A SEMANTIC break — a field changes meaning or layout, as v3 did to
+//     source_model_hash — raises kSeeuOldestReadable to the breaking
+//     version, because misreading an old plan is worse than rejecting it.
+// v1 and v2 are below the floor: v1 lacks the integrity contract entirely,
+// and a v2 source_model_hash would mis-verify under v3's hash. Newer plans
+// than the runtime are always rejected — forward compatibility cannot be
+// proven from an unknown format.
+inline constexpr uint32_t kSeeuOldestReadable = 3;
+static_assert(kSeeuOldestReadable <= kSeeuVersion,
+              "the readable floor cannot exceed the current version");
+
 // The plan is serialized by memcpy of host integers/structs; the documented
 // on-disk contract is little-endian. Big-endian hosts need byte-swapping I/O.
 static_assert(std::endian::native == std::endian::little,

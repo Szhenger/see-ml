@@ -9,7 +9,9 @@
 //
 //   updater/   pass management + structural lowering:
 //              PassManager (runs SIR passes under the Block::verify
-//              invariant gate), ConvLowering (conv2d -> im2col-GEMM form)
+//              invariant gate), ConvLowering (conv2d -> im2col-GEMM form),
+//              DeadCodeElimination (the optimization phase's sweep: proves
+//              the emitted programs carry no unreferenced compute)
 //   algebra/   the adapter linear algebra and kernel fusion:
 //              LoraGrafter (C = X@W  ->  C' = X@W + (α/r)·(X@A)@B),
 //              MergeBuilder (fused Δ = (α/r)·A@B via sc_low.gemm_acc)
@@ -34,6 +36,7 @@
 #include "compiler/analysis/calculus/optimizer.h"     // IWYU pragma: export
 #include "compiler/analysis/reviewer/quantization.h"  // IWYU pragma: export
 #include "compiler/analysis/updater/conv_lowering.h"  // IWYU pragma: export
+#include "compiler/analysis/updater/dce.h"            // IWYU pragma: export
 #include "compiler/analysis/updater/pass_manager.h"   // IWYU pragma: export
 
 #endif  // SEEML_COMPILER_ANALYSIS_UPDATE_PASSES_H_

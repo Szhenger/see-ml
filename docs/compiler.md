@@ -31,7 +31,8 @@ SMF ingest ──▶ feasibility gate ──▶ forward SIR (+ frozen teacher)
            ──▶ loss grafting
            ──▶ pass phase A: conv-lowering, lora-graft     (PassManager)
            ──▶ primal snapshot (becomes the eval program)
-           ──▶ pass phase B: autodiff, optimizer synthesis (PassManager)
+           ──▶ pass phase B: autodiff, optimizer synthesis,
+               dead-code sweep                              (PassManager)
            ──▶ merge program (Δ = (α/r)·A@B)
            ──▶ int8 quantization review
            ──▶ segmented arena binding: RODATA | PERSISTENT | IO | TRANSIENT
@@ -106,7 +107,13 @@ All seven units re-exported by the `update_passes.h` façade.
   corrupting rewrite is attributed to its author; a pass's own error is
   propagated verbatim. `ConvLowering` rewrites `sc_high.conv2d` into
   im2col + filter-matrix + GEMM (+ bias) + col2im, rejecting group/dilated
-  forms it cannot model.
+  forms it cannot model. `DeadCodeElimination` is the optimization phase's
+  sweep, run after autodiff and optimizer synthesis: every op whose
+  results are unrooted (roots: the loss slot, parameter gradients, the
+  primal snapshot the eval program lowers) and unused is removed — today
+  the driver's programs are minimal by construction and the sweep proves
+  it (0 removed); it is the seam where rewriting passes (fusion,
+  simplification) leave dead ops to be collected.
 - **`algebra/`** — kernel-fusion algebra. `LoraGrafter` grafts rank-r
   adapters onto every eligible frozen MatMul (A randn-initialized, B zeros,
   so step 0 is exactly the base model). A tied weight — one frozen tensor
