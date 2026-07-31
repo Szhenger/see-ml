@@ -78,10 +78,62 @@ The rest of July was rapid maturation:
   trainer/architecture/tuner — with `runtime/` and `test/` mirroring that
   structure.
 
+## Phase 5 — The adversarial audit and the great hardening (July 31, 2026)
+
+Days after the partitioning sweep, the codebase went under a multi-agent
+adversarial review: fifteen parallel reviewers (one per subsystem slice,
+plus a dedicated concurrency specialist sweeping the whole tree), findings
+deduplicated, then every finding handed to an independent skeptic
+instructed to refute it by reading — and in one case compiling and
+reproducing — the actual code. **34 bugs were confirmed, none refuted**,
+spanning eight defect categories: memory safety, logic, concurrency,
+error handling, I/O & persistence, API contracts, integer arithmetic, and
+one defect in the test framework itself.
+
+All 34 were fixed in a single hardening pass. The headline repairs:
+
+- **Tied-weight merge corruption** (the one high-severity compiler bug):
+  a frozen weight consumed by two MatMuls got per-site adapter pairs whose
+  deltas were *both* committed to the single file range — `W + Δ₁ + Δ₂`,
+  a model the training graph never computed. Tied weights now share one
+  adapter pair, making the merge algebra exact; `MergeBuilder` rejects
+  duplicates defensively.
+- **Transactional plan loading**: a rejected re-`Load` used to leave the
+  engine half-mutated (dangling rodata, programs from one plan validated
+  against another's arena). `Initialize` now validates into locals and
+  commits only after every contract passes.
+- **Windows durability**: `WriteFileDurable` gained a real Win32 branch —
+  checked writes, `FlushFileBuffers`, `MoveFileEx` replace — where CRT
+  `rename` had failed every checkpoint overwrite after the first, unfsynced.
+- **Exception-safe `ParallelFor`**: a throwing chunk body had been a
+  cross-thread use-after-free of the stack-allocated job (or a straight
+  `std::terminate` on a worker); exceptions are now captured and rethrown
+  on the submitting thread after the loop retires.
+- **Contract closure**: batch proven nonzero, every I/O slot and operand
+  ref element-aligned, label widths checked against the narrowest softmax
+  in *any* program, `merged_` invalidated by training and checkpoint
+  loads, overflow-proof bounds math in the dump tool, and a test-framework
+  fix making `EXPECT_LE/GE` fail on NaN — the exact value an ML suite most
+  needs to catch.
+
+The same pass finished wiring the parallel substrate through the whole
+update path, closing the gaps the concurrency specialist flagged: commit's
+delta-apply fans over `ParallelFor`; evaluation pipelines batches through
+`BatchPipeline` like training (and rewinds, so the regression gate compares
+identical sample multisets); checkpoint payloads hash with the parallel
+`ContentHash64` (SEKP v3); the plan seal became the chunked-parallel
+`PlanSelfHash`, one canonical function across compiler, engine, and dump
+tool (`.seeu` v4); and randn adapter initialization moved to a
+counter-based splitmix64 + Box–Muller stream — parallel *within* a tensor,
+bit-identical at any thread count, and freed from
+`std::normal_distribution`'s implementation-defined algorithm. The audit
+closed with a clean `-Wall -Wextra -Werror` rebuild and all 24 suites —
+245 tests — green.
+
 ## In one sentence
 
 The repo evolved from a hand-rolled C compiler (SeeC, completed July 2025),
 through a C++ rewrite that pivoted mid-stream into an ONNX inference compiler
 (SeeC++, October 2025 – June 2026), into today's SeeML — a training and
 model-update compiler with a fully partitioned compiler/runtime/test
-architecture.
+architecture, adversarially audited and hardened end to end in July 2026.

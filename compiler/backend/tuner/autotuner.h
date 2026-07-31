@@ -40,7 +40,9 @@ struct AutotuneResult {
 
 /// Spends `trials` measurements over `candidates` under UCB1 and returns
 /// the winner. `trials` is clamped up to candidates.size() so every arm is
-/// measured at least once.
+/// measured at least once. An empty candidate list yields the conservative
+/// default tiling (SuggestGemmTiling of an all-defaults HostArchInfo) with
+/// no measurements recorded — `best` is always a valid geometry.
 AutotuneResult AutotuneGemmTiling(std::span<const GemmTiling> candidates,
                                   const TilingBenchmarkFn& measure,
                                   size_t trials);

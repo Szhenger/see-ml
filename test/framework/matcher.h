@@ -81,9 +81,17 @@ bool CmpLt(const A& a, const B& b) {
     return a < b;
 }
 
+// LE/GE are evaluated directly, never as negated LT: that identity only
+// holds for total orders, and IEEE-754 floats are not one. With a NaN
+// operand every comparison is false, so !(b < a) would PASS the assertion —
+// EXPECT_LE(loss, 2.0) silently green on a diverged NaN loss is exactly the
+// failure an ML test framework exists to catch.
 template <typename A, typename B>
 bool CmpLe(const A& a, const B& b) {
-  return !CmpLt(b, a);
+  if constexpr (kSafeIntegerCompare<A, B>)
+    return std::cmp_less_equal(a, b);
+  else
+    return a <= b;
 }
 
 template <typename A, typename B>
@@ -93,7 +101,10 @@ bool CmpGt(const A& a, const B& b) {
 
 template <typename A, typename B>
 bool CmpGe(const A& a, const B& b) {
-  return !CmpLt(a, b);
+  if constexpr (kSafeIntegerCompare<A, B>)
+    return std::cmp_greater_equal(a, b);
+  else
+    return a >= b;
 }
 
 // --- Failure message builders ----------------------------------------------------

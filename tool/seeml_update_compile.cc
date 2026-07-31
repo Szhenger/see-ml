@@ -141,6 +141,21 @@ std::string JsonEscape(const std::string& s) {
   return out;
 }
 
+/// Single-quotes `s` for POSIX sh, escaping embedded quotes ('\''): the
+/// path comes from user-supplied --out, and a bare quote in it would
+/// terminate the quoting and execute the remainder as shell code.
+std::string ShellQuote(const std::string& s) {
+  std::string out = "'";
+  for (char c : s) {
+    if (c == '\'')
+      out += "'\\''";
+    else
+      out += c;
+  }
+  out += '\'';
+  return out;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -323,11 +338,17 @@ int main(int argc, char** argv) {
                    a.r, a.scale, a.quant_scale);
     }
     std::fprintf(f, "\n  ]\n}\n");
-    std::fclose(f);
+    // ferror catches any failed fprintf above; fclose catches the final
+    // flush. A truncated report that exits 0 hands downstream automation
+    // invalid JSON with a success status — the silent default this tool's
+    // header promises never to have.
+    const bool write_failed = std::ferror(f) != 0;
+    if (std::fclose(f) != 0 || write_failed)
+      return Fail("short write to report '" + *report_path + "'");
   }
 
   if (want_build) {
-    const std::string cmd = "sh '" + paths->build_script + "'";
+    const std::string cmd = "sh " + ShellQuote(paths->build_script);
     if (std::system(cmd.c_str()) != 0) return Fail("build.sh failed");
   }
   return 0;
