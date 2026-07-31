@@ -93,6 +93,50 @@ TEST(PlanValidator, QuantizedWeightsMustLiveInRodata) {
   EXPECT_OK(ValidateInstruction(q8, kArena, kRodata));
 }
 
+TEST(PlanValidator, RejectsWriteRangesAliasingOtherOperands) {
+  // The kernels are compiled with SEEML_RESTRICT: a written range that
+  // overlaps another operand is undefined behavior, so a plan carrying one
+  // must be a load error, never a dispatch.
+  const auto r = ValidateInstruction(
+      AddEw(up::MakeArenaRef(0), up::MakeArenaRef(512),
+            up::MakeArenaRef(128), 64),  // out 128..384 overlaps in0 0..256
+      kArena, kRodata);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_STR_CONTAINS(r.error(), "alias");
+  EXPECT_TRUE(WellFormedDiagnostic(r.error()));
+}
+
+TEST(PlanValidator, AllowsReadOnlyOperandsToAlias) {
+  // in0 == in1 (x + x): reads may share a range; only writes make an alias.
+  EXPECT_OK(ValidateInstruction(AddEw(up::MakeArenaRef(0), up::MakeArenaRef(0),
+                                      up::MakeArenaRef(512), 64),
+                                kArena, kRodata));
+}
+
+TEST(PlanValidator, InPlaceOptimizerStepsAliasOnlyThroughOneRef) {
+  // SGD updates the param through a single read-write ref — legal. The same
+  // range surfacing again as the gradient operand is an alias — rejected.
+  up::UpdateInstruction sgd;
+  sgd.opcode = static_cast<uint16_t>(up::OpCode::kSgdStep);
+  sgd.in[0] = up::MakeArenaRef(0);
+  sgd.in[1] = up::MakeArenaRef(256);
+  sgd.out[0] = 64;
+  EXPECT_OK(ValidateInstruction(sgd, kArena, kRodata));
+  sgd.in[1] = up::MakeArenaRef(128);  // grad overlaps the updated param
+  EXPECT_ERROR(ValidateInstruction(sgd, kArena, kRodata));
+
+  up::UpdateInstruction adamw;
+  adamw.opcode = static_cast<uint16_t>(up::OpCode::kAdamWStep);
+  adamw.in[0] = up::MakeArenaRef(0);    // param (in place)
+  adamw.in[1] = up::MakeArenaRef(256);  // grad
+  adamw.in[2] = up::MakeArenaRef(512);  // m (in place)
+  adamw.in[3] = up::MakeArenaRef(768);  // v (in place)
+  adamw.out[0] = 64;
+  EXPECT_OK(ValidateInstruction(adamw, kArena, kRodata));
+  adamw.in[3] = up::MakeArenaRef(512);  // v aliases m: two written ranges
+  EXPECT_ERROR(ValidateInstruction(adamw, kArena, kRodata));
+}
+
 TEST(PlanValidator, BoundsMathIsOverflowSafe) {
   uint64_t out = 0;
   EXPECT_TRUE(MulOk(1u << 20, 1u << 20, &out));

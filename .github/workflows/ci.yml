@@ -1,0 +1,66 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: gcc-release
+            cc: gcc-14
+            cxx: g++-14
+            sanitize: ""
+          - os: ubuntu-24.04
+            name: clang-asan-ubsan
+            cc: clang-18
+            cxx: clang++-18
+            sanitize: "address;undefined"
+          # The runtime executes kernels on a worker pool and pipelines the
+          # batch feeder; TSan proves the synchronization, the determinism
+          # suites prove the numerics.
+          - os: ubuntu-24.04
+            name: clang-tsan
+            cc: clang-18
+            cxx: clang++-18
+            sanitize: "thread"
+          - os: macos-15
+            name: appleclang-release
+            cc: cc
+            cxx: c++
+            sanitize: ""
+    runs-on: ${{ matrix.os }}
+    name: ${{ matrix.name }}
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DSEEML_SANITIZE="${{ matrix.sanitize }}"
+      - name: Build
+        run: cmake --build build -j
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --parallel 4
+
+  fuzz-smoke:
+    # Short deterministic fuzz pass on every PR; long campaigns run elsewhere.
+    runs-on: ubuntu-24.04
+    env:
+      CC: clang-18
+      CXX: clang++-18
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DSEEML_FUZZ=ON
+      - name: Build harness
+        run: cmake --build build -j --target seeml_fuzz_formats
+      - name: Fuzz (60s)
+        run: ./build/seeml_fuzz_formats -max_total_time=60 -rss_limit_mb=2048

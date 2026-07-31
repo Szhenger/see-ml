@@ -398,6 +398,16 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   std::memcpy(result.plan.data() + offsetof(PlanHeader, plan_hash), &plan_hash,
               sizeof(plan_hash));
 
+  // The step-0 gate proved a lower bound before any work was done; every
+  // byte is bound now, so prove the exact resident footprint — the arena
+  // the runtime will allocate plus the plan blob it keeps loaded — also
+  // fits the budget. Optimizer state, gradients, and transients, which the
+  // early estimate deliberately excludes, are all inside the arena here.
+  if (auto fits = CheckPlanFitsLocally(header.arena_size, result.plan.size(),
+                                       config_.memory_budget_bytes);
+      !fits)
+    return std::unexpected(fits.error());
+
   // --- 13. Debug hooks + report. ----------------------------------------------
   std::ostringstream dump;
   block.print(dump);
