@@ -131,7 +131,11 @@ class UpdateEngine {
   void ExecuteTrainOnce();
 
  private:
-  [[nodiscard]] std::expected<void, std::string> Initialize();
+  /// Validates the candidate plan and commits engine state only if every
+  /// contract passes: a rejected re-Load leaves the previous plan loaded
+  /// and fully usable.
+  [[nodiscard]] std::expected<void, std::string> Initialize(
+      const uint8_t* plan, size_t plan_size);
   /// The training loop itself; Train wraps it with the diagnostics contract.
   [[nodiscard]] std::expected<TrainReport, std::string> TrainImpl(
       Dataset& data, uint64_t steps, const TrainOptions& options);

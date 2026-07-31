@@ -55,8 +55,7 @@ PlanHeader HeaderOf(const std::vector<uint8_t>& plan) {
 /// corruption gate. (The gate itself is covered by RejectsCorruptedBlob.)
 void ResealPlan(std::vector<uint8_t>& plan) {
   constexpr size_t kHashAt = offsetof(PlanHeader, plan_hash);
-  std::memset(plan.data() + kHashAt, 0, sizeof(uint64_t));
-  const uint64_t h = Fnv1a64(plan.data(), plan.size());
+  const uint64_t h = PlanSelfHash(plan.data(), plan.size(), kHashAt);
   std::memcpy(plan.data() + kHashAt, &h, sizeof(h));
 }
 

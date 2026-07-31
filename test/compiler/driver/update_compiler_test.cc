@@ -137,19 +137,15 @@ TEST(UpdateCompiler, TiedWeightMaterializesOnce) {
   ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
                        UpdateCompiler(config).Compile(model));
 
-  // The tied tensor resolves to a single SIR value: each consuming MatMul
-  // still gets its own adapter, but both share one frozen rodata copy and
-  // their emit entries patch the same source byte range.
+  // The tied tensor resolves to a single SIR value, and both consuming
+  // MatMuls share ONE adapter pair: per-site pairs would train fine but
+  // commit W + Δ_1 + Δ_2 to the single file range, polluting every site
+  // with every other site's delta. One adapter -> one delta -> one emit
+  // entry, and the committed weight is exactly the W + Δ every site
+  // computed during training.
   const PlanHeader h = HeaderOf(compiled);
-  ASSERT_EQ(compiled.adapters.size(), 2u);
-  EXPECT_EQ(compiled.adapters[0].weight_rodata_ref,
-            compiled.adapters[1].weight_rodata_ref);
-  ASSERT_EQ(h.emit_count, 2u);
-  std::vector<EmitEntry> emits(h.emit_count);
-  std::memcpy(emits.data(), compiled.plan.data() + h.emit_table_offset,
-              h.emit_count * sizeof(EmitEntry));
-  EXPECT_EQ(emits[0].smf_data_offset, emits[1].smf_data_offset);
-  EXPECT_EQ(emits[0].byte_size, emits[1].byte_size);
+  ASSERT_EQ(compiled.adapters.size(), 1u);
+  ASSERT_EQ(h.emit_count, 1u);
 }
 
 TEST(UpdateCompiler, MseLossUsesDenseLabels) {

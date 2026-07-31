@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -26,9 +28,13 @@ thread_local bool tls_job_owner = false;
 
 size_t ResolveAutoThreadCount() {
   if (const char* env = std::getenv("SEEML_THREADS")) {
+    // strtoll, not strtoul: strtoul silently accepts "-1" and wraps it to
+    // ULONG_MAX, which would become the pool width. Negative, overflowing,
+    // or malformed values all fall back to hardware_concurrency.
     char* end = nullptr;
-    const unsigned long v = std::strtoul(env, &end, 10);
-    if (end != env && *end == '\0' && v > 0)
+    errno = 0;
+    const long long v = std::strtoll(env, &end, 10);
+    if (end != env && *end == '\0' && errno != ERANGE && v > 0)
       return static_cast<size_t>(v);
   }
   const unsigned hw = std::thread::hardware_concurrency();
@@ -49,15 +55,34 @@ struct Job {
   alignas(64) std::atomic<size_t> next{0};
   alignas(64) std::atomic<size_t> done{0};
   alignas(64) std::atomic<size_t> holders{0};
+  // First exception thrown by a chunk body. Captured here so DrainJob never
+  // throws: an unwind out of a worker would call std::terminate, and an
+  // unwind out of Run() would destroy this stack-allocated Job while workers
+  // still hold pointers to it. Rethrown by Run() after the loop retires.
+  std::atomic<bool> failed{false};
+  std::mutex error_mutex;
+  std::exception_ptr error;
 };
 
 void DrainJob(Job& job) {
   for (;;) {
     const size_t c = job.next.fetch_add(1, std::memory_order_relaxed);
     if (c >= job.chunks) return;
-    const size_t begin = c * job.grain;
-    const size_t end = std::min(begin + job.grain, job.n);
-    job.fn(job.ctx, begin, end, c);
+    // Once a body has thrown, remaining chunks are claimed but not executed:
+    // `done` still reaches `chunks`, so the submitter's wait always finishes.
+    if (!job.failed.load(std::memory_order_relaxed)) {
+      const size_t begin = c * job.grain;
+      const size_t end = std::min(begin + job.grain, job.n);
+      try {
+        job.fn(job.ctx, begin, end, c);
+      } catch (...) {
+        {
+          std::lock_guard<std::mutex> lock(job.error_mutex);
+          if (!job.error) job.error = std::current_exception();
+        }
+        job.failed.store(true, std::memory_order_relaxed);
+      }
+    }
     // Release pairs with the caller's acquire load of `done`: chunk results
     // are visible before the loop is observed complete.
     job.done.fetch_add(1, std::memory_order_acq_rel);
@@ -102,14 +127,20 @@ class WorkerPool {
       ++epoch_;
     }
     work_cv_.notify_all();
+    // DrainJob never throws (body exceptions are captured in the Job), so
+    // the holder wait below always runs and the Job outlives every worker
+    // reference even when a chunk body failed.
     DrainJob(job);
-    std::unique_lock<std::mutex> lock(mutex_);
-    done_cv_.wait(lock, [&] {
-      return job.done.load(std::memory_order_acquire) == job.chunks &&
-             job.holders.load(std::memory_order_acquire) == 0;
-    });
-    job_ = nullptr;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      done_cv_.wait(lock, [&] {
+        return job.done.load(std::memory_order_acquire) == job.chunks &&
+               job.holders.load(std::memory_order_acquire) == 0;
+      });
+      job_ = nullptr;
+    }
     tls_job_owner = false;
+    if (job.error) std::rethrow_exception(job.error);
   }
 
  private:

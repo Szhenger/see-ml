@@ -2,6 +2,7 @@
 
 #include <cassert>
 #include <cmath>
+#include <limits>
 
 namespace seeml::update {
 
@@ -16,7 +17,10 @@ size_t Ucb1Bandit::Select() const {
     if (arms_[i].pulls == 0) return i;
 
   size_t best = 0;
-  double best_score = -1.0;
+  // -inf, not a finite sentinel: rewards are only "higher is better" and may
+  // all be negative (e.g. reward = -latency), where a finite sentinel would
+  // pin the argmax to arm 0.
+  double best_score = -std::numeric_limits<double>::infinity();
   const double log_total = std::log(static_cast<double>(total_pulls_));
   for (size_t i = 0; i < arms_.size(); ++i) {
     const double bonus = exploration_ *

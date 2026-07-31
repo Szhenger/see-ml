@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "source/parallel/parallel_for.h"
 
@@ -10,13 +11,15 @@
 // The integrity primitives shared by the compiler and the runtime.
 //
 // Every artifact boundary in the update pipeline is hash-bound:
-//   - PlanHeader::plan_hash        (Fnv1a64) detects a corrupted / truncated
-//                                   .seeu blob; hashed incrementally in spans
+//   - PlanHeader::plan_hash        (PlanSelfHash) detects a corrupted /
+//                                   truncated .seeu blob; the hash field
+//                                   itself is treated as zero
 //   - PlanHeader::source_model_hash (ContentHash64) binds a plan to the exact
 //                                   .smf file whose byte offsets its emit
 //                                   table patches
-//   - checkpoint plan_hash + payload_hash (Fnv1a64) bind a checkpoint to its
-//                                   plan and detect flash corruption on resume
+//   - checkpoint plan_hash + payload_hash (ContentHash64) bind a checkpoint
+//                                   to its plan and detect flash corruption
+//                                   on resume
 //
 // Neither hash is cryptographic; the threat model is corruption and
 // accidental mismatch (wrong file, stale artifact), not an adversary forging
@@ -109,6 +112,46 @@ inline uint64_t ContentHash64(const uint8_t* data, size_t size) {
                   partial[chunk_index] =
                       StripedFnv1a64(data + begin, end - begin);
                 });
+  }
+
+  uint64_t h = kFnvOffsetBasis;
+  for (size_t c = 0; c < (chunks ? chunks : 1); ++c)
+    h = FnvMixWord(h, partial[c]);
+  return FnvMixWord(h, size);
+}
+
+/// Deterministic parallel self-hash of a plan blob: ContentHash64's chunked
+/// striped fold, with the 8-byte hash field at `hash_offset` treated as
+/// zero, so the seal can live inside the sealed bytes. One canonical
+/// function for both sides of the contract — the compiler writing
+/// PlanHeader::plan_hash and the engine verifying it — replacing the serial
+/// byte-at-a-time Fnv1a64 pass over what is mostly megabytes of frozen
+/// weights (plan format v4).
+inline uint64_t PlanSelfHash(const uint8_t* plan, size_t size,
+                             size_t hash_offset) {
+  const size_t chunks = ParallelChunkCount(size, kContentHashChunk);
+  uint64_t partial[kMaxParallelChunks] = {};
+
+  auto hash_chunk = [&](size_t begin, size_t end, size_t chunk_index) {
+    if (hash_offset >= end || hash_offset + sizeof(uint64_t) <= begin) {
+      partial[chunk_index] = StripedFnv1a64(plan + begin, end - begin);
+      return;
+    }
+    // The rare chunk overlapping the hash field hashes a patched copy; the
+    // field is 8 bytes in a chunk of up to 1 MiB, so this stays off every
+    // other chunk's path.
+    std::vector<uint8_t> patched(plan + begin, plan + end);
+    for (size_t i = 0; i < sizeof(uint64_t); ++i) {
+      const size_t at = hash_offset + i;
+      if (at >= begin && at < end) patched[at - begin] = 0;
+    }
+    partial[chunk_index] = StripedFnv1a64(patched.data(), patched.size());
+  };
+
+  if (chunks <= 1) {
+    hash_chunk(0, size, 0);
+  } else {
+    ParallelFor(size, kContentHashChunk, hash_chunk);
   }
 
   uint64_t h = kFnvOffsetBasis;

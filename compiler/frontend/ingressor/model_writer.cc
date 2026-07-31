@@ -1,5 +1,6 @@
 #include "compiler/frontend/ingressor/model_writer.h"
 
+#include <cstdint>
 #include <cstring>
 #include <fstream>
 #include <vector>
@@ -38,6 +39,35 @@ struct Writer {
 
 std::expected<void, std::string> SaveSmf(const std::string& path,
                                          SmfModel& model) {
+  // Every length/count below is narrowed into a fixed-width prefix while the
+  // full payload is written; a wrapped prefix would be silent on-disk
+  // corruption, so reject anything that does not fit its field first.
+  auto name_ok = [](const std::string& s) { return s.size() <= UINT16_MAX; };
+  if (model.tensors.size() > UINT32_MAX)
+    return tokenizing::Error("too many tensors to serialize");
+  if (model.ops.size() > UINT32_MAX)
+    return tokenizing::Error("too many ops to serialize");
+  if (!name_ok(model.input_name) || !name_ok(model.output_name))
+    return tokenizing::Error("model input/output name is too long");
+  for (const auto& t : model.tensors) {
+    if (!name_ok(t.name))
+      return tokenizing::TensorError(t.name, "name is too long to serialize");
+    if (t.dims.size() > UINT8_MAX)
+      return tokenizing::TensorError(t.name, "has too many dims to serialize");
+  }
+  for (const auto& op : model.ops) {
+    if (!name_ok(op.name) || !name_ok(op.output))
+      return tokenizing::Error("op '" + op.name +
+                               "' has a name too long to serialize");
+    if (op.inputs.size() > UINT8_MAX)
+      return tokenizing::Error("op '" + op.name +
+                               "' has too many inputs to serialize");
+    for (const auto& in : op.inputs)
+      if (!name_ok(in))
+        return tokenizing::Error("op '" + op.name +
+                                 "' has an input name too long to serialize");
+  }
+
   // Pass 1: serialize the header/metadata with zeroed data offsets to learn
   // the metadata section size, then lay out the 64-aligned data section.
   auto serialize_meta = [&](Writer& w) {
@@ -94,7 +124,11 @@ std::expected<void, std::string> SaveSmf(const std::string& path,
   if (!f) return tokenizing::FileError("cannot write", path);
   f.write(reinterpret_cast<const char*>(w.buf.data()),
           static_cast<std::streamsize>(w.buf.size()));
-  if (!f) return tokenizing::FileError("short write to", path);
+  // Close before the state check: the tail of the buffer is flushed at
+  // close, and a flush failure after an unchecked implicit close would be
+  // reported as success.
+  f.close();
+  if (f.fail()) return tokenizing::FileError("short write to", path);
   // The model now corresponds to the saved bytes: bind its identity so a
   // plan compiled from this in-memory model patches this exact file.
   model.content_hash = ContentHash64(w.buf.data(), w.buf.size());

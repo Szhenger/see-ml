@@ -20,10 +20,13 @@ std::expected<void, std::string> WriteFile(const std::string& path,
     return generating::FileError(generating::kNativeEmitter, "cannot write",
                                  path);
   f << content;
-  if (!f)
+  // Close before the state check: with contents this small the whole file
+  // can sit in the stream buffer, so a failed flush-at-close is the only
+  // signal a truncated package would ever give.
+  f.close();
+  if (f.fail())
     return generating::FileError(generating::kNativeEmitter, "short write to",
                                  path);
-  f.close();
   if (executable) {
     std::error_code ec;
     std::filesystem::permissions(path,
@@ -144,10 +147,12 @@ int main(int argc, char** argv) {
 
   uint64_t steps = 0, seed = 0;
   double val_frac = 0.1;
+  // The negated in-range form rejects NaN, which `< 0.0 || >= 1.0` lets
+  // through — and a NaN val_frac silently disables the validation gate.
   if (!ParseU64(Arg(argc, argv, "--steps", "0"), &steps) ||
       !ParseU64(Arg(argc, argv, "--seed", "0"), &seed) ||
       !ParseF64(Arg(argc, argv, "--val-frac", "0.1"), &val_frac) ||
-      val_frac < 0.0 || val_frac >= 1.0) {
+      !(val_frac >= 0.0 && val_frac < 1.0)) {
     std::fprintf(stderr, "invalid numeric argument\n");
     return 2;
   }
@@ -331,7 +336,8 @@ std::expected<EmitPaths, std::string> EmitNativePackage(
                                "cannot write plan file");
     f.write(reinterpret_cast<const char*>(plan.data()),
             static_cast<std::streamsize>(plan.size()));
-    if (!f)
+    f.close();
+    if (f.fail())
       return generating::FileError(generating::kNativeEmitter,
                                    "short write to", paths.plan_file);
   }
