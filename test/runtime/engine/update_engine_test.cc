@@ -405,6 +405,61 @@ TEST(UpdateEngineCommit, RejectsModelFileThePlanWasNotCompiledFrom) {
   EXPECT_OK(engine.CommitToModel(right, dir.File("ok.smf")));
 }
 
+TEST(UpdateEngineCommit, EvaluateBetweenMergeAndCommitDoesNotCorruptDeltas) {
+  // Train -> RunMerge -> Evaluate -> CommitToModel is the natural
+  // "validate after merging" sequence. The merge's delta buffers must live
+  // above the train/eval transients — if they shared offsets, the eval
+  // forward pass here would overwrite every delta and commit would patch
+  // activation bytes into the model as weight deltas.
+  ScopedTempDir dir;
+  SmfModel model = MakeMlp(kInDim, 10, 3, 1);
+  const std::string src = dir.File("src.smf");
+  ASSERT_OK(SaveSmf(src, model));
+  ASSERT_OK_AND_ASSIGN(SmfModel saved, LoadSmf(src));
+  auto compiled = UpdateCompiler(BaseConfig(kBatch)).Compile(saved);
+  ASSERT_OK(compiled);
+
+  auto commit = [&](bool eval_between,
+                    const std::string& out) -> std::vector<uint8_t> {
+    UpdateEngine engine;
+    if (!engine.LoadFromMemory(compiled->plan.data(), compiled->plan.size()))
+      return {};
+    // Fresh-but-identical corpus per run: training is deterministic, so
+    // both engines reach the same adapters.
+    auto data = MakeClassificationData(64, kInDim, 6);
+    if (!data) return {};
+    if (!engine.Train(*data, 20, Quiet())) return {};
+    if (!engine.RunMerge()) return {};
+    if (eval_between && !engine.Evaluate(*data)) return {};
+    if (!engine.CommitToModel(src, out)) return {};
+    std::ifstream f(out, std::ios::binary);
+    return std::vector<uint8_t>(std::istreambuf_iterator<char>(f),
+                                std::istreambuf_iterator<char>());
+  };
+
+  const std::vector<uint8_t> plain = commit(false, dir.File("plain.smf"));
+  const std::vector<uint8_t> evald = commit(true, dir.File("evald.smf"));
+  ASSERT_FALSE(plain.empty());
+  ASSERT_FALSE(evald.empty());
+  EXPECT_TRUE(plain == evald);
+}
+
+TEST(UpdateEngineCommit, TrainingAfterMergeStalesTheDeltas) {
+  // A step executed after RunMerge changes the adapters; the materialized
+  // deltas no longer describe them, so commit must demand a re-merge.
+  ScopedTempDir dir;
+  const std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
+  ASSERT_FALSE(plan.empty());
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
+  ASSERT_OK_AND_ASSIGN(Dataset data, MakeClassificationData(64, kInDim, 6));
+  ASSERT_OK(engine.RunMerge());
+  ASSERT_OK(engine.Train(data, 5, Quiet()));
+  EXPECT_ERROR_CONTAINS(
+      engine.CommitToModel(dir.File("src.smf"), dir.File("out.smf")),
+      "RunMerge() must precede");
+}
+
 TEST(UpdateEngineValidate, EvaluateRunsWithoutMutatingState) {
   const std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
   ASSERT_FALSE(plan.empty());

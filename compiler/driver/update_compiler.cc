@@ -163,6 +163,12 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
     }
   }
 
+  // The loss now owns the only live reference to the network output. The
+  // rewriting passes below redirect or destroy values without maintaining
+  // build.output, so it is retired here — a later read would otherwise see
+  // the pre-adapter (or freed) value and silently miss every rewrite.
+  build.output = nullptr;
+
   // --- 3. Structural passes (phase A): convolution lowering, then LoRA
   // grafting — everything that must precede the primal snapshot. The pass
   // manager re-verifies the block after each pass, so a corrupting rewrite
@@ -211,7 +217,9 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
     });
     if (config_.emit_optimizer)
       pm.Add("optimizer", [&](sir::Block& b) {
-        return OptimizerSynthesizer(config_.optimizer).Run(b, param_grads);
+        return OptimizerSynthesizer(config_.optimizer.kind,
+                                    config_.optimizer.clip_norm)
+            .Run(b, param_grads);
       });
     if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
   }
@@ -246,10 +254,14 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   if (!binding) return std::unexpected(binding.error());
 
   // Bind the merge program into the same arena: A/B mirrors resolve through
-  // the alias map; delta outputs are pinned fresh transients in the workspace
-  // region (training has finished when the merge runs, so reuse is safe).
+  // the alias map; delta outputs are pinned fresh transients ABOVE the
+  // training high-water mark. They must not share offsets with train/eval
+  // transients: the engine's public sequence Train -> RunMerge -> Evaluate
+  // -> CommitToModel would otherwise let the eval forward pass overwrite
+  // the materialized deltas before commit patches them into the model.
   std::unordered_set<const sir::Value*> merge_pinned;
-  for (const auto& [delta, adapter] : merge->outputs) merge_pinned.insert(delta);
+  for (const auto& [delta, adapter_index] : merge->outputs)
+    merge_pinned.insert(delta);
 
   std::unordered_map<const sir::Value*, uint64_t> merge_bound;
   for (const auto& [mirror, original] : merge->aliases) {
@@ -260,7 +272,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
     merge_bound[mirror] = it->second;
   }
   const uint64_t merge_high = LinearScanTransients(
-      *merge->block, AlignUp(binding->io_end), merge_bound, merge_pinned,
+      *merge->block, AlignUp(binding->arena_size), merge_bound, merge_pinned,
       merge_bound);
   binding->arena_size = std::max(binding->arena_size, merge_high);
 
@@ -316,8 +328,9 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
 
   // --- 11. Emit table: delta arena ranges -> source-file byte ranges. -------
   std::vector<EmitEntry> emit_table;
-  for (const auto& [delta, adapter] : merge->outputs) {
-    auto src = build.weight_sources.find(adapter->frozen_weight);
+  for (const auto& [delta, adapter_index] : merge->outputs) {
+    const GraftedAdapter& adapter = adapters[adapter_index];
+    auto src = build.weight_sources.find(adapter.frozen_weight);
     if (src == build.weight_sources.end())
       return generating::Error(generating::kDriver,
                                "adapter weight lacks SMF source");

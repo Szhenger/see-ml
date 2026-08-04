@@ -324,9 +324,8 @@ TEST(OptimizerSynthesizer, AdamWDeclaresMomentStatePerParam) {
   auto [p2, g2] = AddParamAndGrad(block, "b");
   const size_t params_before = CountOps(block, "sc_mem.param");
 
-  OptimizerSpec spec;
-  spec.kind = OptimizerKind::kAdamW;
-  ASSERT_OK(OptimizerSynthesizer(spec).Run(block, {{p1, g1}, {p2, g2}}));
+  ASSERT_OK(OptimizerSynthesizer(OptimizerKind::kAdamW, 0.0f)
+                .Run(block, {{p1, g1}, {p2, g2}}));
 
   // Two zero-initialized moment tensors per parameter, plus the fused step.
   EXPECT_EQ(CountOps(block, "sc_mem.param"), params_before + 4);
@@ -360,9 +359,8 @@ TEST(OptimizerSynthesizer, SgdAddsNoState) {
   auto [p, g] = AddParamAndGrad(block, "a");
   const size_t params_before = CountOps(block, "sc_mem.param");
 
-  OptimizerSpec spec;
-  spec.kind = OptimizerKind::kSgd;
-  ASSERT_OK(OptimizerSynthesizer(spec).Run(block, {{p, g}}));
+  ASSERT_OK(OptimizerSynthesizer(OptimizerKind::kSgd, 0.0f)
+                .Run(block, {{p, g}}));
 
   EXPECT_EQ(CountOps(block, "sc_mem.param"), params_before);
   EXPECT_EQ(CountOps(block, "sc_low.sgd_step"), 1u);
@@ -391,8 +389,8 @@ TEST(MergeBuilder, BuildsZeroedDeltaPlusGemmAccPerAdapter) {
   EXPECT_EQ(CountOps(*program.block, "sc_low.gemm_acc"), adapters.size());
 
   for (size_t i = 0; i < adapters.size(); ++i) {
-    const auto& [delta, adapter] = program.outputs[i];
-    EXPECT_EQ(adapter, &adapters[i]);
+    const auto& [delta, adapter_index] = program.outputs[i];
+    EXPECT_EQ(adapter_index, i);
     // Δ has W's shape; the gemm_acc folds with the adapter's alpha/r scale.
     EXPECT_TRUE(delta->shape() == adapters[i].frozen_weight->shape());
   }

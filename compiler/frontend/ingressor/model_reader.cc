@@ -4,6 +4,7 @@
 #include <cstring>
 #include <fstream>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include "compiler/diagnostics/tokenizing/error.h"
@@ -99,9 +100,18 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   model.tensors.reserve(std::min<size_t>(num_tensors, bytes.size()));
   model.ops.reserve(std::min<size_t>(num_ops, bytes.size()));
 
+  // Tensor names key every downstream binding (resolver, analyzer, sema);
+  // a duplicate would silently resolve last-writer-wins, so it is a load
+  // error, not a tolerated redundancy. Owning strings: the tensors vector
+  // moves its names, which would dangle any view taken here.
+  std::unordered_set<std::string> tensor_names;
+  tensor_names.reserve(std::min<size_t>(num_tensors, bytes.size()));
+
   for (uint32_t i = 0; i < num_tensors && r.ok; ++i) {
     SmfTensor t;
     t.name = r.ReadStr();
+    if (r.ok && !tensor_names.insert(t.name).second)
+      return tokenizing::TensorError(t.name, "is declared more than once");
     const uint8_t rank = r.Read<uint8_t>();
     const uint8_t flags = r.Read<uint8_t>();
     t.is_const = (flags & 1) != 0;

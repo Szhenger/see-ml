@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <concepts>
+#include <cstring>
 #include <iomanip>
 #include <sstream>
 #include <string>
@@ -30,6 +31,12 @@ std::string Describe(const T& v) {
   if constexpr (std::same_as<D, bool>) {
     return v ? "true" : "false";
   } else if constexpr (std::convertible_to<const D&, std::string_view>) {
+    // A null char* must not reach the string_view constructor (UB): the
+    // comparison layer tolerates null C-strings, so the failure reporter
+    // has to as well. (Arrays can't be null; is_pointer_v guards the check
+    // so no tautological comparison is emitted for them.)
+    if constexpr (std::is_pointer_v<D>)
+      if (v == nullptr) return "(null)";
     std::string s = "\"";
     s += std::string_view(v);
     s += "\"";
@@ -51,21 +58,43 @@ std::string Describe(const T& v) {
 // Mixed-signedness integer comparisons go through std::cmp_* so that
 // EXPECT_EQ(u64_value, 4) is both warning-free under -Werror and correct.
 
+// std::cmp_* mandates against bool and ALL character types (char, wchar_t,
+// char8_t/16_t/32_t) — those fall through to the plain operators instead.
+template <typename T>
+inline constexpr bool kCmpSafeInteger =
+    std::integral<std::remove_cvref_t<T>> &&
+    !std::same_as<std::remove_cvref_t<T>, bool> &&
+    !std::same_as<std::remove_cvref_t<T>, char> &&
+    !std::same_as<std::remove_cvref_t<T>, wchar_t> &&
+    !std::same_as<std::remove_cvref_t<T>, char8_t> &&
+    !std::same_as<std::remove_cvref_t<T>, char16_t> &&
+    !std::same_as<std::remove_cvref_t<T>, char32_t>;
+
 template <typename A, typename B>
 inline constexpr bool kSafeIntegerCompare =
-    std::integral<std::remove_cvref_t<A>> &&
-    std::integral<std::remove_cvref_t<B>> &&
-    !std::same_as<std::remove_cvref_t<A>, bool> &&
-    !std::same_as<std::remove_cvref_t<B>, bool> &&
-    !std::same_as<std::remove_cvref_t<A>, char> &&
-    !std::same_as<std::remove_cvref_t<B>, char>;
+    kCmpSafeInteger<A> && kCmpSafeInteger<B>;
+
+// C-string operands (pointers or string literals) compare by content:
+// Describe() prints their contents, and a matcher whose message shows two
+// identical strings "not equal" because their storage differs would be
+// actively misleading.
+template <typename T>
+inline constexpr bool kIsCString =
+    std::same_as<std::decay_t<T>, char*> ||
+    std::same_as<std::decay_t<T>, const char*>;
 
 template <typename A, typename B>
 bool CmpEq(const A& a, const B& b) {
-  if constexpr (kSafeIntegerCompare<A, B>)
+  if constexpr (kSafeIntegerCompare<A, B>) {
     return std::cmp_equal(a, b);
-  else
+  } else if constexpr (kIsCString<A> && kIsCString<B>) {
+    const char* pa = a;
+    const char* pb = b;
+    if (pa == nullptr || pb == nullptr) return pa == pb;
+    return std::strcmp(pa, pb) == 0;
+  } else {
     return a == b;
+  }
 }
 
 template <typename A, typename B>
@@ -73,6 +102,11 @@ bool CmpNe(const A& a, const B& b) {
   return !CmpEq(a, b);
 }
 
+// The ordered comparisons are each written directly, never derived by
+// negating another: with a NaN operand every ordering is false, so a
+// negation-derived CmpLe/CmpGe would return true — silently green-lighting
+// exactly the NaN-divergence regression (EXPECT_LE(loss, bound)) an ML
+// test suite most needs to catch.
 template <typename A, typename B>
 bool CmpLt(const A& a, const B& b) {
   if constexpr (kSafeIntegerCompare<A, B>)
@@ -83,17 +117,26 @@ bool CmpLt(const A& a, const B& b) {
 
 template <typename A, typename B>
 bool CmpLe(const A& a, const B& b) {
-  return !CmpLt(b, a);
+  if constexpr (kSafeIntegerCompare<A, B>)
+    return std::cmp_less_equal(a, b);
+  else
+    return a <= b;
 }
 
 template <typename A, typename B>
 bool CmpGt(const A& a, const B& b) {
-  return CmpLt(b, a);
+  if constexpr (kSafeIntegerCompare<A, B>)
+    return std::cmp_greater(a, b);
+  else
+    return a > b;
 }
 
 template <typename A, typename B>
 bool CmpGe(const A& a, const B& b) {
-  return !CmpLt(a, b);
+  if constexpr (kSafeIntegerCompare<A, B>)
+    return std::cmp_greater_equal(a, b);
+  else
+    return a >= b;
 }
 
 // --- Failure message builders ----------------------------------------------------

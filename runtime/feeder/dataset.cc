@@ -41,6 +41,14 @@ std::expected<Dataset, std::string> Dataset::FromMemory(
   d.inputs_ = std::move(inputs);
   d.labels_ = std::move(labels);
   if (num_samples == 0) return diag::feeding::Error("zero samples");
+  // Same admission checks as LoadFromFile: label_bytes_per_sample()
+  // multiplies label_dim unchecked, so an unvalidated dim would wrap the
+  // expected-size math and admit a mis-sized label buffer.
+  if (input_dim == 0) return diag::feeding::Error("zero input dim");
+  if (label_kind > 2) return diag::feeding::Error("unknown label kind");
+  if (label_kind == 2 &&
+      (label_dim == 0 || label_dim > UINT64_MAX / sizeof(float)))
+    return diag::feeding::Error("label dim out of range");
   uint64_t want_inputs = 0, want_labels = 0;
   if (!MulU64(num_samples, input_dim, &want_inputs) ||
       d.inputs_.size() != want_inputs)
@@ -101,6 +109,11 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
       !MulU64(num_samples, input_bytes + lbytes, &payload) ||
       payload > file_size - kSdsHeaderBytes)
     return diag::feeding::Error("sample section exceeds file size");
+  // On 32-bit hosts size_t is narrower than the u64 the checks above ran
+  // in: a corpus that cannot fit the address space must be refused here,
+  // not silently truncated by the resize below.
+  if (payload > SIZE_MAX)
+    return diag::feeding::Error("dataset too large for this host");
 
   d.inputs_.resize(num_samples * input_dim);
   d.labels_.resize(num_samples * lbytes);

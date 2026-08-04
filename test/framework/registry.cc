@@ -99,6 +99,12 @@ int RunAllTests(int argc, char** argv) {
       list_only = true;
     } else if (arg.starts_with("--filter=")) {
       filter = arg.substr(9);
+      // An explicitly empty pattern would substring-expand to "**" and run
+      // the whole suite — the opposite of what a fat-fingered filter means.
+      if (filter.empty()) {
+        std::fprintf(stderr, "seetest: --filter= requires a pattern\n");
+        return 2;
+      }
     } else if (arg == "--help" || arg == "-h") {
       std::printf("usage: %s [--list] [--filter=PATTERN]\n", argv[0]);
       std::printf(

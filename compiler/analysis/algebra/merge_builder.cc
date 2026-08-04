@@ -15,7 +15,9 @@ std::expected<MergeProgram, std::string> MergeBuilder::Run(
   MergeProgram program;
   program.block = std::make_unique<sir::Block>();
 
-  for (const GraftedAdapter& adapter : adapters) {
+  for (size_t adapter_index = 0; adapter_index < adapters.size();
+       ++adapter_index) {
+    const GraftedAdapter& adapter = adapters[adapter_index];
     // Mirror declarations aliasing the training program's persistent storage.
     sir::Operation* a_op = program.block->appendOp("sc_mem.param");
     sir::Value* a = a_op->addResult(std::string(adapter.A->id()) + ".merge_a",
@@ -43,7 +45,7 @@ std::expected<MergeProgram, std::string> MergeBuilder::Run(
     acc->addOperand(b);
     acc->addOperand(delta);
 
-    program.outputs.emplace_back(delta, &adapter);
+    program.outputs.emplace_back(delta, adapter_index);
   }
 
   return program;

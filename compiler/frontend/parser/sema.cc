@@ -39,6 +39,21 @@ std::expected<void, std::string> CheckGraph(const SmfModel& model) {
                                   "' redefines an existing value");
   }
 
+  // LayerNorm results derive companion value ids ("<output>.mean" /
+  // "<output>.rstd"); a model name equal to one of them would collide in the
+  // SIR value table far from either offender, so reject it here.
+  for (const SmfOp& op : model.ops) {
+    if (op.kind != SmfOpKind::kLayerNorm) continue;
+    for (const char* suffix : {".mean", ".rstd"}) {
+      const std::string derived = op.output + suffix;
+      if (bound.contains(derived))
+        return parsing::OpError(
+            "LayerNorm", op.name,
+            "output '" + op.output + "' derives statistic id '" + derived +
+                "', which collides with an existing name");
+    }
+  }
+
   if (!all_outputs.contains(model.output_name))
     return parsing::Error("model output '" + model.output_name +
                           "' was never produced by an operation");

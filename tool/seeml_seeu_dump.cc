@@ -59,6 +59,16 @@ const char* OpName(uint16_t opcode) {
   return "<unknown>";
 }
 
+// Overflow-checked section bound over fully untrusted header fields: the
+// unchecked form `offset + count * elem <= size` wraps modulo 2^64 for a
+// crafted count and "passes", walking the disassembler off the buffer —
+// in the one tool whose job is inspecting corrupt plans.
+bool SectionOk(uint64_t offset, uint64_t count, uint64_t elem, size_t size) {
+  if (elem != 0 && count > UINT64_MAX / elem) return false;
+  const uint64_t bytes = count * elem;
+  return offset <= size && bytes <= size - offset;
+}
+
 void PrintRef(uint64_t ref) {
   if (ref == kNullRef) {
     std::printf("  <null>          ");
@@ -122,6 +132,17 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "seeml-seeu-dump: bad magic\n");
     return 1;
   }
+  // The header layout is version-specific: interpreting an older plan
+  // through the current struct prints authoritative-looking garbage (and
+  // feeds garbage counts to the section walks below).
+  if (h.version != kSeeuVersion) {
+    std::fprintf(stderr,
+                 "seeml-seeu-dump: plan version %u, but this tool "
+                 "understands only version %u — refusing to interpret the "
+                 "header\n",
+                 h.version, kSeeuVersion);
+    return 1;
+  }
 
   // Verify the integrity seal the same way the runtime does.
   uint64_t state = kFnvOffsetBasis;
@@ -163,7 +184,8 @@ int main(int argc, char** argv) {
   std::printf("  emit table         %" PRIu64 " entr%s\n", h.emit_count,
               h.emit_count == 1 ? "y" : "ies");
 
-  if (h.emit_table_offset + h.emit_count * sizeof(EmitEntry) <= plan.size()) {
+  if (SectionOk(h.emit_table_offset, h.emit_count, sizeof(EmitEntry),
+                plan.size())) {
     for (uint64_t i = 0; i < h.emit_count; ++i) {
       EmitEntry e;
       std::memcpy(&e, plan.data() + h.emit_table_offset + i * sizeof(e),
@@ -172,18 +194,27 @@ int main(int argc, char** argv) {
                   " B  <- delta ar+0x%08" PRIx64 "\n",
                   i, e.smf_data_offset, e.byte_size, e.arena_offset);
     }
+  } else {
+    std::fprintf(stderr,
+                 "seeml-seeu-dump: emit table exceeds the file — skipped\n");
   }
 
   if (want_instrs) {
     auto stream = [&](uint64_t off) {
       return reinterpret_cast<const UpdateInstruction*>(plan.data() + off);
     };
-    if (h.train_instr_offset + h.train_instr_count * 64 <= plan.size())
-      Disassemble("train", stream(h.train_instr_offset), h.train_instr_count);
-    if (h.eval_instr_offset + h.eval_instr_count * 64 <= plan.size())
-      Disassemble("eval", stream(h.eval_instr_offset), h.eval_instr_count);
-    if (h.merge_instr_offset + h.merge_instr_count * 64 <= plan.size())
-      Disassemble("merge", stream(h.merge_instr_offset), h.merge_instr_count);
+    auto dump = [&](const char* title, uint64_t off, uint64_t count) {
+      if (SectionOk(off, count, sizeof(UpdateInstruction), plan.size()))
+        Disassemble(title, stream(off), count);
+      else
+        std::fprintf(stderr,
+                     "seeml-seeu-dump: %s program exceeds the file — "
+                     "skipped\n",
+                     title);
+    };
+    dump("train", h.train_instr_offset, h.train_instr_count);
+    dump("eval", h.eval_instr_offset, h.eval_instr_count);
+    dump("merge", h.merge_instr_offset, h.merge_instr_count);
   }
   return 0;
 }

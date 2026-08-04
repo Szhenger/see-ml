@@ -30,6 +30,22 @@ size_t RoundToUnit(size_t v, size_t unit) {
   return std::max(unit, v - v % unit);
 }
 
+/// Whether half of `cache_bytes` can hold even the minimal conforming
+/// (simd x simd) f32 panel. Below this, the half-cache contract and the
+/// SIMD-multiple contract are jointly unsatisfiable, so the detected value
+/// is treated as garbage: SuggestGemmTiling falls back to defaults and
+/// ValidateGemmTiling skips the unsatisfiable check.
+bool CacheHalfFeasible(uint64_t cache_bytes, size_t simd) {
+  return cache_bytes / 2 >= uint64_t{simd} * simd * sizeof(float);
+}
+
+/// Largest multiple of `unit` such that (dim x other) f32 fits in `budget`
+/// bytes; callers guarantee feasibility (>= unit) via CacheHalfFeasible.
+size_t FitDim(uint64_t budget_bytes, size_t other, size_t unit) {
+  return RoundToUnit(
+      static_cast<size_t>(budget_bytes / (other * sizeof(float))), unit);
+}
+
 }  // namespace
 
 HostArchInfo DetectHostArch() {
@@ -93,22 +109,37 @@ GemmTiling SuggestGemmTiling(const HostArchInfo& arch) {
     architecting::DetectionFallback(
         architecting::kHostArch,
         "L1d size undetected; assuming 32 KiB for GEMM tiling");
+  else if (!CacheHalfFeasible(arch.l1d_bytes, simd))
+    architecting::DetectionFallback(
+        architecting::kHostArch,
+        "detected L1d cannot hold a SIMD panel; assuming 32 KiB for GEMM "
+        "tiling");
   if (arch.l2_bytes == 0)
     architecting::DetectionFallback(
         architecting::kHostArch,
         "L2 size undetected; assuming 512 KiB for GEMM tiling");
-  const uint64_t l1 = arch.l1d_bytes > 0 ? arch.l1d_bytes : 32u << 10;
-  const uint64_t l2 = arch.l2_bytes > 0 ? arch.l2_bytes : 512u << 10;
+  else if (!CacheHalfFeasible(arch.l2_bytes, simd))
+    architecting::DetectionFallback(
+        architecting::kHostArch,
+        "detected L2 cannot hold a SIMD panel; assuming 512 KiB for GEMM "
+        "tiling");
+  const bool l1_usable = CacheHalfFeasible(arch.l1d_bytes, simd);
+  const bool l2_usable = CacheHalfFeasible(arch.l2_bytes, simd);
+  const uint64_t l1 = l1_usable ? arch.l1d_bytes : 32u << 10;
+  const uint64_t l2 = l2_usable ? arch.l2_bytes : 512u << 10;
 
+  // Every dimension is fitted downward so the result always satisfies
+  // ValidateGemmTiling against the same arch: nc shrinks below the 4-vector
+  // ideal when half of L1 cannot hold a (simd x nc) panel, and kc respects
+  // both halves (a kc so large that no conforming mc panel fits half of L2
+  // would fail the L2 check no matter the mc).
   GemmTiling t;
   // nc: a small register-blocked sweep — 4 vectors of C columns.
-  t.nc = 4 * simd;
+  t.nc = std::min(4 * simd, FitDim(l1 / 2, simd, simd));
   // kc: kc x nc f32 panel of B in at most half of L1.
-  t.kc = RoundToUnit(
-      static_cast<size_t>(l1 / 2 / (t.nc * sizeof(float))), simd);
+  t.kc = std::min(FitDim(l1 / 2, t.nc, simd), FitDim(l2 / 2, simd, simd));
   // mc: mc x kc f32 panel of A in at most half of L2.
-  t.mc = RoundToUnit(
-      static_cast<size_t>(l2 / 2 / (t.kc * sizeof(float))), simd);
+  t.mc = FitDim(l2 / 2, t.kc, simd);
   return t;
 }
 
@@ -131,16 +162,19 @@ std::expected<void, std::string> ValidateGemmTiling(const GemmTiling& tiling,
               " f32 lanes)");
   }
 
-  // The cache halves are only a contract when the geometry was detected —
-  // an all-defaults HostArchInfo must accept the fallback tiling.
-  if (arch.l1d_bytes > 0 &&
+  // The cache halves are only a contract when the geometry was detected
+  // and can hold at least a minimal SIMD panel — an all-defaults
+  // HostArchInfo must accept the fallback tiling, and a degenerate detected
+  // cache makes this check jointly unsatisfiable with the SIMD-multiple
+  // rule above (SuggestGemmTiling ignores such a value the same way).
+  if (CacheHalfFeasible(arch.l1d_bytes, simd) &&
       tiling.kc * tiling.nc * sizeof(float) > arch.l1d_bytes / 2)
     return architecting::Error(
         architecting::kHostArch,
         "kc x nc panel (" + std::to_string(tiling.kc) + " x " +
             std::to_string(tiling.nc) + " f32) exceeds half of L1d (" +
             std::to_string(arch.l1d_bytes) + " B)");
-  if (arch.l2_bytes > 0 &&
+  if (CacheHalfFeasible(arch.l2_bytes, simd) &&
       tiling.mc * tiling.kc * sizeof(float) > arch.l2_bytes / 2)
     return architecting::Error(
         architecting::kHostArch,

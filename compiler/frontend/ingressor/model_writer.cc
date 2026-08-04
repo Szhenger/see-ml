@@ -38,6 +38,32 @@ struct Writer {
 
 std::expected<void, std::string> SaveSmf(const std::string& path,
                                          SmfModel& model) {
+  // Field-width validation before any narrowing cast below: a string longer
+  // than u16 or a count wider than its field would wrap silently and emit a
+  // desynchronized stream that the reader mis-parses instead of rejecting.
+  auto str_ok = [](const std::string& s) { return s.size() <= UINT16_MAX; };
+  if (!str_ok(model.input_name) || !str_ok(model.output_name))
+    return tokenizing::Error("model I/O name exceeds the u16 string limit");
+  if (model.tensors.size() > UINT32_MAX || model.ops.size() > UINT32_MAX)
+    return tokenizing::Error("tensor/op count exceeds the u32 field limit");
+  for (const auto& t : model.tensors) {
+    if (!str_ok(t.name))
+      return tokenizing::TensorError(t.name.substr(0, 64),
+                                     "name exceeds the u16 string limit");
+    if (t.dims.size() > UINT8_MAX)
+      return tokenizing::TensorError(t.name, "rank exceeds the u8 field limit");
+  }
+  for (const auto& op : model.ops) {
+    if (op.inputs.size() > UINT8_MAX)
+      return tokenizing::Error("op '" + op.name +
+                               "' input count exceeds the u8 field limit");
+    bool names_ok = str_ok(op.name) && str_ok(op.output);
+    for (const auto& in : op.inputs) names_ok = names_ok && str_ok(in);
+    if (!names_ok)
+      return tokenizing::Error("op '" + op.name.substr(0, 64) +
+                               "' has a name exceeding the u16 string limit");
+  }
+
   // Pass 1: serialize the header/metadata with zeroed data offsets to learn
   // the metadata section size, then lay out the 64-aligned data section.
   auto serialize_meta = [&](Writer& w) {

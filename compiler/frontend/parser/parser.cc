@@ -40,7 +40,7 @@ std::expected<sir::Value*, std::string> BuildForward(
         mm->addOperand(*w);
         resolver.Bind(op.output,
                       mm->addResult(prefix + op.output, sir::DataType::F32,
-                                    sir::Shape{batch,
+                                    sir::Shape{(*x)->shape().dims.at(0),
                                                (*w)->shape().dims.at(1)}));
         break;
       }

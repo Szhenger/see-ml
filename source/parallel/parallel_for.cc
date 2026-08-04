@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
+#include <exception>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -49,15 +50,34 @@ struct Job {
   alignas(64) std::atomic<size_t> next{0};
   alignas(64) std::atomic<size_t> done{0};
   alignas(64) std::atomic<size_t> holders{0};
+  // First exception thrown by a chunk body, rethrown on the submitting
+  // thread once the loop has fully drained. Escaping a worker's thread
+  // function would std::terminate; unwinding the submitter mid-drain would
+  // destroy this stack-allocated Job under live workers.
+  alignas(64) std::atomic<bool> failed{false};
+  std::mutex error_mutex;
+  std::exception_ptr error;  // guarded by error_mutex
 };
 
 void DrainJob(Job& job) {
   for (;;) {
     const size_t c = job.next.fetch_add(1, std::memory_order_relaxed);
     if (c >= job.chunks) return;
-    const size_t begin = c * job.grain;
-    const size_t end = std::min(begin + job.grain, job.n);
-    job.fn(job.ctx, begin, end, c);
+    // Once a body has thrown, the remaining chunks complete without
+    // running: the counters must still reach `chunks` so every waiter
+    // wakes, but executing more of a loop that already failed only delays
+    // the rethrow.
+    if (!job.failed.load(std::memory_order_acquire)) {
+      try {
+        const size_t begin = c * job.grain;
+        const size_t end = std::min(begin + job.grain, job.n);
+        job.fn(job.ctx, begin, end, c);
+      } catch (...) {
+        std::lock_guard<std::mutex> lock(job.error_mutex);
+        if (!job.error) job.error = std::current_exception();
+        job.failed.store(true, std::memory_order_release);
+      }
+    }
     // Release pairs with the caller's acquire load of `done`: chunk results
     // are visible before the loop is observed complete.
     job.done.fetch_add(1, std::memory_order_acq_rel);
@@ -102,14 +122,22 @@ class WorkerPool {
       ++epoch_;
     }
     work_cv_.notify_all();
+    // DrainJob captures body exceptions into the Job rather than throwing,
+    // so this frame cannot unwind while workers still hold the Job.
     DrainJob(job);
-    std::unique_lock<std::mutex> lock(mutex_);
-    done_cv_.wait(lock, [&] {
-      return job.done.load(std::memory_order_acquire) == job.chunks &&
-             job.holders.load(std::memory_order_acquire) == 0;
-    });
-    job_ = nullptr;
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      done_cv_.wait(lock, [&] {
+        return job.done.load(std::memory_order_acquire) == job.chunks &&
+               job.holders.load(std::memory_order_acquire) == 0;
+      });
+      job_ = nullptr;
+    }
     tls_job_owner = false;
+    // Every chunk is accounted for and no worker references the Job:
+    // rethrowing here is safe, and the pool state above is already clean.
+    if (job.failed.load(std::memory_order_acquire))
+      std::rethrow_exception(job.error);
   }
 
  private:

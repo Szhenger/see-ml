@@ -12,7 +12,11 @@ namespace seeml::update {
 /// downstream by arena binding (rodata packing) and the emit table.
 struct GraphBuild {
   seeml::sir::Value* input = nullptr;   // shared batch input block argument
-  seeml::sir::Value* output = nullptr;  // network output (logits)
+  // Network output (logits). Valid only until the first rewriting pass:
+  // LoRA grafting redirects consumers to an adapted value and conv lowering
+  // may destroy the value outright, and neither updates this field. The
+  // driver nulls it once the loss is grafted so a stale read fails loudly.
+  seeml::sir::Value* output = nullptr;
   // Frozen weight values -> their SMF tensor (for rodata packing + commit).
   std::unordered_map<const seeml::sir::Value*, const SmfTensor*>
       weight_sources;
