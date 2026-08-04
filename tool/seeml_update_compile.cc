@@ -84,10 +84,28 @@ class Args {
   std::optional<std::string> TakeValue(const char* flag) {
     for (int i = 1; i + 1 < argc_; ++i)
       if (!taken_[i] && std::strcmp(argv_[i], flag) == 0) {
+        // A following flag is a missing value, not a value: consuming it
+        // ("--targets --quantize-base") would silently disable one option
+        // and misconfigure the other — the exact silent default the banner
+        // forbids. Remember the culprit so the error names the real
+        // mistake ("requires a value"), not "unknown argument".
+        if (std::strncmp(argv_[i + 1], "--", 2) == 0) {
+          if (!missing_value_) missing_value_ = flag;
+          return std::nullopt;
+        }
         taken_[i] = taken_[i + 1] = true;
         return std::string(argv_[i + 1]);
       }
+    // The flag as the very last argument has no value slot at all.
+    if (argc_ > 1 && !taken_[argc_ - 1] &&
+        std::strcmp(argv_[argc_ - 1], flag) == 0 && !missing_value_)
+      missing_value_ = flag;
     return std::nullopt;
+  }
+
+  /// First flag seen with no usable value; set lazily by TakeValue.
+  const std::optional<std::string>& MissingValue() const {
+    return missing_value_;
   }
 
   /// Any argv slot not consumed by a Take* call is an error.
@@ -101,6 +119,7 @@ class Args {
   int argc_;
   char** argv_;
   bool taken_[256] = {};
+  std::optional<std::string> missing_value_;
 };
 
 bool ParseI64(const std::string& s, int64_t* out) {
@@ -135,8 +154,18 @@ std::string JsonEscape(const std::string& s) {
   std::string out;
   out.reserve(s.size() + 8);  // most names escape nothing
   for (char c : s) {
-    if (c == '"' || c == '\\') out += '\\';
-    out += c;
+    if (c == '"' || c == '\\') {
+      out += '\\';
+      out += c;
+    } else if (static_cast<unsigned char>(c) < 0x20) {
+      // Control characters (a newline in a path, say) are invalid raw JSON.
+      char buf[8];
+      std::snprintf(buf, sizeof(buf), "\\u%04x",
+                    static_cast<unsigned>(static_cast<unsigned char>(c)));
+      out += buf;
+    } else {
+      out += c;
+    }
   }
   return out;
 }
@@ -170,6 +199,8 @@ int main(int argc, char** argv) {
   const auto source_path = args.TakeValue("--source");
   const auto out_dir = args.TakeValue("--out");
   if (!source_path || !out_dir) {
+    if (const auto& m = args.MissingValue())
+      return Fail(*m + " requires a value");
     PrintUsage();
     return Fail("--source and --out are required");
   }
@@ -261,6 +292,8 @@ int main(int argc, char** argv) {
   const auto report_path = args.TakeValue("--report");
   const bool want_build = args.Take("--build");
 
+  if (const auto& m = args.MissingValue())
+    return Fail(*m + " requires a value");
   if (auto unknown = args.FirstUnknown())
     return Fail("unknown argument '" + *unknown + "' (see --help)");
 

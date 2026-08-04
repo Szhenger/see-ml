@@ -22,12 +22,12 @@ std::expected<void, std::string> OptimizerSynthesizer::Run(
   for (auto& [p, g] : ordered) {
     // Per-tensor L2 clipping precedes the step: one bad batch must not be
     // able to blow up the parameters (or poison AdamW's moment state).
-    if (spec_.clip_norm > 0.0f) {
+    if (clip_norm_ > 0.0f) {
       sir::Operation* clip = block.appendOp("sc_low.clip_norm");
-      clip->setAttribute("max_norm", spec_.clip_norm);
+      clip->setAttribute("max_norm", clip_norm_);
       clip->addOperand(g);
     }
-    if (spec_.kind == OptimizerKind::kSgd) {
+    if (kind_ == OptimizerKind::kSgd) {
       sir::Operation* step = block.appendOp("sc_low.sgd_step");
       step->addOperand(p);
       step->addOperand(g);

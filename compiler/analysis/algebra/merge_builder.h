@@ -29,8 +29,11 @@ struct MergeProgram {
   std::unique_ptr<seeml::sir::Block> block;
   // mirror value in the merge block -> original value in the training block
   std::unordered_map<seeml::sir::Value*, seeml::sir::Value*> aliases;
-  // delta output value -> the adapter it belongs to (for the emit table)
-  std::vector<std::pair<seeml::sir::Value*, const GraftedAdapter*>> outputs;
+  // delta output value -> index of its adapter in the vector passed to
+  // Run(). An index, not a pointer: the program outlives the call, and a
+  // pointer into the caller's vector would dangle the moment that vector
+  // moves or is destroyed.
+  std::vector<std::pair<seeml::sir::Value*, size_t>> outputs;
 };
 
 class MergeBuilder {

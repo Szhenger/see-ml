@@ -141,11 +141,23 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
     return std::unexpected(ok.error());
 
   // Class count for validating class-index labels at Train() time (the
-  // softmax kernels index rows of this width with raw dataset labels).
-  num_classes_ = 0;
-  for (const up::UpdateInstruction& ins : train_program_)
-    if (static_cast<up::OpCode>(ins.opcode) == up::OpCode::kSoftmaxXEntFwd)
-      num_classes_ = ins.out[1];
+  // softmax kernels index rows of this width with raw dataset labels). Both
+  // executable label-consuming programs — train and eval — must agree, and
+  // a class-label plan with no softmax at all would leave labels entirely
+  // unvalidated, so it is rejected here.
+  for (const auto* program : {&train_program_, &eval_program_})
+    for (const up::UpdateInstruction& ins : *program)
+      if (static_cast<up::OpCode>(ins.opcode) ==
+          up::OpCode::kSoftmaxXEntFwd) {
+        if (num_classes_ != 0 && num_classes_ != ins.out[1])
+          return diag::executing::Error(
+              "plan softmax class widths disagree across programs");
+        num_classes_ = ins.out[1];
+      }
+  if (header_.label_kind == 1 && num_classes_ == 0)
+    return diag::executing::Error(
+        "class-label plan carries no softmax cross-entropy — its labels "
+        "could never be validated");
 
   // The accuracy metric reads the probabilities the eval program's softmax
   // already materializes (its in[3] write); no extra compute or arena space
@@ -393,6 +405,12 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
     return diag::executing::Error("plan carries no eval program");
   if (auto r = ValidateDataset(data); !r) return std::unexpected(r.error());
 
+  // Every evaluation of a given set must score the same sample sequence:
+  // the validation gate compares a pre- and post-training Evaluate, and a
+  // cursor left mid-set by the previous pass would make the two passes
+  // weight different samples.
+  data.Rewind();
+
   float* input_slot = WritePtr(header_.input_ref);
   uint8_t* label_slot =
       header_.label_kind == 0
@@ -571,6 +589,10 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
       }
     }
   }
+
+  // Any executed step changes the adapters, so deltas materialized by an
+  // earlier RunMerge are stale: commit must re-merge first.
+  if (executed > 0) merged_ = false;
 
   report.steps = executed;
   report.initial_avg_loss =

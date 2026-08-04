@@ -10,20 +10,33 @@ namespace seeml::sir {
 
 namespace {
 
-/// One spatial output extent: kDynamic propagates, and a window that does
-/// not fit yields kDynamic rather than a negative extent.
+/// One spatial output extent: kDynamic propagates, a window that does not
+/// fit yields kDynamic rather than a negative extent, and — like
+/// Shape::volume — any arithmetic that would overflow int64 saturates to
+/// kDynamic instead of wrapping. Non-positive stride/dilation is degenerate
+/// geometry, not a computable extent.
 int64_t spatialDim(int64_t in, int64_t kernel, int64_t pad_begin,
                    int64_t pad_end, int64_t stride, int64_t dilation) {
-    if (in == Shape::kDynamic || kernel == Shape::kDynamic || stride <= 0)
+    if (in == Shape::kDynamic || kernel == Shape::kDynamic || stride <= 0 ||
+        dilation <= 0 || kernel <= 0)
         return Shape::kDynamic;
-    const int64_t effective = (kernel - 1) * dilation + 1;
-    const int64_t span = in + pad_begin + pad_end - effective;
+    int64_t effective = 0;
+    if (__builtin_mul_overflow(kernel - 1, dilation, &effective) ||
+        __builtin_add_overflow(effective, int64_t{1}, &effective))
+        return Shape::kDynamic;
+    int64_t span = 0;
+    if (__builtin_add_overflow(in, pad_begin, &span) ||
+        __builtin_add_overflow(span, pad_end, &span) ||
+        __builtin_sub_overflow(span, effective, &span))
+        return Shape::kDynamic;
     return span < 0 ? Shape::kDynamic : span / stride + 1;
 }
 
 int64_t mulOrDynamic(int64_t a, int64_t b) {
     if (a == Shape::kDynamic || b == Shape::kDynamic) return Shape::kDynamic;
-    return a * b;
+    int64_t r = 0;
+    if (__builtin_mul_overflow(a, b, &r)) return Shape::kDynamic;
+    return r;
 }
 
 }  // namespace

@@ -37,9 +37,12 @@ class ValueResolver {
 
   /// Returns the value bound to `name`, or materializes it as a frozen
   /// sc_mem.weight if `name` is a constant tensor of the model. A
-  /// multiply-referenced (tied) tensor resolves to a single SIR value: one
-  /// adapter, one rodata copy, and one emit-table entry instead of several
-  /// entries patching the same range.
+  /// multiply-referenced (tied) tensor resolves to a single SIR value and
+  /// a single rodata copy. Downstream, LoRA still grafts one adapter per
+  /// consuming MatMul site, so a tied weight gets one emit-table entry per
+  /// site, all patching the same file range — correct because commit
+  /// accumulates every delta onto the working copy (W' = W + Δ1 + Δ2 ...),
+  /// never re-patching from pristine bytes per entry.
   [[nodiscard]] std::expected<seeml::sir::Value*, std::string> Resolve(
       std::string_view name);
 

@@ -153,6 +153,64 @@ TEST(PlanValidator, BoundsMathIsOverflowSafe) {
       kArena, kRodata));
 }
 
+TEST(PlanValidator, RejectsZeroExtentOperands) {
+  // Every kernel dereferences element 0 unconditionally, so a zero-extent
+  // operand is an unchecked pointer, not an empty loop. The canonical
+  // exploit was a zero-class softmax: all extents collapse to 0, every
+  // range check passes, and the backward kernel then writes through a raw
+  // dataset label. Both the packed-width and the plain-count forms must
+  // reject.
+  up::UpdateInstruction sm;
+  sm.opcode = static_cast<uint16_t>(up::OpCode::kSoftmaxXEntFwd);
+  sm.in[0] = up::MakeArenaRef(0);
+  sm.in[1] = up::MakeArenaRef(256);
+  sm.in[2] = up::MakeArenaRef(512);
+  sm.in[3] = up::MakeArenaRef(640);
+  sm.out[0] = 4;  // N
+  sm.out[1] = 0;  // C == 0: the exploit
+  EXPECT_ERROR(ValidateInstruction(sm, kArena, kRodata));
+  sm.out[1] = 4;
+  EXPECT_OK(ValidateInstruction(sm, kArena, kRodata));
+
+  EXPECT_ERROR(ValidateInstruction(
+      AddEw(up::MakeArenaRef(0), up::MakeArenaRef(256), up::MakeArenaRef(512),
+            0),
+      kArena, kRodata));
+}
+
+TEST(PlanValidator, RejectsMisalignedRefs) {
+  // Kernels cast arena + offset straight to float*/int32_t*: an unaligned
+  // offset is UB on strict-alignment targets, so it must be a load error.
+  EXPECT_ERROR(ValidateInstruction(AddEw(up::MakeArenaRef(2),
+                                         up::MakeArenaRef(256),
+                                         up::MakeArenaRef(512), 16),
+                                   kArena, kRodata));
+  // Quantized B is 1-byte-per-element rodata: any offset is fine there.
+  up::UpdateInstruction q8;
+  q8.opcode = static_cast<uint16_t>(up::OpCode::kGemmNNQ8);
+  q8.in[0] = up::MakeArenaRef(0);
+  q8.in[1] = up::MakeRodataRef(3);
+  q8.in[2] = up::MakeArenaRef(512);
+  q8.out[0] = 2;
+  q8.out[1] = 2;
+  q8.out[2] = 2;
+  EXPECT_OK(ValidateInstruction(q8, kArena, kRodata));
+}
+
+TEST(PlanValidator, RejectsAliasingWriteAndReadOperands) {
+  // The kernels carry no-alias (restrict) qualifiers on the arena binder's
+  // no-overlap guarantee; a foreign plan must prove disjointness or blind
+  // dispatch is UB. Read-read overlap stays legal.
+  EXPECT_ERROR(ValidateInstruction(
+      AddEw(up::MakeArenaRef(0), up::MakeArenaRef(256), up::MakeArenaRef(32),
+            16),  // write [32,96) overlaps read [0,64)
+      kArena, kRodata));
+  EXPECT_OK(ValidateInstruction(
+      AddEw(up::MakeArenaRef(0), up::MakeArenaRef(0), up::MakeArenaRef(512),
+            16),  // x and y share storage: reads may alias
+      kArena, kRodata));
+}
+
 TEST(PlanValidator, EveryCompiledInstructionValidates) {
   // Regression: the compiler must never emit an instruction the validator
   // rejects — the exact contract the engine's load re-proves on device.

@@ -52,6 +52,14 @@ std::expected<void, std::string> VerifyPlanContract(
       !RangeOk(header.emit_table_offset, emit_bytes, plan_size))
     return diag::executing::Error("plan section out of bounds");
 
+  // The engine chunks Evaluate passes by dividing sample counts by the
+  // batch, and the feeder stages batch x input width every step — zero for
+  // either is a malformed plan, not a degenerate-but-runnable one.
+  if (header.batch == 0)
+    return diag::executing::Error("plan batch size is zero");
+  if (header.input_floats == 0)
+    return diag::executing::Error("plan input width is zero");
+
   // The arena is the target of the persistent image, the checkpoints, and
   // every arena ref — its size must dominate all of them.
   if (header.arena_size > UINT64_MAX - 63)

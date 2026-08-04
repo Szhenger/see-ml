@@ -71,6 +71,11 @@ class Dataset {
   /// every epoch boundary. Deterministic for a given (seed, epoch) pair.
   void EnableShuffle(uint64_t seed);
 
+  /// Resets the serving cursor to the first sample (the current shuffle
+  /// order, if any, is kept). Evaluation passes rewind so that every pass
+  /// over a set scores the same sample sequence.
+  void Rewind() { cursor_ = 0; }
+
   /// Splits off the LAST `fraction` of samples (before any shuffling) as a
   /// held-out validation set, removing them from this dataset. Deterministic:
   /// the same file and fraction always produce the same split. At least one

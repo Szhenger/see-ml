@@ -24,10 +24,16 @@ std::expected<void, std::string> ValidateInstruction(
   size_t num_ranges = 0;
 
   // elem_bytes: f32/i32 operands are 4 bytes; quantized weights are 1.
+  // A ref is admitted only if its extent is nonzero (every kernel
+  // dereferences element 0 unconditionally, so a zero-extent operand is not
+  // "harmlessly empty" — it is an unchecked pointer), aligned to its
+  // element size (the kernels cast the raw offset to a typed pointer), and
+  // in bounds for its address space.
   auto ref_ok_w = [&](uint64_t ref, uint64_t elems, bool write,
                       uint64_t elem_bytes) {
     if (ref == up::kNullRef) return false;
     if (write && up::IsRodataRef(ref)) return false;
+    if (elems == 0) return false;
     uint64_t bytes = 0;
     if (!MulOk(elems, elem_bytes, &bytes)) return false;
     // Execute() reinterpret_casts the ref to its element type and
@@ -191,8 +197,24 @@ std::expected<void, std::string> ValidateInstruction(
       if (!ref_ok(ins.in[0], d0, true)) return fail();
       return disjoint();
   }
-  return diag::validating::Error("unknown opcode " +
-                         std::to_string(ins.opcode));
+
+  // Aliasing proof: the kernels are compiled with no-alias (restrict)
+  // qualifiers on the promise the arena binder keeps for compiled plans; a
+  // foreign plan must prove it here or blind dispatch is UB. Any operand
+  // pair where at least one side is written must be disjoint (read-read
+  // overlap is harmless — nothing is modified through either pointer).
+  for (size_t i = 0; i < n_extents; ++i)
+    for (size_t j = i + 1; j < n_extents; ++j) {
+      const Extent& a = extents[i];
+      const Extent& b = extents[j];
+      if (!a.write && !b.write) continue;
+      if (a.rodata != b.rodata) continue;
+      if (a.begin < b.begin + b.bytes && b.begin < a.begin + a.bytes)
+        return diag::validating::Error(
+            "instruction operands alias (opcode " +
+            std::to_string(ins.opcode) + ")");
+    }
+  return {};
 }
 
 }  // namespace seeml::update_rt

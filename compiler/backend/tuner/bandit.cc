@@ -16,6 +16,8 @@ size_t Ucb1Bandit::Select() const {
   for (size_t i = 0; i < arms_.size(); ++i)
     if (arms_[i].pulls == 0) return i;
 
+  // -inf, not any finite sentinel: rewards are arbitrary "higher is better"
+  // measurements, so every score can legitimately be far below zero.
   size_t best = 0;
   // -inf, not a finite sentinel: rewards are only "higher is better" and may
   // all be negative (e.g. reward = -latency), where a finite sentinel would
