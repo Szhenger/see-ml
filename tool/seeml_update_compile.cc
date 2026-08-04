@@ -170,6 +170,21 @@ std::string JsonEscape(const std::string& s) {
   return out;
 }
 
+/// Single-quotes `s` for POSIX sh, escaping embedded quotes ('\''): the
+/// path comes from user-supplied --out, and a bare quote in it would
+/// terminate the quoting and execute the remainder as shell code.
+std::string ShellQuote(const std::string& s) {
+  std::string out = "'";
+  for (char c : s) {
+    if (c == '\'')
+      out += "'\\''";
+    else
+      out += c;
+  }
+  out += '\'';
+  return out;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -356,25 +371,17 @@ int main(int argc, char** argv) {
                    a.r, a.scale, a.quant_scale);
     }
     std::fprintf(f, "\n  ]\n}\n");
-    // A truncated report (full disk, I/O error) must fail the run: CI
-    // consumers treat this file as authoritative, and exit 0 over invalid
-    // JSON is worse than no report at all.
-    const bool write_error = std::ferror(f) != 0;
-    if (std::fclose(f) != 0 || write_error)
-      return Fail("error writing report '" + *report_path + "'");
+    // ferror catches any failed fprintf above; fclose catches the final
+    // flush. A truncated report that exits 0 hands downstream automation
+    // invalid JSON with a success status — the silent default this tool's
+    // header promises never to have.
+    const bool write_failed = std::ferror(f) != 0;
+    if (std::fclose(f) != 0 || write_failed)
+      return Fail("short write to report '" + *report_path + "'");
   }
 
   if (want_build) {
-    // Single-quote for the shell, escaping any embedded quote as '\'' so a
-    // quirky output directory cannot break out of the argument.
-    std::string quoted = "'";
-    for (char c : paths->build_script)
-      if (c == '\'')
-        quoted += "'\\''";
-      else
-        quoted += c;
-    quoted += "'";
-    const std::string cmd = "sh " + quoted;
+    const std::string cmd = "sh " + ShellQuote(paths->build_script);
     if (std::system(cmd.c_str()) != 0) return Fail("build.sh failed");
   }
   return 0;

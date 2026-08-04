@@ -26,12 +26,11 @@ uint64_t SatMul(uint64_t a, uint64_t b) {
 }
 
 std::string FormatMiB(uint64_t bytes) {
-  // Round up without wrapping: the saturated UINT64_MAX footprints SatAdd /
-  // SatMul produce must format as a huge count, not overflow to "0 MiB".
-  constexpr uint64_t kRound = (uint64_t{1} << 20) - 1;
-  const uint64_t mib =
-      bytes > UINT64_MAX - kRound ? (bytes >> 20) + 1 : (bytes + kRound) >> 20;
-  return std::to_string(mib) + " MiB";
+  // Round up without the additive form: bytes near UINT64_MAX (exactly what
+  // SatAdd/SatMul saturate to) would wrap and print "0 MiB".
+  const uint64_t whole = bytes >> 20;
+  const uint64_t frac = bytes & ((uint64_t{1} << 20) - 1);
+  return std::to_string(whole + (frac != 0 ? 1 : 0)) + " MiB";
 }
 
 }  // namespace
@@ -132,6 +131,20 @@ std::expected<void, std::string> CheckTrainableLocally(
       FormatMiB(footprint.activation_bytes) + " need at least " +
       FormatMiB(need) + ", but the local memory budget is " +
       FormatMiB(budget));
+}
+
+std::expected<void, std::string> CheckPlanFitsLocally(uint64_t arena_bytes,
+                                                      uint64_t plan_bytes,
+                                                      uint64_t budget_bytes) {
+  const uint64_t budget =
+      budget_bytes != 0 ? budget_bytes : DetectLocalMemoryBytes();
+  if (budget == 0) return {};  // cannot prove infeasibility — do not reject
+  const uint64_t need = SatAdd(arena_bytes, plan_bytes);
+  if (need <= budget) return {};
+  return seeml::diag::tokenizing::IngressError(
+      "compiled update cannot run locally: arena " + FormatMiB(arena_bytes) +
+      " + plan " + FormatMiB(plan_bytes) + " need " + FormatMiB(need) +
+      ", but the local memory budget is " + FormatMiB(budget));
 }
 
 }  // namespace seeml::update

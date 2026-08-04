@@ -19,6 +19,9 @@ size_t Ucb1Bandit::Select() const {
   // -inf, not any finite sentinel: rewards are arbitrary "higher is better"
   // measurements, so every score can legitimately be far below zero.
   size_t best = 0;
+  // -inf, not a finite sentinel: rewards are only "higher is better" and may
+  // all be negative (e.g. reward = -latency), where a finite sentinel would
+  // pin the argmax to arm 0.
   double best_score = -std::numeric_limits<double>::infinity();
   const double log_total = std::log(static_cast<double>(total_pulls_));
   for (size_t i = 0; i < arms_.size(); ++i) {

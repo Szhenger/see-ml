@@ -1,20 +1,26 @@
 #include "runtime/custodian/durable_io.h"
 
 #include "runtime/diagnostics/persisting/error.h"
+#include "source/identity/hash.h"
+#include "source/parallel/parallel_for.h"
 
 #include <algorithm>
-#include <cerrno>
 #include <cstdio>
 #include <fstream>
+#include <utility>
+#include <vector>
 
 #ifndef _WIN32
 #include <fcntl.h>
+#include <sys/file.h>
 #include <unistd.h>
 #else
 #include <windows.h>
 #endif
 
 namespace seeml::update_rt {
+
+namespace up = seeml::update;
 
 std::expected<void, std::string> WriteFileDurable(
     const std::string& path, std::initializer_list<ByteSpan> parts) {
@@ -57,36 +63,42 @@ std::expected<void, std::string> WriteFileDurable(
   }
   return {};
 #else
-  // Win32 file API throughout: FlushFileBuffers is the fsync analog the
-  // banner promises, and std::rename cannot replace an existing destination
-  // on Windows — the second checkpoint to the same path would always fail.
+  // Raw Win32, mirroring the POSIX branch's guarantees: every byte's write
+  // status is checked (no ofstream buffer whose final flush nobody sees),
+  // FlushFileBuffers is the fsync the durability contract demands, and
+  // MoveFileEx with MOVEFILE_REPLACE_EXISTING installs over an existing
+  // file — CRT rename() refuses that, which broke every checkpoint after
+  // the first.
   HANDLE h = ::CreateFileA(tmp.c_str(), GENERIC_WRITE, 0, nullptr,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (h == INVALID_HANDLE_VALUE)
-    return diag::persisting::Error(diag::persisting::kDurableIo, "cannot write '" + tmp + "'");
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "cannot write '" + tmp + "'");
   for (const ByteSpan& part : parts) {
     size_t written = 0;
     while (written < part.size) {
-      const DWORD chunk = static_cast<DWORD>(
+      const DWORD want = static_cast<DWORD>(
           std::min<size_t>(part.size - written, 1u << 30));
-      DWORD put = 0;
-      if (!::WriteFile(h, part.data + written, chunk, &put, nullptr) ||
-          put == 0) {
+      DWORD got = 0;
+      if (!::WriteFile(h, part.data + written, want, &got, nullptr) ||
+          got == 0) {
         ::CloseHandle(h);
-        return diag::persisting::Error(diag::persisting::kDurableIo, "short write to '" + tmp + "'");
+        return diag::persisting::Error(diag::persisting::kDurableIo,
+                                       "short write to '" + tmp + "'");
       }
-      written += put;
+      written += got;
     }
   }
   if (!::FlushFileBuffers(h)) {
     ::CloseHandle(h);
-    return diag::persisting::Error(diag::persisting::kDurableIo, "fsync of '" + tmp + "' failed");
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "fsync of '" + tmp + "' failed");
   }
   ::CloseHandle(h);
   if (!::MoveFileExA(tmp.c_str(), path.c_str(),
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-    return diag::persisting::Error(diag::persisting::kDurableIo, "atomic rename to '" + path +
-                           "' failed");
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "atomic rename to '" + path + "' failed");
   return {};
 #endif
 }
@@ -112,6 +124,229 @@ std::expected<std::vector<uint8_t>, std::string> ReadFileBytes(
               static_cast<std::streamsize>(bytes.size())))
     return diag::persisting::Error(diag::persisting::kDurableIo, "cannot read '" + path + "'");
   return bytes;
+}
+
+std::expected<uint64_t, std::string> HashFileContent(const std::string& path) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f)
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "cannot open '" + path + "'");
+  f.seekg(0, std::ios::end);
+  const std::streamoff end = f.tellg();
+  if (end < 0)
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "cannot stat '" + path + "'");
+  f.seekg(0);
+  const size_t size = static_cast<size_t>(end);
+
+  // Mirror ContentHash64's structure exactly (source/identity/hash.h): the
+  // same chunk geometry — a pure function of the size — the same per-chunk
+  // striped digests folded in chunk order, the same final size mix. The
+  // only difference is that each chunk is read from disk on demand, so the
+  // peak resident set is one chunk, not one file.
+  const size_t grain = up::ParallelChunkGrain(size, up::kContentHashChunk);
+  const size_t chunks = up::ParallelChunkCount(size, up::kContentHashChunk);
+  std::vector<uint8_t> buf(chunks <= 1 ? size : grain);
+
+  uint64_t h = up::kFnvOffsetBasis;
+  const size_t folds = chunks ? chunks : 1;
+  for (size_t c = 0; c < folds; ++c) {
+    const size_t begin = c * grain;
+    const size_t n = chunks <= 1 ? size : std::min(grain, size - begin);
+    if (n != 0 &&
+        !f.read(reinterpret_cast<char*>(buf.data()),
+                static_cast<std::streamsize>(n)))
+      return diag::persisting::Error(diag::persisting::kDurableIo,
+                                     "cannot read '" + path + "'");
+    h = up::FnvMixWord(h, up::StripedFnv1a64(buf.data(), n));
+  }
+  return up::FnvMixWord(h, size);
+}
+
+// --- CommitLock --------------------------------------------------------------
+
+std::expected<CommitLock, std::string> CommitLock::Acquire(
+    const std::string& target_path) {
+  CommitLock lock;
+#ifndef _WIN32
+  const std::string lock_path = target_path + ".lock";
+  const int fd = ::open(lock_path.c_str(), O_RDWR | O_CREAT, 0644);
+  if (fd < 0)
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "cannot open lock '" + lock_path + "'");
+  if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+    ::close(fd);
+    return diag::persisting::Error(
+        diag::persisting::kDurableIo,
+        "another update is committing to '" + target_path +
+            "' — refusing to race it");
+  }
+  lock.fd_ = fd;
+#else
+  (void)target_path;  // no advisory locking on the degraded Windows path
+#endif
+  return lock;
+}
+
+CommitLock::CommitLock(CommitLock&& o) noexcept : fd_(o.fd_) { o.fd_ = -1; }
+
+CommitLock& CommitLock::operator=(CommitLock&& o) noexcept {
+  if (this != &o) {
+#ifndef _WIN32
+    if (fd_ >= 0) ::close(fd_);
+#endif
+    fd_ = o.fd_;
+    o.fd_ = -1;
+  }
+  return *this;
+}
+
+CommitLock::~CommitLock() {
+#ifndef _WIN32
+  if (fd_ >= 0) ::close(fd_);  // closing drops the flock
+#endif
+}
+
+// --- DurableFileEdit ---------------------------------------------------------
+
+std::expected<DurableFileEdit, std::string> DurableFileEdit::Begin(
+    const std::string& source, const std::string& dest) {
+  DurableFileEdit edit;
+  edit.tmp_ = dest + ".tmp";
+  edit.dest_ = dest;
+
+  {
+    std::ifstream in(source, std::ios::binary);
+    if (!in)
+      return diag::persisting::Error(diag::persisting::kDurableIo,
+                                     "cannot open '" + source + "'");
+    std::ofstream out(edit.tmp_, std::ios::binary | std::ios::trunc);
+    if (!out)
+      return diag::persisting::Error(diag::persisting::kDurableIo,
+                                     "cannot write '" + edit.tmp_ + "'");
+    std::vector<char> buf(1u << 20);
+    while (in) {
+      in.read(buf.data(), static_cast<std::streamsize>(buf.size()));
+      const std::streamsize got = in.gcount();
+      if (got <= 0) break;
+      out.write(buf.data(), got);
+      if (!out)
+        return diag::persisting::Error(diag::persisting::kDurableIo,
+                                       "short write to '" + edit.tmp_ + "'");
+      edit.size_ += static_cast<uint64_t>(got);
+    }
+    if (in.bad())
+      return diag::persisting::Error(diag::persisting::kDurableIo,
+                                     "cannot read '" + source + "'");
+  }
+
+  edit.f_ = std::fopen(edit.tmp_.c_str(), "r+b");
+  if (!edit.f_)
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "cannot reopen '" + edit.tmp_ + "'");
+  return edit;
+}
+
+DurableFileEdit::DurableFileEdit(DurableFileEdit&& o) noexcept
+    : f_(o.f_),
+      tmp_(std::move(o.tmp_)),
+      dest_(std::move(o.dest_)),
+      size_(o.size_),
+      committed_(o.committed_) {
+  o.f_ = nullptr;
+  o.committed_ = true;  // the moved-from shell owns nothing to discard
+}
+
+DurableFileEdit& DurableFileEdit::operator=(DurableFileEdit&& o) noexcept {
+  if (this != &o) {
+    CloseAndDiscard();
+    f_ = o.f_;
+    tmp_ = std::move(o.tmp_);
+    dest_ = std::move(o.dest_);
+    size_ = o.size_;
+    committed_ = o.committed_;
+    o.f_ = nullptr;
+    o.committed_ = true;
+  }
+  return *this;
+}
+
+DurableFileEdit::~DurableFileEdit() { CloseAndDiscard(); }
+
+void DurableFileEdit::CloseAndDiscard() {
+  if (f_) {
+    std::fclose(f_);
+    f_ = nullptr;
+  }
+  if (!committed_ && !tmp_.empty()) std::remove(tmp_.c_str());
+}
+
+namespace {
+bool SeekTo(std::FILE* f, uint64_t offset) {
+#ifndef _WIN32
+  return ::fseeko(f, static_cast<off_t>(offset), SEEK_SET) == 0;
+#else
+  return std::fseek(f, static_cast<long>(offset), SEEK_SET) == 0;
+#endif
+}
+}  // namespace
+
+std::expected<void, std::string> DurableFileEdit::ReadAt(uint64_t offset,
+                                                         uint8_t* buf,
+                                                         size_t n) {
+  if (!f_ || offset > size_ || n > size_ - offset)
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "edit read outside '" + tmp_ + "'");
+  if (!SeekTo(f_, offset) || std::fread(buf, 1, n, f_) != n)
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "cannot read '" + tmp_ + "'");
+  return {};
+}
+
+std::expected<void, std::string> DurableFileEdit::WriteAt(uint64_t offset,
+                                                          const uint8_t* buf,
+                                                          size_t n) {
+  if (!f_ || offset > size_ || n > size_ - offset)
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "edit write outside '" + tmp_ + "'");
+  if (!SeekTo(f_, offset) || std::fwrite(buf, 1, n, f_) != n)
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "short write to '" + tmp_ + "'");
+  return {};
+}
+
+std::expected<void, std::string> DurableFileEdit::Commit() {
+  if (!f_)
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "commit of a closed edit");
+  if (std::fflush(f_) != 0)
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "cannot flush '" + tmp_ + "'");
+#ifndef _WIN32
+  // Same durability discipline as WriteFileDurable: data fsync before the
+  // rename, best-effort directory fsync after it.
+  if (::fsync(::fileno(f_)) != 0)
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "fsync of '" + tmp_ + "' failed");
+#endif
+  std::fclose(f_);
+  f_ = nullptr;
+  if (std::rename(tmp_.c_str(), dest_.c_str()) != 0)
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "atomic rename to '" + dest_ + "' failed");
+  committed_ = true;
+#ifndef _WIN32
+  const size_t slash = dest_.find_last_of('/');
+  const std::string dir = slash == std::string::npos
+                              ? std::string(".")
+                              : dest_.substr(0, slash == 0 ? 1 : slash);
+  const int dfd = ::open(dir.c_str(), O_RDONLY);
+  if (dfd >= 0) {
+    ::fsync(dfd);  // best effort: some filesystems reject directory fsync
+    ::close(dfd);
+  }
+#endif
+  return {};
 }
 
 }  // namespace seeml::update_rt

@@ -137,19 +137,15 @@ TEST(UpdateCompiler, TiedWeightMaterializesOnce) {
   ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
                        UpdateCompiler(config).Compile(model));
 
-  // The tied tensor resolves to a single SIR value: each consuming MatMul
-  // still gets its own adapter, but both share one frozen rodata copy and
-  // their emit entries patch the same source byte range.
+  // The tied tensor resolves to a single SIR value, and both consuming
+  // MatMuls share ONE adapter pair: per-site pairs would train fine but
+  // commit W + Δ_1 + Δ_2 to the single file range, polluting every site
+  // with every other site's delta. One adapter -> one delta -> one emit
+  // entry, and the committed weight is exactly the W + Δ every site
+  // computed during training.
   const PlanHeader h = HeaderOf(compiled);
-  ASSERT_EQ(compiled.adapters.size(), 2u);
-  EXPECT_EQ(compiled.adapters[0].weight_rodata_ref,
-            compiled.adapters[1].weight_rodata_ref);
-  ASSERT_EQ(h.emit_count, 2u);
-  std::vector<EmitEntry> emits(h.emit_count);
-  std::memcpy(emits.data(), compiled.plan.data() + h.emit_table_offset,
-              h.emit_count * sizeof(EmitEntry));
-  EXPECT_EQ(emits[0].smf_data_offset, emits[1].smf_data_offset);
-  EXPECT_EQ(emits[0].byte_size, emits[1].byte_size);
+  ASSERT_EQ(compiled.adapters.size(), 1u);
+  ASSERT_EQ(h.emit_count, 1u);
 }
 
 TEST(UpdateCompiler, MseLossUsesDenseLabels) {
@@ -262,6 +258,27 @@ TEST(UpdateCompiler, HyperparametersReachThePlanHeader) {
   EXPECT_NEAR(h.lr, 0.025f, 1e-9);
   EXPECT_NEAR(h.weight_decay, 0.005f, 1e-9);
   EXPECT_EQ(h.default_steps, 123u);
+}
+
+TEST(UpdateCompiler, RegatesTheBudgetOnTheExactCompiledFootprint) {
+  // The step-0 estimate is a lower bound blind to gradients, optimizer
+  // state, and transients; the driver must re-prove the budget against the
+  // bytes the runtime actually keeps resident — arena + plan blob.
+  SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 1);
+  UpdateConfig config = BaseConfig(kBatch);
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+  const uint64_t need = compiled.arena_size + compiled.plan.size();
+
+  config.memory_budget_bytes = need;
+  EXPECT_OK(UpdateCompiler(config).Compile(model));
+
+  // One byte short of the real footprint: the early lower bound admits it,
+  // the final gate must not.
+  config.memory_budget_bytes = need - 1;
+  const auto r = UpdateCompiler(config).Compile(model);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_STR_CONTAINS(r.error(), "cannot run locally");
 }
 
 TEST(UpdateCompiler, RejectsModelWithoutInputMetadata) {

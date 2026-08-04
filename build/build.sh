@@ -27,6 +27,7 @@ compile compiler/frontend/parser/sema.cc      sema.o
 compile compiler/frontend/parser/parser.cc    parser.o
 compile compiler/analysis/updater/pass_manager.cc  pass_manager.o
 compile compiler/analysis/updater/conv_lowering.cc conv_lowering.o
+compile compiler/analysis/updater/dce.cc           dce.o
 compile compiler/analysis/algebra/lora_grafter.cc  lora_grafter.o
 compile compiler/analysis/algebra/merge_builder.cc merge_builder.o
 compile compiler/analysis/calculus/autodiff.cc     autodiff.o
@@ -66,7 +67,8 @@ compile test/support/probes.cc                fixtures_probes.o
 LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/resource_analyzer.o \
       build/value_resolver.o build/sema.o build/parser.o \
-      build/pass_manager.o build/conv_lowering.o build/lora_grafter.o \
+      build/pass_manager.o build/conv_lowering.o build/dce.o \
+      build/lora_grafter.o \
       build/merge_builder.o build/autodiff.o build/optimizer_synth.o \
       build/quantization.o \
       build/arena_binder.o build/instruction_lowering.o \
@@ -91,7 +93,8 @@ TESTING="build/seetest_registry.o build/seetest_main.o \
 echo "  LINK seeml-update-compile"
 eval "$CXX -pthread build/seeml_update_compile.o $LIBS -o build/seeml-update-compile"
 echo "  LINK seeml-seeu-dump"
-eval "$CXX build/seeml_seeu_dump.o -o build/seeml-seeu-dump"
+# PlanSelfHash (the v4 integrity seal) runs on the parallel substrate.
+eval "$CXX -pthread build/seeml_seeu_dump.o build/parallel_for.o -o build/seeml-seeu-dump"
 
 for suite in \
     source/identity/hash_test source/parallel/parallel_for_test \

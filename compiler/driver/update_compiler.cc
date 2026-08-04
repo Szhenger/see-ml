@@ -1,9 +1,9 @@
 #include "compiler/driver/update_compiler.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
-#include <random>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -221,6 +221,27 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
                                     config_.optimizer.clip_norm)
             .Run(b, param_grads);
       });
+    // Phase C, the optimization phase's sweep: no op whose results nothing
+    // reads may survive to lowering. The driver builds its programs
+    // minimally, so today this proves an invariant (0 removed) more than it
+    // shrinks programs — and it is the seam where rewriting passes (fusion,
+    // simplification) get to leave dead ops behind. Roots are every value
+    // read outside the stream: the loss slot, the parameter gradients, and
+    // the whole primal snapshot, which lowers again as the eval program.
+    pm.Add("dce", [&](sir::Block& b) -> std::expected<void, std::string> {
+      std::unordered_set<const sir::Value*> roots;
+      roots.insert(loss);
+      for (const auto& [p, g] : param_grads) roots.insert(g);
+      for (const sir::Operation* op : primal_ops)
+        for (const auto& r : op->results()) roots.insert(r.get());
+      auto removed = DeadCodeElimination().Run(b, roots);
+      if (!removed) return std::unexpected(removed.error());
+      if (*removed != 0)
+        seeml::diag::Note(generating::kDriver,
+                          "dce removed " + std::to_string(*removed) +
+                              " dead op(s)");
+      return {};
+    });
     if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
   }
 
@@ -308,23 +329,42 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   if (!merge_instrs) return std::unexpected(merge_instrs.error());
 
   // --- 10. Persistent-segment initial image (deterministic, seeded). --------
-  // Every randn parameter owns an independent per-tensor RNG stream and a
-  // disjoint byte range of the image, so generation parallelizes per tensor
-  // with output identical to the serial loop.
+  // Every randn element is a pure function of (seed, element index):
+  // counter-based splitmix64 (the same generator the feeder's shuffler
+  // uses) feeding Box-Muller. That lets ParallelFor split *within* a
+  // tensor — the common case is one large adapter tensor, which a
+  // per-tensor stream would generate serially — while the image stays
+  // bit-identical at any thread count. It also removes the last
+  // implementation-defined numeric in the plan: std::normal_distribution's
+  // algorithm varies across standard libraries.
   std::vector<uint8_t> persist_init(binding->persistent_size, 0);
   std::vector<const ParamInit*> randn_params;
   for (const ParamInit& p : binding->params)
     if (p.init == "randn") randn_params.push_back(&p);  // zeros already
-  ParallelFor(randn_params.size(), 1, [&](size_t b, size_t e, size_t) {
-    for (size_t i = b; i < e; ++i) {
-      const ParamInit& p = *randn_params[i];
-      std::mt19937_64 rng(p.seed);
-      std::normal_distribution<float> dist(0.0f, p.std);
-      auto* dst = reinterpret_cast<float*>(persist_init.data() + p.offset);
-      const uint64_t count = static_cast<uint64_t>(p.value->shape().volume());
-      for (uint64_t j = 0; j < count; ++j) dst[j] = dist(rng);
-    }
-  });
+  auto counter_randn = [](uint64_t seed, uint64_t index) -> float {
+    uint64_t s = seed + 0x9E3779B97F4A7C15ULL * (index + 1);
+    auto next = [&s]() {
+      uint64_t z = (s += 0x9E3779B97F4A7C15ULL);
+      z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+      z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+      return z ^ (z >> 31);
+    };
+    // u1 in (0, 1] keeps the log finite; u2 in [0, 1).
+    const double u1 = (static_cast<double>(next() >> 11) + 1.0) * 0x1.0p-53;
+    const double u2 = static_cast<double>(next() >> 11) * 0x1.0p-53;
+    constexpr double kTwoPi = 6.283185307179586476925286766559;
+    return static_cast<float>(std::sqrt(-2.0 * std::log(u1)) *
+                              std::cos(kTwoPi * u2));
+  };
+  for (const ParamInit* rp : randn_params) {
+    const ParamInit& p = *rp;
+    auto* dst = reinterpret_cast<float*>(persist_init.data() + p.offset);
+    const uint64_t count = static_cast<uint64_t>(p.value->shape().volume());
+    ParallelFor(count, 4096, [&](size_t begin, size_t end, size_t) {
+      for (size_t j = begin; j < end; ++j)
+        dst[j] = counter_randn(p.seed, j) * p.std;
+    });
+  }
 
   // --- 11. Emit table: delta arena ranges -> source-file byte ranges. -------
   std::vector<EmitEntry> emit_table;
@@ -406,10 +446,23 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
         emit_table.size() * sizeof(EmitEntry));
 
   // Integrity seal: hash the whole blob with the hash field zeroed (it is,
-  // so far), then patch the result in. Initialize() re-derives and compares.
-  const uint64_t plan_hash = Fnv1a64(result.plan.data(), result.plan.size());
+  // so far), then patch the result in. Initialize() re-derives and compares
+  // via the same PlanSelfHash — one canonical function on both sides.
+  const uint64_t plan_hash =
+      PlanSelfHash(result.plan.data(), result.plan.size(),
+                   offsetof(PlanHeader, plan_hash));
   std::memcpy(result.plan.data() + offsetof(PlanHeader, plan_hash), &plan_hash,
               sizeof(plan_hash));
+
+  // The step-0 gate proved a lower bound before any work was done; every
+  // byte is bound now, so prove the exact resident footprint — the arena
+  // the runtime will allocate plus the plan blob it keeps loaded — also
+  // fits the budget. Optimizer state, gradients, and transients, which the
+  // early estimate deliberately excludes, are all inside the arena here.
+  if (auto fits = CheckPlanFitsLocally(header.arena_size, result.plan.size(),
+                                       config_.memory_budget_bytes);
+      !fits)
+    return std::unexpected(fits.error());
 
   // --- 13. Debug hooks + report. ----------------------------------------------
   std::ostringstream dump;

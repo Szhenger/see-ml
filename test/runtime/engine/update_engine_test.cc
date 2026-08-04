@@ -55,8 +55,7 @@ PlanHeader HeaderOf(const std::vector<uint8_t>& plan) {
 /// corruption gate. (The gate itself is covered by RejectsCorruptedBlob.)
 void ResealPlan(std::vector<uint8_t>& plan) {
   constexpr size_t kHashAt = offsetof(PlanHeader, plan_hash);
-  std::memset(plan.data() + kHashAt, 0, sizeof(uint64_t));
-  const uint64_t h = Fnv1a64(plan.data(), plan.size());
+  const uint64_t h = PlanSelfHash(plan.data(), plan.size(), kHashAt);
   std::memcpy(plan.data() + kHashAt, &h, sizeof(h));
 }
 
@@ -103,9 +102,28 @@ TEST(UpdateEngineLoad, RejectsBadMagicAndVersion) {
                           "bad plan magic");
   }
   {
+    // A plan from a future runtime: readable-range rejection, and the
+    // message names the negotiated range so the operator knows which side
+    // to upgrade.
     std::vector<uint8_t> bad = plan;
     PlanHeader h = HeaderOf(bad);
-    h.version = 42;
+    h.version = kSeeuVersion + 1;
+    PutHeader(bad, h);
+    UpdateEngine engine;
+    EXPECT_ERROR_CONTAINS(engine.LoadFromMemory(bad.data(), bad.size()),
+                          "unsupported plan version");
+    const auto r = engine.LoadFromMemory(bad.data(), bad.size());
+    ASSERT_FALSE(r.has_value());
+    EXPECT_STR_CONTAINS(r.error(),
+                        "v" + std::to_string(kSeeuOldestReadable) + "..v" +
+                            std::to_string(kSeeuVersion));
+  }
+  {
+    // A plan below the semantic-compatibility floor (v2's source_model_hash
+    // would mis-verify under the current hash): rejected, never misread.
+    std::vector<uint8_t> bad = plan;
+    PlanHeader h = HeaderOf(bad);
+    h.version = kSeeuOldestReadable - 1;
     PutHeader(bad, h);
     UpdateEngine engine;
     EXPECT_ERROR_CONTAINS(engine.LoadFromMemory(bad.data(), bad.size()),
@@ -494,6 +512,63 @@ TEST(UpdateEngineValidate, ValidationDrivesTheRegressionGate) {
   EXPECT_TRUE(report.has_validation);
   EXPECT_LT(report.val_final_loss, report.val_initial_loss);
   EXPECT_TRUE(report.improved());
+}
+
+TEST(UpdateEngineValidate, EvaluateMetricsReportsExactAccuracy) {
+  const std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
+  ASSERT_FALSE(plan.empty());
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
+
+  // 10 samples at batch 4: three eval batches, the last of which wraps two
+  // duplicate rows. All inputs identical, so every probability row is the
+  // same and exactly one class wins every argmax. With labels all set to
+  // class k the exact accuracy is 1 for the winning k and 0 otherwise —
+  // so the accuracies over k must sum to exactly 1. A wrapped duplicate
+  // leaking into the count would break that identity.
+  constexpr uint64_t kN = 10, kClasses = 3;
+  const std::vector<float> one_input = {0.3f, -0.1f, 0.7f, 0.2f, -0.5f, 0.4f};
+  std::vector<float> inputs;
+  for (uint64_t i = 0; i < kN; ++i)
+    inputs.insert(inputs.end(), one_input.begin(), one_input.end());
+
+  float sum = 0.0f;
+  for (uint64_t k = 0; k < kClasses; ++k) {
+    std::vector<int32_t> labels(kN, static_cast<int32_t>(k));
+    std::vector<uint8_t> label_bytes(kN * sizeof(int32_t));
+    std::memcpy(label_bytes.data(), labels.data(), label_bytes.size());
+    ASSERT_OK_AND_ASSIGN(
+        Dataset data,
+        Dataset::FromMemory(inputs, std::move(label_bytes), kN, kInDim,
+                            /*label_kind=*/1, /*label_dim=*/0));
+    ASSERT_OK_AND_ASSIGN(auto m, engine.EvaluateMetrics(data));
+    EXPECT_TRUE(m.has_accuracy);
+    EXPECT_TRUE(m.accuracy == 0.0f || m.accuracy == 1.0f);
+    sum += m.accuracy;
+  }
+  EXPECT_EQ(sum, 1.0f);
+}
+
+TEST(UpdateEngineValidate, TrainReportCarriesValidationAccuracy) {
+  UpdateConfig config = BaseConfig(kBatch);
+  config.optimizer.lr = 5e-3f;
+  const std::vector<uint8_t> plan = CompilePlan(config);
+  ASSERT_FALSE(plan.empty());
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
+
+  ASSERT_OK_AND_ASSIGN(Dataset data, MakeClassificationData(320, kInDim, 7));
+  ASSERT_OK_AND_ASSIGN(Dataset val, data.SplitValidation(0.2));
+  data.EnableShuffle(3);
+
+  TrainOptions options = Quiet();
+  options.validation = &val;
+  ASSERT_OK_AND_ASSIGN(auto report, engine.Train(data, 100, options));
+  EXPECT_TRUE(report.has_val_accuracy);
+  EXPECT_GE(report.val_initial_accuracy, 0.0f);
+  EXPECT_LE(report.val_initial_accuracy, 1.0f);
+  EXPECT_GE(report.val_final_accuracy, 0.0f);
+  EXPECT_LE(report.val_final_accuracy, 1.0f);
 }
 
 TEST(UpdateEngineTrain, ShouldStopInterruptsAndLossCurveRecords) {

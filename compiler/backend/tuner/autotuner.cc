@@ -47,7 +47,12 @@ AutotuneResult AutotuneGemmTiling(std::span<const GemmTiling> candidates,
   if (candidates.empty()) {
     architecting::DetectionFallback(
         architecting::kAutotuner,
-        "no tiling candidates to measure; keeping the architecture hint");
+        "no tiling candidates to measure; falling back to the conservative "
+        "default tiling");
+    // A default-constructed result would carry the all-zero tiling, which
+    // ValidateGemmTiling rejects and a blocked GEMM cannot execute. The
+    // all-defaults hint is the documented always-valid fallback geometry.
+    result.best = SuggestGemmTiling(HostArchInfo{});
     return result;
   }
 

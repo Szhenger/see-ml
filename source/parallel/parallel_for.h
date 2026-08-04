@@ -87,6 +87,9 @@ void ParallelForRaw(size_t n, size_t grain, ChunkFn fn, void* ctx);
 /// body: void(size_t begin, size_t end, size_t chunk_index). Blocks until
 /// every chunk has executed. body must only write state that is disjoint
 /// per chunk (or per chunk_index slot, for reductions).
+/// If a body throws, no further chunks are started, in-flight chunks finish,
+/// and the first exception is rethrown on the calling thread once every
+/// worker has detached from the loop.
 template <typename Body>
 void ParallelFor(size_t n, size_t grain, Body&& body) {
   using Decayed = std::remove_reference_t<Body>;

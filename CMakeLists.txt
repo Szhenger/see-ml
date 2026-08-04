@@ -77,6 +77,7 @@ add_library(seeml_update STATIC
     compiler/frontend/parser/parser.cc
     compiler/analysis/updater/pass_manager.cc
     compiler/analysis/updater/conv_lowering.cc
+    compiler/analysis/updater/dce.cc
     compiler/analysis/algebra/lora_grafter.cc
     compiler/analysis/algebra/merge_builder.cc
     compiler/analysis/calculus/autodiff.cc
@@ -125,6 +126,8 @@ add_executable(seeml-update-compile tool/seeml_update_compile.cc)
 target_link_libraries(seeml-update-compile PRIVATE seeml_update)
 
 add_executable(seeml-seeu-dump tool/seeml_seeu_dump.cc)
+# PlanSelfHash (the v4 integrity seal) runs on the parallel substrate.
+target_link_libraries(seeml-seeu-dump PRIVATE seeml_parallel)
 
 # ==============================================================================
 # Tests

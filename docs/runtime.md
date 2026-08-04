@@ -50,22 +50,42 @@ verifies at every boundary that each subsystem was used correctly
 
 - `VerifyPlanContract` — at load: the header is self-consistent with the
   blob (no section-size overflow, every section in bounds, the arena
-  dominates its persistent segment and image, the input/label/loss I/O
-  slots lie inside the mutable arena). This re-proves at load time what the
-  compiler's driver promised at emit time.
+  dominates its persistent segment and image, the batch is nonzero, the
+  input/label/loss I/O slots lie inside the mutable arena and are
+  element-aligned). This re-proves at load time what the compiler's driver
+  promised at emit time.
 - `VerifyExecutorContract` — after decode: every operand ref of every
   instruction passes the validator against its address space, and every
-  emit entry targets the arena. After this gate, `Execute()` dispatches
-  the programs blindly.
+  emit entry targets the arena, element-aligned. After this gate,
+  `Execute()` dispatches the programs blindly.
 - `VerifyFeederContract` — before training: the corpus matches the
   compiled plan's geometry (batch × input width, label kind and width,
-  class labels inside the softmax width).
+  class labels inside the *narrowest* softmax width found in any program —
+  train, eval, or merge — so a narrower eval softmax cannot be indexed
+  out of bounds by a label the train program tolerates).
 - `WellFormedDiagnostic` — at the `Train` boundary (a `Train`/`TrainImpl`
   split, exactly like the driver's `Compile`/`CompileImpl`): any escaping
   error must be attributable to a unit registered in `diagnostics/`.
 
 Contract violations mean a corrupt or foreign artifact, or a misused
 subsystem, and report under the engine's own unit.
+
+Loading is **transactional**: `Initialize` validates the candidate plan
+entirely into locals and commits engine state only after every contract
+passes, so a rejected re-`Load` leaves the previously loaded plan fully
+usable — never a half-overwritten mixture of two plans.
+
+Sequencing is enforced end to end: training steps and checkpoint loads
+invalidate any previously materialized merge (`RunMerge` must precede
+`CommitToModel` *with no parameter mutation in between*), so commit can
+never patch deltas that no longer match the adapter state. `Evaluate`
+rewinds the dataset before its pass — with a partial final batch, the
+wrapped samples that get double-counted depend on the entry cursor, and
+the regression gate must compare means over the identical sample multiset
+— and stages batches through the same `BatchPipeline` overlap as
+training. Commit's delta-apply fans each emit entry's element loop over
+`ParallelFor` (disjoint ranges, race-free), and the source-model identity
+check uses the parallel `ContentHash64`.
 
 ## feeder/ — the corpus
 
@@ -105,18 +125,37 @@ Every kernel is allocation-free over caller-provided arena/rodata pointers.
 
 `ValidateInstruction` checks every operand ref of an instruction against
 the address space it targets, with byte extents derived exactly as the
-kernels derive their loop bounds; writes may only target the mutable
-arena, and unknown opcodes are load errors, never silent skips. Its
-overflow-safe helpers (`MulOk`, `RangeOk`) are the single way plan bounds
-math is written.
+kernels derive their loop bounds; refs must be element-aligned (dispatch
+casts them to typed pointers — misalignment is UB, and a bus error on
+strict-alignment targets), writes may only target the mutable arena, and
+unknown opcodes are load errors, never silent skips. Its overflow-safe
+helpers (`MulOk`, `RangeOk`) are the single way plan bounds math is
+written.
 
 ## custodian/ — durable state
 
 - **`durable_io`** — the runtime's only path for bytes that must survive a
   power cut: fsync'd sidecar, atomic rename, best-effort directory fsync.
+  Also the commit path's scaling and concurrency primitives:
+  `HashFileContent` streams a file's ContentHash64 one deterministic chunk
+  at a time, `DurableFileEdit` is a copy-on-write editor that patches byte
+  ranges of a sidecar and durably renames it into place, and `CommitLock`
+  (an OS-level flock, released even on crash) refuses a second update
+  committing to the same target instead of letting the rename race decide.
+  Commit memory is O(chunk), never O(model), and the hash is verified on
+  the exact copy being patched — no check-to-patch window.
 - **`checkpoint`** — the SEKP container: the arena's persistent segment,
   hash-bound to the exact plan that laid it out; fully verified before a
   byte reaches the arena.
+=======
+  The Windows branch delivers the same contract with raw Win32 (checked
+  `WriteFile`, `FlushFileBuffers`, `MoveFileEx` with replace-existing —
+  CRT `rename` cannot overwrite, which would fail every checkpoint after
+  the first).
+- **`checkpoint`** — the SEKP container (v3): the arena's persistent
+  segment, hash-bound to the exact plan that laid it out and integrity-
+  hashed with the parallel `ContentHash64`; fully verified before a byte
+  reaches the arena.
 
 ## diagnostics/ — errors by process
 

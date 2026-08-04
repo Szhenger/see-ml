@@ -205,7 +205,11 @@ std::expected<void, std::string> Dataset::SaveToFile(
       i += n;
     }
   }
-  if (!f) return diag::feeding::Error("short write to '" + path + "'");
+  // Close before the state check: the tail of the stream buffer is flushed
+  // at close, and a failure there (disk full) after an early state check
+  // would report a truncated .sds file as saved.
+  f.close();
+  if (f.fail()) return diag::feeding::Error("short write to '" + path + "'");
   return {};
 }
 

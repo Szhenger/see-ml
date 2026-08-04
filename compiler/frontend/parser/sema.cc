@@ -57,6 +57,22 @@ std::expected<void, std::string> CheckGraph(const SmfModel& model) {
   if (!all_outputs.contains(model.output_name))
     return parsing::Error("model output '" + model.output_name +
                           "' was never produced by an operation");
+
+  // LayerNorm lowers with synthesized '<output>.mean' / '<output>.rstd'
+  // result ids; a model that declares either name itself would produce two
+  // SIR values with the same id and fail block verification with an
+  // internal-sounding error instead of a diagnostic.
+  for (const SmfOp& op : model.ops) {
+    if (op.kind != SmfOpKind::kLayerNorm) continue;
+    for (const char* suffix : {".mean", ".rstd"}) {
+      const std::string reserved = op.output + suffix;
+      if (bound.contains(reserved))
+        return parsing::OpError(
+            "LayerNorm", op.name,
+            "output reserves the derived name '" + reserved +
+                "', which the model also declares; rename one of them");
+    }
+  }
   return {};
 }
 
@@ -78,7 +94,12 @@ std::expected<void, std::string> CheckMatMul(const SmfOp& op,
 std::expected<void, std::string> CheckAddBias(const SmfOp& op,
                                               const sir::Value& x,
                                               const sir::Value& b) {
-  if (x.shape().dims.empty() || b.shape().dims.size() != 1 ||
+  // Rank-2 x is a lowering requirement, not a preference: sc_high.add_bias
+  // lowering reads dims 0/1 as rows/cols, so a rank-1 input aborts the
+  // compiler and a rank-3 input compiles to wrong math.
+  if (x.shape().dims.size() != 2)
+    return parsing::OpError("AddBias", op.name, "input must be rank-2");
+  if (b.shape().dims.size() != 1 ||
       b.shape().dims[0] != x.shape().dims.back())
     return parsing::OpError("AddBias", op.name,
                             "bias width does not match its input");
