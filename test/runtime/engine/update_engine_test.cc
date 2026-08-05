@@ -215,6 +215,58 @@ TEST(UpdateEngineLoad, RejectsClassLabelPlanWithoutSoftmax) {
                         "carries no softmax");
 }
 
+TEST(UpdateEngineLoad, BindsSoftmaxLabelsToTheStagedSlot) {
+  // The softmax pair indexes probability rows with raw i32 labels — safe
+  // only because the feeder contract validates exactly the label slot's
+  // `batch` staged entries. A plan pointing a softmax's label operand
+  // anywhere else, or claiming more rows than the staged batch, or
+  // claiming no class labels at all, would turn unvalidated bytes into
+  // indices (an OOB write through the backward kernel) — it must never
+  // reach dispatch.
+  const std::vector<uint8_t> pristine = CompilePlan(BaseConfig(kBatch));
+  ASSERT_FALSE(pristine.empty());
+  const PlanHeader h = HeaderOf(pristine);
+
+  // Locate the train program's softmax forward.
+  uint64_t at = 0;
+  UpdateInstruction ins;
+  for (uint64_t i = 0; i < h.train_instr_count; ++i) {
+    std::memcpy(&ins, pristine.data() + h.train_instr_offset + i * sizeof(ins),
+                sizeof(ins));
+    if (ins.opcode == static_cast<uint16_t>(OpCode::kSoftmaxXEntFwd)) {
+      at = h.train_instr_offset + i * sizeof(ins);
+      break;
+    }
+  }
+  ASSERT_NE(at, 0u);
+
+  auto patched = [&](auto&& mutate) {
+    std::vector<uint8_t> plan = pristine;
+    UpdateInstruction m = ins;
+    mutate(m);
+    std::memcpy(plan.data() + at, &m, sizeof(m));
+    ResealPlan(plan);
+    UpdateEngine engine;
+    return engine.LoadFromMemory(plan.data(), plan.size());
+  };
+
+  EXPECT_ERROR_CONTAINS(
+      patched([&](UpdateInstruction& m) { m.in[1] = h.input_ref; }),
+      "not the plan's staged label slot");
+  EXPECT_ERROR_CONTAINS(
+      patched([&](UpdateInstruction& m) { m.out[0] = h.batch / 2; }),
+      "row count disagrees");
+
+  std::vector<uint8_t> no_labels = pristine;
+  PlanHeader lied = h;
+  lied.label_kind = 0;
+  PutHeader(no_labels, lied);
+  UpdateEngine engine;
+  EXPECT_ERROR_CONTAINS(engine.LoadFromMemory(no_labels.data(),
+                                              no_labels.size()),
+                        "without class labels");
+}
+
 TEST(UpdateEngineLoad, LoadFromFileMatchesLoadFromMemory) {
   ScopedTempDir dir;
   const std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
@@ -292,6 +344,21 @@ TEST(UpdateEngineTrain, RejectsZeroStepsWithoutDefault) {
 
   ASSERT_OK_AND_ASSIGN(Dataset data, MakeClassificationData(64, kInDim, 4));
   EXPECT_ERROR_CONTAINS(engine.Train(data, 0, Quiet()), "no steps requested");
+}
+
+TEST(UpdateEngineTrain, ExecuteTrainOnceInvalidatesAnEarlierMerge) {
+  // Every parameter-mutating path must stale out previously materialized
+  // deltas — including this probe hook, which was the one gap: commit
+  // after RunMerge -> ExecuteTrainOnce would patch the model with deltas
+  // that no longer match the adapters.
+  const std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
+  ASSERT_FALSE(plan.empty());
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
+  ASSERT_OK(engine.RunMerge());
+  engine.ExecuteTrainOnce();
+  EXPECT_ERROR_CONTAINS(engine.CommitToModel("unused.smf", "unused.out"),
+                        "RunMerge() must precede");
 }
 
 TEST(UpdateEngineTrain, ExecuteTrainOnceBumpsStepFromZero) {

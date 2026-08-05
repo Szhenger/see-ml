@@ -395,6 +395,10 @@ float UpdateEngine::EffectiveLr() const {
 
 void UpdateEngine::ExecuteTrainOnce() {
   if (step_ == 0) step_ = 1;  // AdamW bias correction is 1-indexed
+  // Same discipline as TrainImpl and LoadCheckpoint: the step moves the
+  // adapter parameters, so deltas materialized by an earlier RunMerge are
+  // stale and commit must re-merge first.
+  merged_ = false;
   Execute(train_program_);
 }
 
