@@ -2,8 +2,11 @@
 
 Organized in the same fashion as the `compiler/` and `runtime/` subsystems:
 the harness and fixtures are partitioned per discipline behind façade
-headers, and the suites mirror the subsystem partition of the code they
-verify — a suite lives where its subject lives.
+headers (structural vocabulary — *subsystem*, *discipline*, *unit*,
+*façade header* — as defined in [docs/compiler.md](../docs/compiler.md)
+and the [README glossary](../README.md#glossary)), and the suites mirror
+the subsystem partition of the code they verify — a suite lives where its
+subject lives.
 
 ```
 test/
@@ -13,7 +16,7 @@ test/
     assert.h            the TEST / EXPECT_* / ASSERT_* macro surface
     seetest_main.cc     the runner main linked into every suite
   support/              shared fixtures (façade: builders.h)
-    models.cc           deterministic SMF model builders + BaseConfig
+    models.cc           deterministic SMF (SeeML Model Format) model builders + BaseConfig
     corpora.cc          synthetic datasets (classification/regression/unlabeled)
     probes.cc           engine-arena introspection + the test-run environment
     scoped_temp_dir     filesystem sandbox for I/O suites
