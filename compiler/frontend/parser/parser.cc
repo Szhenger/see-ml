@@ -136,6 +136,13 @@ std::expected<sir::Value*, std::string> BuildForward(
   if (!out)
     return parsing::Error("model output '" + model.output_name +
                           "' was never produced");
+  // Loss grafting consumes [batch, classes] logits, and the driver reads
+  // dims[1] unchecked; a rank-1 output (reachable via an activation of a
+  // rank-1 constant) must be a diagnostic, not an out_of_range crash.
+  if (out->shape().dims.size() != 2)
+    return parsing::Error("model output '" + model.output_name +
+                          "' must be rank-2 [batch, classes], got rank " +
+                          std::to_string(out->shape().dims.size()));
   return out;
 }
 

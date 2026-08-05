@@ -46,11 +46,13 @@ inline constexpr uint32_t kSeeuFlagsVersion = 5;
 //   - A SEMANTIC break — a field changes meaning or layout, as v3 did to
 //     source_model_hash — raises kSeeuOldestReadable to the breaking
 //     version, because misreading an old plan is worse than rejecting it.
-// v1 and v2 are below the floor: v1 lacks the integrity contract entirely,
-// and a v2 source_model_hash would mis-verify under v3's hash. Newer plans
-// than the runtime are always rejected — forward compatibility cannot be
-// proven from an unknown format.
-inline constexpr uint32_t kSeeuOldestReadable = 3;
+// v1..v3 are below the floor: v1 lacks the integrity contract entirely, a
+// v2 source_model_hash would mis-verify under v3's hash, and a v3 plan_hash
+// (serial Fnv1a64) can never match the v4 PlanSelfHash the loader verifies
+// unconditionally — admitting v3 would misreport every genuine v3 plan as
+// corrupt instead of unsupported. Newer plans than the runtime are always
+// rejected — forward compatibility cannot be proven from an unknown format.
+inline constexpr uint32_t kSeeuOldestReadable = 4;
 static_assert(kSeeuOldestReadable <= kSeeuVersion,
               "the readable floor cannot exceed the current version");
 

@@ -235,6 +235,8 @@ const std::unordered_map<std::string_view, VjpRule>& VjpRegistry() {
        [](sir::Operation* op, AdContext& ctx) {
          sir::Value* pred = op->operand(0);
          sir::Value* target = op->operand(1);
+         if (ctx.Needs(target))
+           return false;  // d/dtarget unsupported — refuse, don't drop
          sir::Value* seed = ctx.GradOf(op->result(0));
          if (!ctx.Needs(pred)) return true;
          sir::Value* dp =
@@ -252,6 +254,8 @@ const std::unordered_map<std::string_view, VjpRule>& VjpRegistry() {
       {"sc_high.kl_distill",
        [](sir::Operation* op, AdContext& ctx) {
          sir::Value* s_logits = op->operand(0);
+         if (ctx.Needs(op->operand(1)))
+           return false;  // d/dteacher unsupported — refuse, don't drop
          sir::Value* p_s = op->result(1);
          sir::Value* p_t = op->result(2);
          sir::Value* seed = ctx.GradOf(op->result(0));

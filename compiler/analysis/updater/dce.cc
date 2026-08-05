@@ -13,7 +13,7 @@ bool IsEffectful(const sir::Operation& op) {
   if (op.isMemoryOp()) return true;  // storage declarations, bound by name
   const std::string_view m = op.mnemonic();
   return m == "sc_low.clip_norm" || m == "sc_low.sgd_step" ||
-         m == "sc_low.adamw_step";
+         m == "sc_low.adamw_step" || m == "sc_low.gemm_acc";
 }
 
 }  // namespace

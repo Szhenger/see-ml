@@ -36,6 +36,19 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
     // activation), and is part of the student graph.
     if (!def || def->mnemonic() != "sc_mem.weight") return;
     if (IsTeacherValue(w) || IsTeacherValue(op->result(0))) return;
+    // Every use of W must itself be an eligible RHS-matmul site: commit
+    // rewrites the file's W to W + Δ, so a site reading W any other way
+    // (matmul LHS, Mul operand, W@W) would compute with pristine W during
+    // training and the gate, then silently change meaning after commit.
+    for (const sir::Operation* user : w->users())
+      if (user->mnemonic() != "sc_high.matmul" || user->numOperands() != 2 ||
+          user->operand(1) != w || user->operand(0) == w) {
+        seeml::diag::Note(updating::kLoraGrafter,
+                          "skipping '" + std::string(w->id()) +
+                              "': consumed outside a MatMul weight slot — "
+                              "committing W+delta would change that site");
+        return;
+      }
     if (!spec_.target_filters.empty()) {
       bool matched = false;
       for (const auto& f : spec_.target_filters)
