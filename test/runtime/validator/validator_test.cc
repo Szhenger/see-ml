@@ -44,6 +44,47 @@ TEST(PlanValidator, AcceptsInBoundsOperands) {
                                 kArena, kRodata, up::kSeeuVersion));
 }
 
+TEST(PlanValidator, TransformerOpcodesAreVersionGated) {
+  // A valid attention instruction: q/k/v/o at disjoint arena offsets,
+  // probs cache beyond them. B=1, S=4, H=2, d=4 -> T*D = 64 floats each,
+  // probs 32 floats.
+  up::UpdateInstruction attn;
+  attn.opcode = static_cast<uint16_t>(up::OpCode::kAttnFwd);
+  attn.in[0] = up::MakeArenaRef(0);
+  attn.in[1] = up::MakeArenaRef(64 * 4);
+  attn.in[2] = up::MakeArenaRef(128 * 4);
+  attn.in[3] = up::MakeArenaRef(192 * 4);
+  attn.out[0] = up::MakeArenaRef(256 * 4);
+  attn.out[1] = (uint64_t{1} << 32) | 4;  // B<<32|S
+  attn.out[2] = (uint64_t{2} << 32) | 4;  // H<<32|d
+  EXPECT_OK(ValidateInstruction(attn, 2048, kRodata, up::kSeeuVersion));
+  // The identical instruction inside a pre-v6 plan is corruption: no pre-v6
+  // compiler emits transformer opcodes.
+  EXPECT_ERROR_CONTAINS(
+      ValidateInstruction(attn, 2048, kRodata, up::kSeeuTransformerVersion - 1),
+      "pre-v6 plan");
+  // Overlapping q and o must fail the written-range discipline.
+  attn.in[3] = attn.in[0];
+  EXPECT_ERROR(ValidateInstruction(attn, 2048, kRodata, up::kSeeuVersion));
+  // Zero heads is malformed geometry.
+  attn.in[3] = up::MakeArenaRef(192 * 4);
+  attn.out[2] = 4;  // H == 0
+  EXPECT_ERROR(ValidateInstruction(attn, 2048, kRodata, up::kSeeuVersion));
+}
+
+TEST(PlanValidator, RopeRequiresEvenHeadWidth) {
+  up::UpdateInstruction rope;
+  rope.opcode = static_cast<uint16_t>(up::OpCode::kRopeFwd);
+  rope.in[0] = up::MakeArenaRef(0);
+  rope.in[1] = up::MakeArenaRef(96);
+  rope.out[0] = (uint64_t{1} << 32) | 2;  // B=1, S=2
+  rope.out[1] = (uint64_t{2} << 32) | 3;  // H=2, d=3: odd head width
+  EXPECT_ERROR(ValidateInstruction(rope, kArena, kRodata, up::kSeeuVersion));
+  rope.out[1] = (uint64_t{2} << 32) | 4;  // d=4 with disjoint in/out
+  rope.in[1] = up::MakeArenaRef(512);
+  EXPECT_OK(ValidateInstruction(rope, kArena, kRodata, up::kSeeuVersion));
+}
+
 TEST(PlanValidator, RejectsReadsPastTheArena) {
   const auto r = ValidateInstruction(
       AddEw(up::MakeArenaRef(900), up::MakeArenaRef(0), up::MakeArenaRef(256),

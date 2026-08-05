@@ -27,11 +27,12 @@ import struct
 import sys
 
 SMF_MAGIC = 0x31464D53  # "SMF1"
-SMF_VERSION = 2         # v2: Gelu/Silu/Mul/LayerNorm op kinds
+SMF_VERSION = 3         # v3: transformer op kinds, seq_len, per-op attr0
 SDS_MAGIC = 0x31534453  # "SDS1"
 ALIGN = 64
 
-OP_MATMUL, OP_ADDBIAS, OP_RELU, OP_GELU, OP_SILU, OP_MUL, OP_LAYERNORM = range(7)
+(OP_MATMUL, OP_ADDBIAS, OP_RELU, OP_GELU, OP_SILU, OP_MUL, OP_LAYERNORM,
+ OP_ADD, OP_RMSNORM, OP_ROPE, OP_ATTENTION) = range(11)
 
 
 def _align(n: int) -> int:
@@ -44,9 +45,10 @@ def _s(name: str) -> bytes:
 
 
 class _SmfBuilder:
-    def __init__(self, input_name: str, input_dim: int):
+    def __init__(self, input_name: str, input_dim: int, seq_len: int = 0):
         self.input_name = input_name
         self.output_name = input_name
+        self.seq_len = seq_len  # rows per sequence; 0 = non-sequential
         self.tensors = [
             dict(name=input_name, dims=[-1, input_dim], const=False, data=b"")
         ]
@@ -55,8 +57,9 @@ class _SmfBuilder:
     def add_tensor(self, name, dims, data: bytes):
         self.tensors.append(dict(name=name, dims=list(dims), const=True, data=data))
 
-    def add_op(self, kind, name, inputs, output):
-        self.ops.append(dict(kind=kind, name=name, inputs=inputs, output=output))
+    def add_op(self, kind, name, inputs, output, attr0: int = 0):
+        self.ops.append(dict(kind=kind, name=name, inputs=inputs,
+                             output=output, attr0=attr0))
         self.output_name = output
 
     def serialize(self) -> bytes:
@@ -64,6 +67,7 @@ class _SmfBuilder:
             out = struct.pack("<IIII", SMF_MAGIC, SMF_VERSION,
                               len(self.tensors), len(self.ops))
             out += _s(self.input_name) + _s(self.output_name)
+            out += struct.pack("<Q", self.seq_len)
             for t in self.tensors:
                 out += _s(t["name"])
                 out += struct.pack("<BB", len(t["dims"]), 1 if t["const"] else 0)
@@ -76,6 +80,7 @@ class _SmfBuilder:
                 for i in op["inputs"]:
                     out += _s(i)
                 out += _s(op["output"])
+                out += struct.pack("<I", op["attr0"])
             return out
 
         meta_size = len(meta({}))
@@ -150,6 +155,71 @@ def export_smf(model, path: str, input_name: str = "x"):
     with open(path, "wb") as f:
         f.write(b.serialize())
     print(f"wrote {path} ({idx} linear layers)")
+
+
+def export_decoder_smf(blocks, head, path: str, seq_len: int, num_heads: int,
+                       input_name: str = "x"):
+    """Export a pre-norm causal decoder stack to SMF v3.
+
+    `blocks` is a list of dicts of float32 numpy arrays, one per layer:
+        ln1_g [D]; wq, wk, wv, wo [D, D]; ln2_g [D];
+        w_gate, w_up [D, F]; w_down [F, D]
+    `head` is {"lnf_g": [D], "w_head": [D, V]}. Rows of the runtime input
+    are pre-embedded hidden states [T = B*seq_len, D] (embedding lookup is
+    outside the update scope — the corpus carries embedded vectors).
+    Requires D % num_heads == 0 and (D // num_heads) % 2 == 0 (RoPE pairs).
+    """
+    import numpy as np
+
+    D = int(blocks[0]["wq"].shape[0]) if blocks else int(head["w_head"].shape[0])
+    if D % num_heads != 0 or (D // num_heads) % 2 != 0:
+        raise ValueError("export_decoder_smf: num_heads must divide D and "
+                         "leave an even head width for RoPE")
+
+    b = _SmfBuilder(input_name, D, seq_len=seq_len)
+
+    def tensor(name, arr):
+        a = np.ascontiguousarray(np.asarray(arr, dtype=np.float32))
+        b.add_tensor(name, list(a.shape), a.tobytes())
+        return name
+
+    prev = input_name
+    for i, blk in enumerate(blocks):
+        p = f"l{i}."
+        tensor(p + "ln1_g", blk["ln1_g"])
+        b.add_op(OP_RMSNORM, p + "ln1", [prev, p + "ln1_g"], p + "n1")
+        for w in ("wq", "wk", "wv"):
+            tensor(p + w, blk[w])
+            b.add_op(OP_MATMUL, p + "mm_" + w, [p + "n1", p + w], p + w[1])
+        b.add_op(OP_ROPE, p + "rope_q", [p + "q"], p + "qr", attr0=num_heads)
+        b.add_op(OP_ROPE, p + "rope_k", [p + "k"], p + "kr", attr0=num_heads)
+        b.add_op(OP_ATTENTION, p + "attn", [p + "qr", p + "kr", p + "v"],
+                 p + "a", attr0=num_heads)
+        tensor(p + "wo", blk["wo"])
+        b.add_op(OP_MATMUL, p + "mm_wo", [p + "a", p + "wo"], p + "o")
+        b.add_op(OP_ADD, p + "res1", [prev, p + "o"], p + "x1")
+        tensor(p + "ln2_g", blk["ln2_g"])
+        b.add_op(OP_RMSNORM, p + "ln2", [p + "x1", p + "ln2_g"], p + "n2")
+        tensor(p + "w_gate", blk["w_gate"])
+        tensor(p + "w_up", blk["w_up"])
+        b.add_op(OP_MATMUL, p + "mm_gate", [p + "n2", p + "w_gate"], p + "g")
+        b.add_op(OP_MATMUL, p + "mm_up", [p + "n2", p + "w_up"], p + "u")
+        b.add_op(OP_SILU, p + "silu", [p + "g"], p + "s")
+        b.add_op(OP_MUL, p + "swiglu", [p + "s", p + "u"], p + "m")
+        tensor(p + "w_down", blk["w_down"])
+        b.add_op(OP_MATMUL, p + "mm_down", [p + "m", p + "w_down"], p + "d")
+        b.add_op(OP_ADD, p + "res2", [p + "x1", p + "d"], p + "x2")
+        prev = p + "x2"
+
+    tensor("lnf_g", head["lnf_g"])
+    b.add_op(OP_RMSNORM, "lnf", [prev, "lnf_g"], "nf")
+    tensor("w_head", head["w_head"])
+    b.add_op(OP_MATMUL, "mm_head", ["nf", "w_head"], "logits")
+
+    with open(path, "wb") as f:
+        f.write(b.serialize())
+    print(f"wrote {path} ({len(blocks)} decoder blocks, seq_len={seq_len}, "
+          f"heads={num_heads})")
 
 
 def export_sds(inputs, labels, path: str, label_kind: int = 1):

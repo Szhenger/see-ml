@@ -70,6 +70,29 @@ enum class OpCode : uint16_t {
   // dequantized on the fly as scale * q. Layouts mirror the f32 GEMMs.
   kGemmNNQ8 = 29,  // C = A @ dq(B);    in: A, Bq8, C, scale bits; out=M,N,K
   kGemmNTQ8 = 30,  // C = A @ dq(B)^T;  in: A, Bq8, C, scale bits; out=M,N,K
+  // --- Transformer family (plan v6). Sequence geometry rides packed dim
+  // words: out words carry B<<32|S (sequences x positions) and H<<32|d
+  // (heads x head width); activations are rank-2 [B*S, H*d] row-major with
+  // heads interleaved along the row. The attention probability matrix
+  // P[B,H,S,S] is flattened [B*H*S, S] and cached for the backward
+  // primitives, exactly as LayerNorm caches mean/rstd.
+  // RMSNorm over the last dim of x[N,D]: y = x * rstd(x) * gamma.
+  kRmsNormFwd = 31,  // in: x, gamma, y, rstd[N]; out[0]=N<<32|D
+  kRmsNormBwd = 32,  // in: dy, x, gamma, dx; out[0]=rstd ref, out[1]=N<<32|D
+  // Rotary position embedding on interleaved pairs within each head;
+  // requires d even. Backward is the transpose rotation (angle negated).
+  kRopeFwd = 33,  // in: x, y;   out[0]=B<<32|S, out[1]=H<<32|d, out[2]=base bits
+  kRopeBwd = 34,  // in: dy, dx; out[0]=B<<32|S, out[1]=H<<32|d, out[2]=base bits
+  // Causal scaled-dot-product attention. Forward computes, per (b, h):
+  //   P = softmax_rows(mask(Q K^T / sqrt(d))), O = P V
+  // caching P for the backward primitives.
+  kAttnFwd = 35,  // in: q, k, v, o; out[0]=P ref, out[1]=B<<32|S, out[2]=H<<32|d
+  kAttnDP = 36,   // dP = dO V^T:  in: dO, v, dP;    out[0..1]=B|S, H|d
+  kAttnDV = 37,   // dV = P^T dO:  in: P, dO, dV;    out[0..1]=B|S, H|d
+  // Row-softmax backward: dS = P * (dP - rowsum(dP * P)), any [rows, cols].
+  kSoftmaxRowsBwd = 38,  // in: P, dP, dS; out[0]=rows<<32|cols
+  kAttnDQ = 39,   // dQ = (dS K)/sqrt(d):   in: dS, k, dQ; out[0..1]=B|S, H|d
+  kAttnDK = 40,   // dK = (dS^T Q)/sqrt(d): in: dS, q, dK; out[0..1]=B|S, H|d
 };
 
 // --- Instruction flags (plan v5): fused GEMM epilogues. ----------------------

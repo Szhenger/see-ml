@@ -109,6 +109,7 @@ add_library(seeml_update_rt STATIC
     runtime/executor/normalization.cc
     runtime/executor/loss.cc
     runtime/executor/optimizer.cc
+    runtime/executor/attention.cc
     runtime/feeder/dataset.cc
     runtime/feeder/batch_pipeline.cc
     runtime/custodian/durable_io.cc

@@ -364,6 +364,58 @@ void UpdateEngine::Execute(const std::vector<up::UpdateInstruction>& program) {
       case up::OpCode::kCopy:
         k::Copy(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), ins.out[0]);
         break;
+      case up::OpCode::kRmsNormFwd:
+        k::RmsNormFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
+                      WritePtr(ins.in[2]), WritePtr(ins.in[3]),
+                      ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
+        break;
+      case up::OpCode::kRmsNormBwd:
+        k::RmsNormBwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
+                      ReadPtr(ins.in[2]), ReadPtr(ins.out[0]),
+                      WritePtr(ins.in[3]), ins.out[1] >> 32,
+                      ins.out[1] & 0xFFFFFFFFu);
+        break;
+      case up::OpCode::kRopeFwd:
+        k::RopeFwd(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), ins.out[0] >> 32,
+                   ins.out[0] & 0xFFFFFFFFu, ins.out[1] >> 32,
+                   ins.out[1] & 0xFFFFFFFFu, BitsToF32(ins.out[2]));
+        break;
+      case up::OpCode::kRopeBwd:
+        k::RopeBwd(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), ins.out[0] >> 32,
+                   ins.out[0] & 0xFFFFFFFFu, ins.out[1] >> 32,
+                   ins.out[1] & 0xFFFFFFFFu, BitsToF32(ins.out[2]));
+        break;
+      case up::OpCode::kAttnFwd:
+        k::AttnFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), ReadPtr(ins.in[2]),
+                   WritePtr(ins.in[3]), WritePtr(ins.out[0]),
+                   ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu,
+                   ins.out[2] >> 32, ins.out[2] & 0xFFFFFFFFu);
+        break;
+      case up::OpCode::kAttnDP:
+        k::AttnDP(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
+                  ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                  ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
+        break;
+      case up::OpCode::kAttnDV:
+        k::AttnDV(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
+                  ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                  ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
+        break;
+      case up::OpCode::kSoftmaxRowsBwd:
+        k::SoftmaxRowsBwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
+                          WritePtr(ins.in[2]), ins.out[0] >> 32,
+                          ins.out[0] & 0xFFFFFFFFu);
+        break;
+      case up::OpCode::kAttnDQ:
+        k::AttnDQ(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
+                  ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                  ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
+        break;
+      case up::OpCode::kAttnDK:
+        k::AttnDK(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
+                  ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                  ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
+        break;
     }
   }
 }

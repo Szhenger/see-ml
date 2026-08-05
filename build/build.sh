@@ -49,6 +49,7 @@ compile runtime/executor/activation.cc        rt_activation.o
 compile runtime/executor/normalization.cc     rt_normalization.o
 compile runtime/executor/loss.cc              rt_loss.o
 compile runtime/executor/optimizer.cc         rt_optimizer.o
+compile runtime/executor/attention.cc         rt_attention.o
 compile runtime/feeder/dataset.cc             dataset.o
 compile runtime/feeder/batch_pipeline.cc      batch_pipeline.o
 compile runtime/custodian/durable_io.cc       durable_io.o
@@ -83,6 +84,7 @@ LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/logger.o \
       build/rt_gemm.o build/rt_elementwise.o build/rt_activation.o \
       build/rt_normalization.o build/rt_loss.o build/rt_optimizer.o \
+      build/rt_attention.o \
       build/dataset.o \
       build/batch_pipeline.o build/durable_io.o build/plan_validator.o \
       build/checkpoint.o build/engine_contract.o build/update_engine.o \

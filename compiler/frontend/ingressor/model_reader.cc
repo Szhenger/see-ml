@@ -94,6 +94,7 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   uint64_t const_bytes = 0;
   model.input_name = r.ReadStr();
   model.output_name = r.ReadStr();
+  if (version >= 3) model.seq_len = r.Read<uint64_t>();
   // Counts are validated implicitly by the bounded Reader; reserving to the
   // declared sizes (capped against what the file could physically contain,
   // so a hostile header cannot demand gigabytes) avoids re-growth during the
@@ -172,8 +173,11 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     SmfOp op;
     const uint8_t kind = r.Read<uint8_t>();
     // Range-check before the cast: an unknown kind must be a load error, not
-    // an out-of-range enum that a downstream switch silently skips.
-    if (kind > kSmfOpKindMax)
+    // an out-of-range enum that a downstream switch silently skips. The
+    // ceiling is per-version — a v3 kind inside a pre-v3 file is corruption,
+    // not forward compatibility.
+    const uint8_t kind_max = version >= 3 ? kSmfOpKindMax : kSmfOpKindMaxV2;
+    if (kind > kind_max)
       return tokenizing::Error("unknown op kind " + std::to_string(kind) +
                                " in '" + path + "'");
     op.kind = static_cast<SmfOpKind>(kind);
@@ -181,6 +185,7 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     const uint8_t n_in = r.Read<uint8_t>();
     for (uint8_t k = 0; k < n_in; ++k) op.inputs.push_back(r.ReadStr());
     op.output = r.ReadStr();
+    if (version >= 3) op.attr0 = r.Read<uint32_t>();
     model.ops.push_back(std::move(op));
   }
 

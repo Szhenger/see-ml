@@ -76,6 +76,23 @@ TEST(Smf, SaveLoadRoundTrip) {
   }
 }
 
+TEST(Smf, SaveLoadRoundTripsV3TransformerFields) {
+  // The v3 additions — model seq_len, per-op attr0, and the transformer op
+  // kinds — must survive the byte round trip.
+  ScopedTempDir dir;
+  SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 9);
+  const std::string path = dir.File("decoder.smf");
+  ASSERT_OK(SaveSmf(path, model));
+
+  ASSERT_OK_AND_ASSIGN(SmfModel loaded, LoadSmf(path));
+  EXPECT_EQ(loaded.seq_len, 4u);
+  ASSERT_EQ(loaded.ops.size(), model.ops.size());
+  for (size_t i = 0; i < model.ops.size(); ++i) {
+    EXPECT_EQ(loaded.ops[i].kind, model.ops[i].kind);
+    EXPECT_EQ(loaded.ops[i].attr0, model.ops[i].attr0);
+  }
+}
+
 TEST(Smf, SaveComputesAlignedNonOverlappingOffsets) {
   ScopedTempDir dir;
   SmfModel model = MakeMlp(4, 8, 2, 2);
