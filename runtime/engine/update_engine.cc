@@ -139,21 +139,25 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   if (auto ok = VerifyExecutorContract(train, merge, eval, emit, header); !ok)
     return std::unexpected(ok.error());
 
-  // Class count for validating class-index labels at Train() time (the
-  // softmax kernels index rows of this width with raw dataset labels). Both
-  // executable label-consuming programs — train and eval — must agree, and
-  // a class-label plan with no softmax at all would leave labels entirely
-  // unvalidated, so it is rejected here.
-  for (const auto* program : {&train_program_, &eval_program_})
+  // Softmax class-width discipline (the kernels index rows of this width
+  // with raw dataset labels). Both executable label-consuming programs —
+  // train and eval — must agree on the forward width, and a class-label
+  // plan with no softmax at all would leave labels entirely unvalidated,
+  // so it is rejected. Scanned on the freshly decoded local streams and
+  // the local header — the members still describe whatever plan was loaded
+  // before this call, and nothing may be committed until every contract
+  // has passed.
+  uint64_t fwd_classes = 0;
+  for (const auto* program : {&train, &eval})
     for (const up::UpdateInstruction& ins : *program)
       if (static_cast<up::OpCode>(ins.opcode) ==
           up::OpCode::kSoftmaxXEntFwd) {
-        if (num_classes_ != 0 && num_classes_ != ins.out[1])
+        if (fwd_classes != 0 && fwd_classes != ins.out[1])
           return diag::executing::Error(
               "plan softmax class widths disagree across programs");
-        num_classes_ = ins.out[1];
+        fwd_classes = ins.out[1];
       }
-  if (header_.label_kind == 1 && num_classes_ == 0)
+  if (header.label_kind == 1 && fwd_classes == 0)
     return diag::executing::Error(
         "class-label plan carries no softmax cross-entropy — its labels "
         "could never be validated");
@@ -431,12 +435,6 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
       header_.label_kind == 1 && label_slot != nullptr &&
       eval_probs_ref_ != up::kNullRef && eval_softmax_cols_ > 0 &&
       eval_softmax_rows_ >= header_.batch;
-  // Deterministic gate: rewind so every evaluation consumes the identical
-  // sample multiset. With a partial final batch, the wrapped samples that
-  // get double-counted depend on the entry cursor — the pre- and
-  // post-training evals would otherwise average different multisets and the
-  // regression gate would compare incomparable numbers.
-  data.Rewind();
 
   // One pass over the set in compiled-batch chunks (final partial batch
   // wraps — the fixed-shape contract admits no ragged batch). The feeder
@@ -597,10 +595,6 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
       }
     }
   }
-
-  // Any executed step changes the adapters, so deltas materialized by an
-  // earlier RunMerge are stale: commit must re-merge first.
-  if (executed > 0) merged_ = false;
 
   report.steps = executed;
   report.initial_avg_loss =
