@@ -112,7 +112,8 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   // error, not a tolerated redundancy. Owning strings: the tensors vector
   // moves its names, which would dangle any view taken here.
   std::unordered_set<std::string> tensor_names;
-  tensor_names.reserve(std::min<size_t>(num_tensors, bytes.size()));
+  tensor_names.reserve(
+      std::min<size_t>(num_tensors, bytes.size() / kMinTensorRecordBytes));
 
   for (uint32_t i = 0; i < num_tensors && r.ok; ++i) {
     SmfTensor t;
@@ -125,6 +126,9 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     for (uint8_t d = 0; d < rank; ++d) t.dims.push_back(r.Read<int64_t>());
     t.data_offset = r.Read<uint64_t>();
     t.byte_size = r.Read<uint64_t>();
+    // A short read leaves zeroed fields; validating those zeros would blame
+    // the tensor ("invalid dims") for what is really a cut-off file.
+    if (!r.ok) return tokenizing::FileError("truncated file", path);
 
     // Dims must be strictly positive — except a dynamic (-1) dim on non-const
     // tensors, which the compiler binds to the compiled batch size — with a

@@ -424,7 +424,13 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
   // Every evaluation of a given set must score the same sample sequence:
   // the validation gate compares a pre- and post-training Evaluate, and a
   // cursor left mid-set by the previous pass would make the two passes
-  // weight different samples.
+  // weight different samples. Rewind alone is not enough for a shuffled
+  // set — a pass whose final partial batch wraps advances the permutation
+  // epoch, so the next pass would iterate a different order and
+  // double-count a different wrapped tail. Snapshot-and-restore pins the
+  // epoch too: the restore replays the permutation deterministically, so
+  // every pass over this set scores the identical multiset.
+  const Dataset::ServingPos entry_pos = data.SaveServingPos();
   data.Rewind();
 
   float* input_slot = WritePtr(header_.input_ref);
@@ -484,6 +490,7 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
       }
     }
   }
+  data.RestoreServingPos(entry_pos);
   EvalMetrics m;
   m.loss = static_cast<float>(total / static_cast<double>(batches));
   if (track_accuracy && counted > 0) {

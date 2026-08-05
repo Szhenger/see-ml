@@ -25,6 +25,15 @@ std::expected<void, std::string> CheckGraph(const SmfModel& model) {
   for (const SmfTensor& t : model.tensors) bound.insert(t.name);
   bound.insert(model.input_name);
 
+  // The graph input is I/O by definition. A constant tensor carrying the
+  // input's name would be silently shadowed by the batch input (the resolver
+  // binds the input first and never materializes the weight), compiling to
+  // wrong math instead of an error — reject the contradiction here.
+  for (const SmfTensor& t : model.tensors)
+    if (t.is_const && t.name == model.input_name)
+      return parsing::Error("model input '" + model.input_name +
+                            "' is declared as a constant tensor");
+
   for (const SmfOp& op : model.ops) {
     for (const std::string& in : op.inputs)
       if (!bound.contains(in) && all_outputs.contains(in))
@@ -57,22 +66,6 @@ std::expected<void, std::string> CheckGraph(const SmfModel& model) {
   if (!all_outputs.contains(model.output_name))
     return parsing::Error("model output '" + model.output_name +
                           "' was never produced by an operation");
-
-  // LayerNorm lowers with synthesized '<output>.mean' / '<output>.rstd'
-  // result ids; a model that declares either name itself would produce two
-  // SIR values with the same id and fail block verification with an
-  // internal-sounding error instead of a diagnostic.
-  for (const SmfOp& op : model.ops) {
-    if (op.kind != SmfOpKind::kLayerNorm) continue;
-    for (const char* suffix : {".mean", ".rstd"}) {
-      const std::string reserved = op.output + suffix;
-      if (bound.contains(reserved))
-        return parsing::OpError(
-            "LayerNorm", op.name,
-            "output reserves the derived name '" + reserved +
-                "', which the model also declares; rename one of them");
-    }
-  }
   return {};
 }
 

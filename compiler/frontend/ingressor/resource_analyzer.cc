@@ -56,20 +56,34 @@ TrainingFootprint EstimateTrainingFootprint(const SmfModel& model,
   // dynamic batch dim, which never appears last).
   std::unordered_map<std::string_view, const SmfTensor*> tensors;
   std::unordered_map<std::string_view, uint64_t> width;
+  std::unordered_map<std::string_view, uint64_t> row_count;
   tensors.reserve(model.tensors.size());
   for (const SmfTensor& t : model.tensors) {
     tensors[t.name] = &t;
     if (t.is_const) fp.weight_bytes = SatAdd(fp.weight_bytes, t.byte_size);
     if (!t.dims.empty() && t.dims.back() > 0)
       width[t.name] = static_cast<uint64_t>(t.dims.back());
+    // Row seed: a constant tensor keeps its declared row count (the parser
+    // sizes a MatMul from its actual LHS, which may be a const with rows !=
+    // batch); anything else is served at the compiled batch. Over-counting
+    // rows would break the lower-bound guarantee rejections rely on.
+    row_count[t.name] =
+        t.is_const ? (t.dims.size() >= 2 && t.dims.front() > 0
+                          ? static_cast<uint64_t>(t.dims.front())
+                          : 1)
+                   : rows;
   }
 
-  // Forward activations: propagate output widths with the parser's shape
-  // rules. Every activation is [batch, width] f32 and is cached for the
-  // backward pass. An unresolvable width contributes zero — the estimate
-  // must stay a lower bound.
+  // Forward activations: propagate output widths and row counts with the
+  // parser's shape rules. Every activation is [rows, width] f32 and is
+  // cached for the backward pass. An unresolvable width contributes zero —
+  // the estimate must stay a lower bound.
   for (const SmfOp& op : model.ops) {
     uint64_t w = 0;
+    uint64_t r = rows;
+    if (!op.inputs.empty())
+      if (auto it = row_count.find(op.inputs[0]); it != row_count.end())
+        r = it->second;
     switch (op.kind) {
       case SmfOpKind::kMatMul: {
         if (op.inputs.size() != 2) break;
@@ -89,17 +103,18 @@ TrainingFootprint EstimateTrainingFootprint(const SmfModel& model,
         if (auto it = width.find(op.inputs[0]); it != width.end())
           w = it->second;
         // LayerNorm additionally caches per-row mean/rstd for the backward
-        // kernel: two f32 per batch row.
+        // kernel: two f32 per row.
         if (op.kind == SmfOpKind::kLayerNorm)
           fp.activation_bytes =
-              SatAdd(fp.activation_bytes, SatMul(2 * sizeof(float), rows));
+              SatAdd(fp.activation_bytes, SatMul(2 * sizeof(float), r));
         break;
       }
     }
     if (w == 0) continue;
     width[op.output] = w;
-    fp.activation_bytes = SatAdd(fp.activation_bytes,
-                                 SatMul(SatMul(rows, w), sizeof(float)));
+    row_count[op.output] = r;
+    fp.activation_bytes =
+        SatAdd(fp.activation_bytes, SatMul(SatMul(r, w), sizeof(float)));
   }
   return fp;
 }

@@ -162,7 +162,12 @@ def export_sds(inputs, labels, path: str, label_kind: int = 1):
     if labels is None:
         label_kind, label_dim, lab = 0, 0, None
     elif label_kind == 1:
-        lab = np.asarray(labels, dtype=np.int32).reshape(n)
+        lab = np.asarray(labels)
+        if not np.issubdtype(lab.dtype, np.integer):
+            raise ValueError(
+                "export_sds: label_kind=1 expects integer class labels; "
+                "pass label_kind=2 for dense float targets")
+        lab = lab.astype(np.int32).reshape(n)
         label_dim = 0
     else:
         lab = np.asarray(labels, dtype=np.float32).reshape(n, -1)
