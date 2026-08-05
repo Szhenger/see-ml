@@ -99,6 +99,27 @@ std::expected<void, std::string> ValidateInstruction(
 
   const uint64_t d0 = ins.out[0], d1 = ins.out[1], d2 = ins.out[2];
   uint64_t mk = 0, kn = 0, mn = 0, nc = 0;
+  // Transformer opcodes exist only from v6: no earlier compiler emits them,
+  // so their appearance in an older plan is corruption, not a feature.
+  if (ins.opcode >= static_cast<uint16_t>(up::OpCode::kRmsNormFwd) &&
+      ins.opcode <= static_cast<uint16_t>(up::OpCode::kAttnDK) &&
+      plan_version < up::kSeeuTransformerVersion)
+    return diag::validating::Error(
+        "transformer opcode " + std::to_string(ins.opcode) + " in a pre-v" +
+        std::to_string(up::kSeeuTransformerVersion) + " plan");
+  // Shared geometry for the transformer family: activations are
+  // [B*S, H*d] f32, the probability matrix [B*H*S, S]. Derived with the
+  // same overflow-safe chain the kernels' loop bounds imply.
+  auto attn_geometry = [&](uint64_t bs_word, uint64_t hd_word, uint64_t* td,
+                           uint64_t* pn) {
+    const uint64_t B = bs_word >> 32, S = bs_word & 0xFFFFFFFFu;
+    const uint64_t H = hd_word >> 32, d = hd_word & 0xFFFFFFFFu;
+    uint64_t t = 0, dm = 0, bhs = 0;
+    if (B == 0 || S == 0 || H == 0 || d == 0) return false;
+    if (!MulOk(B, S, &t) || !MulOk(H, d, &dm) || !MulOk(t, dm, td)) return false;
+    if (!MulOk(t, H, &bhs) || !MulOk(bhs, S, pn)) return false;
+    return true;
+  };
   switch (static_cast<up::OpCode>(ins.opcode)) {
     case up::OpCode::kNop:
       return disjoint();
@@ -225,6 +246,75 @@ std::expected<void, std::string> ValidateInstruction(
     case up::OpCode::kFill:
       if (!ref_ok(ins.in[0], d0, true)) return fail();
       return disjoint();
+    case up::OpCode::kRmsNormFwd: {
+      const uint64_t rows = d0 >> 32, cols = d0 & 0xFFFFFFFFu;
+      if (!MulOk(rows, cols, &nc)) return fail();
+      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], cols, false) ||
+          !ref_ok(ins.in[2], nc, true) || !ref_ok(ins.in[3], rows, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kRmsNormBwd: {
+      const uint64_t rows = d1 >> 32, cols = d1 & 0xFFFFFFFFu;
+      if (!MulOk(rows, cols, &nc)) return fail();
+      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], nc, false) ||
+          !ref_ok(ins.in[2], cols, false) || !ref_ok(ins.in[3], nc, true) ||
+          !ref_ok(ins.out[0], rows, false))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kRopeFwd:
+    case up::OpCode::kRopeBwd: {
+      uint64_t td = 0, pn = 0;
+      if (!attn_geometry(d0, d1, &td, &pn)) return fail();
+      // The rotation pairs (2c, 2c+1) require an even head width.
+      if ((d1 & 0xFFFFFFFFu) % 2 != 0) return fail();
+      if (!ref_ok(ins.in[0], td, false) || !ref_ok(ins.in[1], td, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kAttnFwd: {
+      uint64_t td = 0, pn = 0;
+      if (!attn_geometry(d1, d2, &td, &pn)) return fail();
+      if (!ref_ok(ins.in[0], td, false) || !ref_ok(ins.in[1], td, false) ||
+          !ref_ok(ins.in[2], td, false) || !ref_ok(ins.in[3], td, true) ||
+          !ref_ok(ins.out[0], pn, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kAttnDP: {
+      uint64_t td = 0, pn = 0;
+      if (!attn_geometry(d0, d1, &td, &pn)) return fail();
+      if (!ref_ok(ins.in[0], td, false) || !ref_ok(ins.in[1], td, false) ||
+          !ref_ok(ins.in[2], pn, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kAttnDV: {
+      uint64_t td = 0, pn = 0;
+      if (!attn_geometry(d0, d1, &td, &pn)) return fail();
+      if (!ref_ok(ins.in[0], pn, false) || !ref_ok(ins.in[1], td, false) ||
+          !ref_ok(ins.in[2], td, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kSoftmaxRowsBwd: {
+      const uint64_t rows = d0 >> 32, cols = d0 & 0xFFFFFFFFu;
+      if (!MulOk(rows, cols, &nc)) return fail();
+      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], nc, false) ||
+          !ref_ok(ins.in[2], nc, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kAttnDQ:
+    case up::OpCode::kAttnDK: {
+      uint64_t td = 0, pn = 0;
+      if (!attn_geometry(d0, d1, &td, &pn)) return fail();
+      if (!ref_ok(ins.in[0], pn, false) || !ref_ok(ins.in[1], td, false) ||
+          !ref_ok(ins.in[2], td, true))
+        return fail();
+      return disjoint();
+    }
   }
   // Every known opcode returned through disjoint() above; anything else
   // must be a load error — Execute() would silently skip it.

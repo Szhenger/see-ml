@@ -457,6 +457,82 @@ TEST(UpdateSystem, NewOperatorGradientsMatchFiniteDifferences) {
 }
 
 // =============================================================================
+// 7b. Transformer operators (plan v6): decoder gradient check + training
+// =============================================================================
+
+TEST(UpdateSystem, TransformerGradientsMatchFiniteDifferences) {
+  // One pre-norm decoder block (RmsNorm/Rope/causal Attention/SwiGLU): the
+  // finite-difference check exercises the whole v6 stack — parser, VJP
+  // rules, lowering, validator, and the attention kernels — through the
+  // compiled plan.
+  const int64_t dim = 8, heads = 2, seq = 4, ffn = 10, vocab = 3;
+  const int64_t batch = 8;  // 2 sequences of 4 positions
+  SmfModel model = seeml::testing::MakeTinyDecoder(dim, heads, seq, ffn,
+                                                   vocab, 23);
+
+  UpdateConfig config = BaseConfig(batch);
+  config.lora.rank = 2;
+  config.emit_optimizer = false;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+  EXPECT_EQ(compiled.adapters.size(), 8u);  // wq wk wv wo wg wu wd wh
+
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+
+  std::mt19937_64 rng(2323);
+  std::normal_distribution<float> dist(0.0f, 1.0f);
+  std::vector<float> x(batch * dim);
+  for (auto& v : x) v = dist(rng);
+  FillSlots(engine, x, {1, 2, 0, 1, 2, 0, 1, 2});
+  // Normalization layers and the softmax inside attention amplify
+  // central-difference truncation noise, as with LayerNorm above.
+  GradientCheck(compiled, engine, 2323, /*tol=*/3e-2);
+}
+
+TEST(UpdateSystem, TransformerTrainsMergesAndCommits) {
+  const int64_t dim = 8, heads = 2, seq = 4, ffn = 16, vocab = 2;
+  const int64_t batch = 16;  // 4 sequences of 4 positions
+  SmfModel model = seeml::testing::MakeTinyDecoder(dim, heads, seq, ffn,
+                                                   vocab, 29);
+
+  UpdateConfig config = BaseConfig(batch);
+  config.optimizer.lr = 5e-3f;
+  config.optimizer.kind = OptimizerKind::kAdamW;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+
+  ASSERT_OK_AND_ASSIGN(Dataset data, MakeClassificationData(512, dim, 31));
+  ASSERT_OK_AND_ASSIGN(auto report, engine.Train(data, 300, Quiet()));
+  EXPECT_LT(report.final_avg_loss, report.initial_avg_loss * 0.9f);
+
+  ASSERT_OK(engine.RunMerge());
+  ScopedTempDir dir;
+  const std::string src = dir.File("decoder.smf");
+  ASSERT_OK(SaveSmf(src, model));
+  // Rebind the commit to the saved file's identity, as a fleet plan would
+  // be: recompile against the on-disk model.
+  ASSERT_OK_AND_ASSIGN(SmfModel disk_model, LoadSmf(src));
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate bound,
+                       UpdateCompiler(config).Compile(disk_model));
+  UpdateEngine bound_engine;
+  ASSERT_OK(
+      bound_engine.LoadFromMemory(bound.plan.data(), bound.plan.size()));
+  ASSERT_OK_AND_ASSIGN(auto bound_report,
+                       bound_engine.Train(data, 200, Quiet()));
+  EXPECT_LT(bound_report.final_avg_loss, bound_report.initial_avg_loss);
+  ASSERT_OK(bound_engine.RunMerge());
+  const std::string out = dir.File("decoder_updated.smf");
+  ASSERT_OK(bound_engine.CommitToModel(src, out));
+  // The committed file still loads and differs from the original weights.
+  ASSERT_OK_AND_ASSIGN(SmfModel committed, LoadSmf(out));
+  EXPECT_NE(committed.content_hash, disk_model.content_hash);
+}
+
+// =============================================================================
 // 8. Quantized base weights (int8 rodata)
 // =============================================================================
 

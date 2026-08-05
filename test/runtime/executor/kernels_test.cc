@@ -526,4 +526,179 @@ TEST(ParallelDeterminism, RowAndElementwiseKernelsAreThreadCountInvariant) {
                         RunAtWidth(8, 2 * n, silu));
 }
 
+// --- Transformer family (plan v6) ---------------------------------------------
+
+TEST(RmsNorm, ForwardMatchesNaiveFormula) {
+  const size_t rows = 3, cols = 5;
+  const std::vector<float> x = RandnVector(rows * cols, 60);
+  const std::vector<float> gamma = RandnVector(cols, 61);
+  std::vector<float> y(rows * cols), rstd(rows);
+  k::RmsNormFwd(x.data(), gamma.data(), y.data(), rstd.data(), rows, cols);
+  for (size_t r = 0; r < rows; ++r) {
+    double ss = 0.0;
+    for (size_t c = 0; c < cols; ++c)
+      ss += static_cast<double>(x[r * cols + c]) * x[r * cols + c];
+    const double rs = 1.0 / std::sqrt(ss / cols + 1e-5);
+    EXPECT_NEAR(rstd[r], static_cast<float>(rs), 1e-5);
+    for (size_t c = 0; c < cols; ++c)
+      EXPECT_NEAR(y[r * cols + c],
+                  static_cast<float>(x[r * cols + c] * rs * gamma[c]), 1e-5);
+  }
+}
+
+TEST(RmsNorm, BackwardMatchesFiniteDifferences) {
+  const size_t rows = 2, cols = 4, n = rows * cols;
+  const std::vector<float> x = RandnVector(n, 62);
+  const std::vector<float> gamma = RandnVector(cols, 63);
+  const std::vector<float> dy = RandnVector(n, 64);
+  std::vector<float> y(n), rstd(rows), dx(n);
+  k::RmsNormFwd(x.data(), gamma.data(), y.data(), rstd.data(), rows, cols);
+  k::RmsNormBwd(dy.data(), x.data(), gamma.data(), rstd.data(), dx.data(),
+                rows, cols);
+  // L = sum(dy * y): dL/dx_i must match the central difference.
+  const double eps = 1e-3;
+  for (size_t i = 0; i < n; ++i) {
+    std::vector<float> xp = x, xm = x;
+    xp[i] += static_cast<float>(eps);
+    xm[i] -= static_cast<float>(eps);
+    std::vector<float> yp(n), ym(n), tmp(rows);
+    k::RmsNormFwd(xp.data(), gamma.data(), yp.data(), tmp.data(), rows, cols);
+    k::RmsNormFwd(xm.data(), gamma.data(), ym.data(), tmp.data(), rows, cols);
+    double lp = 0.0, lm = 0.0;
+    for (size_t j = 0; j < n; ++j) {
+      lp += static_cast<double>(dy[j]) * yp[j];
+      lm += static_cast<double>(dy[j]) * ym[j];
+    }
+    EXPECT_NEAR(dx[i], static_cast<float>((lp - lm) / (2 * eps)), 2e-3);
+  }
+}
+
+TEST(Rope, BackwardIsTheExactAdjointOfForward) {
+  // For an orthogonal per-pair rotation R: <R x, y> == <x, R^T y> for all
+  // x, y — the defining property of the VJP the backward kernel implements.
+  const size_t B = 2, S = 3, H = 2, d = 4, n = B * S * H * d;
+  const std::vector<float> x = RandnVector(n, 70);
+  const std::vector<float> y = RandnVector(n, 71);
+  std::vector<float> rx(n), rty(n);
+  k::RopeFwd(x.data(), rx.data(), B, S, H, d, 10000.0f);
+  k::RopeBwd(y.data(), rty.data(), B, S, H, d, 10000.0f);
+  double lhs = 0.0, rhs = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    lhs += static_cast<double>(rx[i]) * y[i];
+    rhs += static_cast<double>(x[i]) * rty[i];
+  }
+  EXPECT_NEAR(static_cast<float>(lhs), static_cast<float>(rhs), 1e-4);
+  // Position 0 rotates by angle 0: the first row of every sequence is
+  // passed through bit-for-bit.
+  for (size_t b = 0; b < B; ++b)
+    for (size_t c = 0; c < H * d; ++c)
+      EXPECT_EQ(rx[b * S * H * d + c], x[b * S * H * d + c]);
+}
+
+TEST(Attention, ForwardMatchesNaiveReferenceAndIsCausal) {
+  const size_t B = 2, S = 3, H = 2, d = 2, D = H * d;
+  const std::vector<float> q = RandnVector(B * S * D, 80);
+  const std::vector<float> k2 = RandnVector(B * S * D, 81);
+  const std::vector<float> v = RandnVector(B * S * D, 82);
+  std::vector<float> o(B * S * D), p(B * H * S * S);
+  k::AttnFwd(q.data(), k2.data(), v.data(), o.data(), p.data(), B, S, H, d);
+
+  const double inv_sqrt_d = 1.0 / std::sqrt(static_cast<double>(d));
+  for (size_t b = 0; b < B; ++b)
+    for (size_t h = 0; h < H; ++h)
+      for (size_t i = 0; i < S; ++i) {
+        // Softmax over the causal prefix, computed independently.
+        std::vector<double> e(S, 0.0);
+        double denom = 0.0;
+        for (size_t j = 0; j <= i; ++j) {
+          double dot = 0.0;
+          for (size_t c = 0; c < d; ++c)
+            dot += static_cast<double>(q[(b * S + i) * D + h * d + c]) *
+                   k2[(b * S + j) * D + h * d + c];
+          e[j] = std::exp(dot * inv_sqrt_d);
+          denom += e[j];
+        }
+        for (size_t j = 0; j < S; ++j) {
+          const float want =
+              j <= i ? static_cast<float>(e[j] / denom) : 0.0f;
+          EXPECT_NEAR(p[((b * H + h) * S + i) * S + j], want, 1e-5);
+        }
+        for (size_t c = 0; c < d; ++c) {
+          double acc = 0.0;
+          for (size_t j = 0; j <= i; ++j)
+            acc += (e[j] / denom) * v[(b * S + j) * D + h * d + c];
+          EXPECT_NEAR(o[(b * S + i) * D + h * d + c],
+                      static_cast<float>(acc), 1e-5);
+        }
+      }
+}
+
+TEST(Attention, BackwardPrimitivesMatchFiniteDifferences) {
+  // L = sum(w * O): the primitive chain dP -> dS -> {dQ, dK} plus dV must
+  // match central differences of L through the full forward.
+  const size_t B = 1, S = 3, H = 2, d = 2, D = H * d, n = B * S * D;
+  const std::vector<float> q = RandnVector(n, 90);
+  const std::vector<float> k2 = RandnVector(n, 91);
+  const std::vector<float> v = RandnVector(n, 92);
+  const std::vector<float> w = RandnVector(n, 93);  // dL/dO
+
+  const size_t pn = B * H * S * S;
+  std::vector<float> o(n), p(pn);
+  k::AttnFwd(q.data(), k2.data(), v.data(), o.data(), p.data(), B, S, H, d);
+  std::vector<float> dp(pn), ds(pn), dq(n), dk(n), dv(n);
+  k::AttnDP(w.data(), v.data(), dp.data(), B, S, H, d);
+  k::AttnDV(p.data(), w.data(), dv.data(), B, S, H, d);
+  k::SoftmaxRowsBwd(p.data(), dp.data(), ds.data(), B * H * S, S);
+  k::AttnDQ(ds.data(), k2.data(), dq.data(), B, S, H, d);
+  k::AttnDK(ds.data(), q.data(), dk.data(), B, S, H, d);
+
+  auto loss = [&](const std::vector<float>& qq, const std::vector<float>& kk,
+                  const std::vector<float>& vv) {
+    std::vector<float> oo(n), pp(pn);
+    k::AttnFwd(qq.data(), kk.data(), vv.data(), oo.data(), pp.data(), B, S, H,
+               d);
+    double l = 0.0;
+    for (size_t i = 0; i < n; ++i) l += static_cast<double>(w[i]) * oo[i];
+    return l;
+  };
+  const double eps = 1e-3;
+  auto check = [&](const std::vector<float>& base, const std::vector<float>& g,
+                   int which) {
+    for (size_t i = 0; i < n; ++i) {
+      std::vector<float> bp = base, bm = base;
+      bp[i] += static_cast<float>(eps);
+      bm[i] -= static_cast<float>(eps);
+      const double lp = which == 0   ? loss(bp, k2, v)
+                        : which == 1 ? loss(q, bp, v)
+                                     : loss(q, k2, bp);
+      const double lm = which == 0   ? loss(bm, k2, v)
+                        : which == 1 ? loss(q, bm, v)
+                                     : loss(q, k2, bm);
+      EXPECT_NEAR(g[i], static_cast<float>((lp - lm) / (2 * eps)), 2e-3);
+    }
+  };
+  check(q, dq, 0);
+  check(k2, dk, 1);
+  check(v, dv, 2);
+}
+
+TEST(Attention, KernelsAreThreadCountInvariant) {
+  const size_t B = 2, S = 4, H = 2, d = 4, n = B * S * H * d;
+  const size_t pn = B * H * S * S;
+  const std::vector<float> q = RandnVector(n, 95);
+  const std::vector<float> k2 = RandnVector(n, 96);
+  const std::vector<float> v = RandnVector(n, 97);
+  auto attn = [&](float* out) {
+    k::AttnFwd(q.data(), k2.data(), v.data(), out, out + n, B, S, H, d);
+  };
+  auto rms = [&](float* out) {
+    std::vector<float> gamma(H * d, 1.0f);
+    k::RmsNormFwd(q.data(), gamma.data(), out, out + n, B * S, H * d);
+  };
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, n + pn, attn),
+                        RunAtWidth(8, n + pn, attn));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, n + B * S, rms),
+                        RunAtWidth(8, n + B * S, rms));
+}
+
 }  // namespace

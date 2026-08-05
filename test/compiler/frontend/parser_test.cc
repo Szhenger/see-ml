@@ -335,4 +335,80 @@ TEST(ForwardBuilder, ConcurrentDisjointBuildsAreSafe) {
   EXPECT_TRUE(op_count[0] > 0);
 }
 
+// --- Transformer vocabulary (SMF v3) -----------------------------------------
+
+TEST(ForwardBuilder, BuildsTransformerDecoder) {
+  // batch 8 = 2 sequences of seq_len 4; dim 8, 2 heads (head width 4, even).
+  SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 7);
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::F32, sir::Shape{8, 8});
+
+  ASSERT_OK_AND_ASSIGN(sir::Value * out,
+                       BuildForward(block, model, "", build.input, 8, build));
+  EXPECT_TRUE(out->shape() == sir::Shape({8, 3}));
+  EXPECT_TRUE(block.validate());
+  EXPECT_EQ(CountOps(block, "sc_high.rms_norm"), 3u);
+  EXPECT_EQ(CountOps(block, "sc_high.rope"), 2u);
+  EXPECT_EQ(CountOps(block, "sc_high.attention"), 1u);
+  EXPECT_EQ(CountOps(block, "sc_high.add"), 2u);
+
+  // The attention op carries the probability cache as a second result:
+  // [rows * heads, seq_len] = [16, 4].
+  block.walk([&](sir::Operation* op) {
+    if (op->mnemonic() != "sc_high.attention") return;
+    EXPECT_EQ(op->numResults(), 2u);
+    EXPECT_TRUE(op->result(1)->shape() == sir::Shape({16, 4}));
+    EXPECT_EQ(op->getAttrAs<int64_t>("heads").value_or(0), 2);
+    EXPECT_EQ(op->getAttrAs<int64_t>("seq").value_or(0), 4);
+  });
+}
+
+TEST(ForwardBuilder, RejectsAttentionWithIndivisibleHeads) {
+  SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 7);
+  for (auto& op : model.ops)
+    if (op.kind == SmfOpKind::kAttention) op.attr0 = 3;  // 3 does not divide 8
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::F32, sir::Shape{8, 8});
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, 8, build),
+                        "not divisible by num_heads");
+}
+
+TEST(ForwardBuilder, RejectsSequenceOpsWithoutSeqLen) {
+  SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 7);
+  model.seq_len = 0;  // the model forgot to declare its sequence geometry
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::F32, sir::Shape{8, 8});
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, 8, build),
+                        "declares no seq_len");
+}
+
+TEST(ForwardBuilder, RejectsBatchNotWholeSequences) {
+  SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 7);
+  sir::Block block;
+  GraphBuild build;
+  // 6 rows cannot be sequences of 4.
+  build.input = block.addArgument(sir::DataType::F32, sir::Shape{6, 8});
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, 6, build),
+                        "whole number of sequences");
+}
+
+TEST(ForwardBuilder, RejectsRopeWithOddHeadWidth) {
+  // dim 6 with 2 heads gives head width 3: attention would accept it, but
+  // RoPE's rotation pairs cannot.
+  SmfModel model;
+  model.input_name = "x";
+  model.output_name = "y";
+  model.seq_len = 2;
+  model.tensors.push_back({.name = "x", .dims = {-1, 6}, .is_const = false});
+  model.ops.push_back({SmfOpKind::kRope, "r", {"x"}, "y", 2});
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::F32, sir::Shape{4, 6});
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, 4, build),
+                        "head width must be even");
+}
+
 }  // namespace

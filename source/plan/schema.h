@@ -30,7 +30,16 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // bias/activation — exactly the misread the version gate exists to reject —
 // so plans that may set flags must declare v5. From v5 on the validator
 // rejects unknown flag bits, keeping every future flag loud.
-inline constexpr uint32_t kSeeuVersion = 5;
+// v6: the transformer opcode family (RMSNorm, RoPE, causal attention and
+// its backward primitives — instruction.h). Additive: no existing field
+// changes meaning, so the readable floor stays. The validator rejects the
+// new opcodes in any pre-v6 plan — no pre-v6 compiler emits them, so their
+// appearance there is corruption, not a feature.
+inline constexpr uint32_t kSeeuVersion = 6;
+
+// The version that introduced the transformer opcodes: plans below it must
+// not carry them, and are validated to.
+inline constexpr uint32_t kSeeuTransformerVersion = 6;
 
 // The version that introduced instruction flags: plans below it must carry
 // flags == 0 on every instruction, and are validated to.

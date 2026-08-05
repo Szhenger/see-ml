@@ -55,6 +55,16 @@ const char* OpName(uint16_t opcode) {
     case OpCode::kClipNorm:       return "clip.norm";
     case OpCode::kGemmNNQ8:       return "gemm.nn.q8";
     case OpCode::kGemmNTQ8:       return "gemm.nt.q8";
+    case OpCode::kRmsNormFwd:     return "rms_norm.fwd";
+    case OpCode::kRmsNormBwd:     return "rms_norm.bwd";
+    case OpCode::kRopeFwd:        return "rope.fwd";
+    case OpCode::kRopeBwd:        return "rope.bwd";
+    case OpCode::kAttnFwd:        return "attn.fwd";
+    case OpCode::kAttnDP:         return "attn.dp";
+    case OpCode::kAttnDV:         return "attn.dv";
+    case OpCode::kSoftmaxRowsBwd: return "softmax_rows.bwd";
+    case OpCode::kAttnDQ:         return "attn.dq";
+    case OpCode::kAttnDK:         return "attn.dk";
   }
   return "<unknown>";
 }

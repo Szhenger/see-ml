@@ -17,6 +17,7 @@ runtime/
   executor/     the kernel library the dispatcher executes
     update_kernels.h (façade)  kernel_policy.h
     gemm  elementwise  activation  normalization  loss  optimizer
+    attention  metal_gemm (Apple-only GPU dispatch harness)
   validator/    load-time bounds proof of every instruction
     plan_validator
   custodian/    durable state — checkpoints, atomic commits
@@ -129,6 +130,16 @@ family bit-for-bit across thread counts.
 - **`loss`** — softmax cross-entropy, MSE, KL distillation; NaN losses
   propagate so the engine's finite-loss guard trips.
 - **`optimizer`** — norm clipping, SGD, AdamW (in place).
+- **`attention`** (plan v6) — RMSNorm forward/backward, rotary position
+  embedding and its transpose, and causal scaled-dot-product attention:
+  a fused forward caching the probability matrix, plus the decomposed
+  backward primitives (dP, dV, row-softmax backward, dQ, dK). Decomposed
+  over (sequence, head, row) units — thread-count-invariant like every
+  other family.
+- **`metal_gemm`** (Apple-only, roadmap Project 5 G1a) — JIT-compiles the
+  compiler-emitted MSL on the local device and dispatches the GEMM family;
+  the correctness harness for the GPU path, not yet the engine's dispatch
+  backend.
 
 Every kernel is allocation-free over caller-provided arena/rodata pointers.
 
@@ -186,9 +197,10 @@ no logger).
 
 Every unit above (plus the `source/plan/` ABI headers,
 `source/identity/hash.h`, and the `source/parallel/` substrate) is vendored into the emitted package by the
-compiler's `native_emitter`, whose generated `build.sh` compiles every
-runtime translation unit and links `model_update` — the package
-builds with no access to this repository.
+compiler's `native_emitter`, whose generated `build.sh` compiles the
+fourteen runtime translation units and links `model_update` — the package
+builds with no access to this repository. (The Metal harness is not yet
+vendored; GPU execution in the package is roadmap Project 5 G1c.)
 
 ## Testing
 

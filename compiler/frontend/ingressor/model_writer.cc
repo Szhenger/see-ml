@@ -77,6 +77,7 @@ std::expected<void, std::string> SaveSmf(const std::string& path,
     w.Write<uint32_t>(static_cast<uint32_t>(model.ops.size()));
     w.WriteStr(model.input_name);
     w.WriteStr(model.output_name);
+    w.Write<uint64_t>(model.seq_len);
     for (const auto& t : model.tensors) {
       w.WriteStr(t.name);
       w.Write<uint8_t>(static_cast<uint8_t>(t.dims.size()));
@@ -91,6 +92,7 @@ std::expected<void, std::string> SaveSmf(const std::string& path,
       w.Write<uint8_t>(static_cast<uint8_t>(op.inputs.size()));
       for (const auto& in : op.inputs) w.WriteStr(in);
       w.WriteStr(op.output);
+      w.Write<uint32_t>(op.attr0);
     }
   };
 

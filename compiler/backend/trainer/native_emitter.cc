@@ -267,6 +267,7 @@ constexpr const char* kVendoredSources[] = {
     "runtime/executor/gemm.cc",           "runtime/executor/elementwise.cc",
     "runtime/executor/activation.cc",     "runtime/executor/normalization.cc",
     "runtime/executor/loss.cc",           "runtime/executor/optimizer.cc",
+    "runtime/executor/attention.cc",
     "runtime/feeder/dataset.h",           "runtime/feeder/dataset.cc",
     "runtime/feeder/batch_pipeline.h",    "runtime/feeder/batch_pipeline.cc",
     "runtime/validator/plan_validator.h", "runtime/validator/plan_validator.cc",
@@ -315,6 +316,7 @@ std::string BuildScript(const GemmTiling* tiling) {
   s += "$CXX $FLAGS -c source/parallel/parallel_for.cc -o parallel_for.o\n";
   s += "for unit in executor/gemm executor/elementwise executor/activation "
        "executor/normalization executor/loss executor/optimizer "
+       "executor/attention "
        "feeder/dataset feeder/batch_pipeline validator/plan_validator "
        "custodian/durable_io custodian/checkpoint engine/contract "
        "engine/update_engine; do\n";
@@ -322,8 +324,8 @@ std::string BuildScript(const GemmTiling* tiling) {
   s += "done\n";
   s += "$CXX $FLAGS update_main.o update_plan_embedded.o update_engine.o "
        "contract.o dataset.o batch_pipeline.o gemm.o elementwise.o "
-       "activation.o normalization.o loss.o optimizer.o parallel_for.o "
-       "durable_io.o plan_validator.o checkpoint.o "
+       "activation.o normalization.o loss.o optimizer.o attention.o "
+       "parallel_for.o durable_io.o plan_validator.o checkpoint.o "
        "-o model_update\n";
   s += "echo \"built: $(pwd)/model_update\"\n";
   return s;

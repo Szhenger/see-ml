@@ -77,6 +77,47 @@ void LayerNormBwd(const float* dy, const float* x, const float* gamma,
                   const float* mean, const float* rstd, float* dx, size_t rows,
                   size_t cols);
 
+// --- RMSNorm over the last dim of x[N,D], affine gamma[D] (plan v6) ----------
+// y = x * rstd * gamma with rstd = 1/sqrt(mean(x^2) + eps); forward caches
+// per-row rstd for the backward kernel. No bias, no mean subtraction.
+void RmsNormFwd(const float* x, const float* gamma, float* y, float* rstd,
+                size_t rows, size_t cols);
+void RmsNormBwd(const float* dy, const float* x, const float* gamma,
+                const float* rstd, float* dx, size_t rows, size_t cols);
+
+// --- Transformer family (plan v6) --------------------------------------------
+// Activations are rank-2 [B*S, H*d] row-major, heads interleaved along the
+// row: element (b, s, h, c) lives at [(b*S + s) * H*d + h*d + c]. The
+// attention probability matrix P[B,H,S,S] is flattened [B*H*S, S]:
+// P(b,h,i,j) at [((b*H + h)*S + i) * S + j].
+
+// Rotary position embedding on interleaved pairs (2c, 2c+1) within each
+// head; angle(s, c) = s * base^(-2c/d), d even. `backward` rotates by the
+// negated angle — the exact transpose of the forward rotation.
+void RopeFwd(const float* x, float* y, size_t B, size_t S, size_t H, size_t d,
+             float base);
+void RopeBwd(const float* dy, float* dx, size_t B, size_t S, size_t H,
+             size_t d, float base);
+
+// Causal scaled-dot-product attention forward: per (b, h),
+//   P = softmax_rows(mask(Q K^T / sqrt(d))),  O = P V
+// with the causal mask admitting j <= i. P is written for the backward
+// primitives (masked entries are exactly 0).
+void AttnFwd(const float* q, const float* k, const float* v, float* o,
+             float* probs, size_t B, size_t S, size_t H, size_t d);
+// Backward primitives (dispatched in this order by the compiled stream):
+void AttnDP(const float* dout, const float* v, float* dp, size_t B, size_t S,
+            size_t H, size_t d);             // dP = dO V^T
+void AttnDV(const float* probs, const float* dout, float* dv, size_t B,
+            size_t S, size_t H, size_t d);   // dV = P^T dO
+// Row-softmax backward for any [rows, cols]: dS = P * (dP - rowsum(dP * P)).
+void SoftmaxRowsBwd(const float* probs, const float* dp, float* ds,
+                    size_t rows, size_t cols);
+void AttnDQ(const float* ds, const float* k, float* dq, size_t B, size_t S,
+            size_t H, size_t d);             // dQ = (dS K) / sqrt(d)
+void AttnDK(const float* ds, const float* q, float* dk, size_t B, size_t S,
+            size_t H, size_t d);             // dK = (dS^T Q) / sqrt(d)
+
 // --- Losses ------------------------------------------------------------------
 // loss = -(1/N) sum_n log softmax(logits)_n[label_n]; probs cached for bwd.
 void SoftmaxXEntFwd(const float* logits, const int32_t* labels, float* loss,

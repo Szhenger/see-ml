@@ -49,6 +49,18 @@ compile runtime/executor/activation.cc        rt_activation.o
 compile runtime/executor/normalization.cc     rt_normalization.o
 compile runtime/executor/loss.cc              rt_loss.o
 compile runtime/executor/optimizer.cc         rt_optimizer.o
+compile runtime/executor/attention.cc         rt_attention.o
+
+# Metal GEMM dispatch (G1a) exists only on Apple hosts; elsewhere the
+# hardware-gated suite compiles to zero tests and nothing links the runner.
+METAL_OBJS=""
+METAL_LDFLAGS=""
+if [ "$(uname)" = "Darwin" ]; then
+  echo "  OBJCXX runtime/executor/metal_gemm.mm"
+  eval "$CXX $FLAGS -x objective-c++ -fobjc-arc -c runtime/executor/metal_gemm.mm -o build/rt_metal_gemm.o"
+  METAL_OBJS="build/rt_metal_gemm.o"
+  METAL_LDFLAGS="-framework Metal -framework Foundation"
+fi
 compile runtime/feeder/dataset.cc             dataset.o
 compile runtime/feeder/batch_pipeline.cc      batch_pipeline.o
 compile runtime/custodian/durable_io.cc       durable_io.o
@@ -83,6 +95,7 @@ LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/logger.o \
       build/rt_gemm.o build/rt_elementwise.o build/rt_activation.o \
       build/rt_normalization.o build/rt_loss.o build/rt_optimizer.o \
+      build/rt_attention.o \
       build/dataset.o \
       build/batch_pipeline.o build/durable_io.o build/plan_validator.o \
       build/checkpoint.o build/engine_contract.o build/update_engine.o \
@@ -109,13 +122,14 @@ for suite in \
     compiler/driver/update_compiler_test compiler/driver/driver_test \
     compiler/diagnostics/diagnostics_test \
     runtime/feeder/dataset_test runtime/feeder/batch_pipeline_test \
-    runtime/executor/kernels_test runtime/validator/validator_test \
+    runtime/executor/kernels_test runtime/executor/metal_gemm_test \
+    runtime/validator/validator_test \
     runtime/custodian/custodian_test \
     runtime/engine/engine_test runtime/engine/update_engine_test \
     system/update_system_test; do
   name="seeml_$(basename "$suite")"
   echo "  CXX+LINK $name"
   eval "$CXX $FLAGS -c 'test/$suite.cc' -o 'build/$name.o'"
-  eval "$CXX -pthread 'build/$name.o' $TESTING $LIBS -o 'build/$name'"
+  eval "$CXX -pthread 'build/$name.o' $TESTING $LIBS $METAL_OBJS $METAL_LDFLAGS -o 'build/$name'"
 done
 echo "build complete"

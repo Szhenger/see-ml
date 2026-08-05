@@ -50,6 +50,27 @@ namespace seeml::update::sema {
     const SmfOp& op, const seeml::sir::Value& x,
     const seeml::sir::Value& gamma, const seeml::sir::Value& beta);
 
+/// Add: elementwise residual — operand shapes must agree exactly.
+[[nodiscard]] std::expected<void, std::string> CheckAdd(
+    const SmfOp& op, const seeml::sir::Value& x, const seeml::sir::Value& y);
+
+/// RMSNorm: rank-2 input; rank-1 gamma matching the last dimension.
+[[nodiscard]] std::expected<void, std::string> CheckRmsNorm(
+    const SmfOp& op, const seeml::sir::Value& x,
+    const seeml::sir::Value& gamma);
+
+/// RoPE: rank-2 input; heads (attr0) divides the width into an even head
+/// width; the model declares a seq_len that divides the row count.
+[[nodiscard]] std::expected<void, std::string> CheckRope(
+    const SmfOp& op, const seeml::sir::Value& x, uint32_t heads,
+    uint64_t seq_len);
+
+/// Attention: q/k/v rank-2 with identical shapes; heads (attr0) divides the
+/// width; the model declares a seq_len that divides the row count.
+[[nodiscard]] std::expected<void, std::string> CheckAttention(
+    const SmfOp& op, const seeml::sir::Value& q, const seeml::sir::Value& k,
+    const seeml::sir::Value& v, uint32_t heads, uint64_t seq_len);
+
 }  // namespace seeml::update::sema
 
 #endif  // SEEML_COMPILER_FRONTEND_PARSER_SEMA_H_

@@ -158,6 +158,82 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.out[1] = ref(op->operand(4));  // rstd cache
       ins.out[2] = (static_cast<uint64_t>(dx->shape().dims.at(0)) << 32) |
                    static_cast<uint64_t>(dx->shape().dims.at(1));
+    } else if (m == "sc_high.rms_norm") {
+      const sir::Value* y = op->result(0);
+      set(OpCode::kRmsNormFwd);
+      ins.in[0] = ref(op->operand(0));   // x
+      ins.in[1] = ref(op->operand(1));   // gamma
+      ins.in[2] = ref(y);
+      ins.in[3] = ref(op->result(1));    // rstd cache
+      ins.out[0] = (static_cast<uint64_t>(y->shape().dims.at(0)) << 32) |
+                   static_cast<uint64_t>(y->shape().dims.at(1));
+    } else if (m == "sc_low.rms_norm_grad") {
+      const sir::Value* dx = op->result(0);
+      set(OpCode::kRmsNormBwd);
+      ins.in[0] = ref(op->operand(0));   // dy
+      ins.in[1] = ref(op->operand(1));   // x
+      ins.in[2] = ref(op->operand(2));   // gamma
+      ins.in[3] = ref(dx);
+      ins.out[0] = ref(op->operand(3));  // rstd cache
+      ins.out[1] = (static_cast<uint64_t>(dx->shape().dims.at(0)) << 32) |
+                   static_cast<uint64_t>(dx->shape().dims.at(1));
+    } else if (m == "sc_high.rope" || m == "sc_low.rope_grad" ||
+               m == "sc_high.attention" || m == "sc_low.attn_dp" ||
+               m == "sc_low.attn_dv" || m == "sc_low.attn_dq" ||
+               m == "sc_low.attn_dk") {
+      // Shared sequence geometry, packed as B<<32|S and H<<32|d. Derived
+      // from a designated [T, H*d] activation of the op plus the heads/seq
+      // attributes the frontend validated (seq | T, heads | D).
+      const sir::Value* act = m == "sc_high.attention" ? op->operand(0)
+                              : m == "sc_low.attn_dp"  ? op->operand(0)
+                                                       : op->result(0);
+      const int64_t heads = op->getAttrAs<int64_t>("heads").value_or(0);
+      const int64_t seq = op->getAttrAs<int64_t>("seq").value_or(0);
+      const int64_t rows = act->shape().dims.at(0);
+      const int64_t width = act->shape().dims.at(1);
+      if (heads <= 0 || seq <= 0 || rows % seq != 0 || width % heads != 0) {
+        error = "malformed sequence geometry on '" + std::string(m) + "'";
+        break;
+      }
+      const uint64_t bs = (static_cast<uint64_t>(rows / seq) << 32) |
+                          static_cast<uint64_t>(seq);
+      const uint64_t hd = (static_cast<uint64_t>(heads) << 32) |
+                          static_cast<uint64_t>(width / heads);
+      if (m == "sc_high.rope" || m == "sc_low.rope_grad") {
+        set(m == "sc_high.rope" ? OpCode::kRopeFwd : OpCode::kRopeBwd);
+        ins.in[0] = ref(op->operand(0));
+        ins.in[1] = ref(op->result(0));
+        ins.out[0] = bs;
+        ins.out[1] = hd;
+        ins.out[2] = F32Bits(op->getAttrAs<float>("base").value_or(10000.0f));
+      } else if (m == "sc_high.attention") {
+        set(OpCode::kAttnFwd);
+        ins.in[0] = ref(op->operand(0));   // q
+        ins.in[1] = ref(op->operand(1));   // k
+        ins.in[2] = ref(op->operand(2));   // v
+        ins.in[3] = ref(op->result(0));    // o
+        ins.out[0] = ref(op->result(1));   // probs cache
+        ins.out[1] = bs;
+        ins.out[2] = hd;
+      } else {
+        set(m == "sc_low.attn_dp"   ? OpCode::kAttnDP
+            : m == "sc_low.attn_dv" ? OpCode::kAttnDV
+            : m == "sc_low.attn_dq" ? OpCode::kAttnDQ
+                                    : OpCode::kAttnDK);
+        ins.in[0] = ref(op->operand(0));
+        ins.in[1] = ref(op->operand(1));
+        ins.in[2] = ref(op->result(0));
+        ins.out[0] = bs;
+        ins.out[1] = hd;
+      }
+    } else if (m == "sc_low.softmax_rows_grad") {
+      const sir::Value* ds = op->result(0);
+      set(OpCode::kSoftmaxRowsBwd);
+      ins.in[0] = ref(op->operand(0));   // probs
+      ins.in[1] = ref(op->operand(1));   // dp
+      ins.in[2] = ref(ds);
+      ins.out[0] = (static_cast<uint64_t>(ds->shape().dims.at(0)) << 32) |
+                   static_cast<uint64_t>(ds->shape().dims.at(1));
     } else if (m == "sc_low.clip_norm") {
       set(OpCode::kClipNorm);
       ins.in[0] = ref(op->operand(0));

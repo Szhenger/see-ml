@@ -98,15 +98,33 @@ TrainingFootprint EstimateTrainingFootprint(const SmfModel& model,
       case SmfOpKind::kGelu:
       case SmfOpKind::kSilu:
       case SmfOpKind::kMul:
-      case SmfOpKind::kLayerNorm: {
+      case SmfOpKind::kLayerNorm:
+      case SmfOpKind::kAdd:
+      case SmfOpKind::kRmsNorm:
+      case SmfOpKind::kRope:
+      case SmfOpKind::kAttention: {
         if (op.inputs.empty()) break;
         if (auto it = width.find(op.inputs[0]); it != width.end())
           w = it->second;
         // LayerNorm additionally caches per-row mean/rstd for the backward
-        // kernel: two f32 per row.
+        // kernel (two f32 per row); RMSNorm caches rstd (one).
         if (op.kind == SmfOpKind::kLayerNorm)
           fp.activation_bytes =
               SatAdd(fp.activation_bytes, SatMul(2 * sizeof(float), r));
+        if (op.kind == SmfOpKind::kRmsNorm)
+          fp.activation_bytes =
+              SatAdd(fp.activation_bytes, SatMul(sizeof(float), r));
+        // Attention caches the probability matrix P[B,H,S,S] — flattened
+        // [rows * heads, seq_len] — for the backward primitives; usually
+        // the dominant transformer activation. heads/seq_len of zero mean
+        // an invalid model the parser will reject; contribute nothing here
+        // so the estimate stays a lower bound.
+        if (op.kind == SmfOpKind::kAttention && op.attr0 > 0 &&
+            model.seq_len > 0)
+          fp.activation_bytes = SatAdd(
+              fp.activation_bytes,
+              SatMul(SatMul(SatMul(r, op.attr0), model.seq_len),
+                     sizeof(float)));
         break;
       }
     }
