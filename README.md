@@ -1,4 +1,4 @@
-# SeeML: An ML Update Compiler (How to Train Your Local Model)
+# SeeML: An ML Update Compiler (How to Train Your Model)
 
 SeeML compiles an on-device model update **ahead of time**. On a build host,
 it takes a frozen feed-forward model, grafts low-rank (LoRA) adapters onto
