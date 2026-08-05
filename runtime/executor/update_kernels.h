@@ -4,6 +4,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "source/plan/instruction.h"  // EpilogueAct: the fused-epilogue ABI
+
 // =============================================================================
 // The training kernel library executed by the UpdateEngine dispatcher —
 // the executor's façade. The implementations are partitioned per kernel
@@ -25,8 +27,15 @@
 namespace seeml::update_rt::kernels {
 
 // --- GEMM family: C[M,N] -----------------------------------------------------
+// The forward GEMMs take an optional fused epilogue (plan v5): after a row
+// of C is fully accumulated, C[m,n] = act(C[m,n] + bias[n]) is applied in
+// the write-back, per-element identical to the standalone kAddBias and
+// k<Act>Fwd kernels — one pass over hot C instead of three arena
+// round-trips. bias == nullptr skips the bias; act == kNone the activation.
 void GemmNN(const float* A, const float* B, float* C, size_t M, size_t N,
-            size_t K);                       // C = A[M,K] @ B[K,N]
+            size_t K, const float* bias = nullptr,
+            seeml::update::EpilogueAct act =
+                seeml::update::EpilogueAct::kNone);  // C = A[M,K] @ B[K,N]
 void GemmNT(const float* A, const float* B, float* C, size_t M, size_t N,
             size_t K);                       // C = A[M,K] @ B[N,K]^T
 void GemmTN(const float* A, const float* B, float* C, size_t M, size_t N,
@@ -35,8 +44,14 @@ void GemmAccNN(const float* A, const float* B, float* C, size_t M, size_t N,
                size_t K, float alpha);       // C += alpha * A @ B
 
 // --- Quantized GEMM: B is per-tensor symmetric int8, dequantized on the fly.
+// GemmNNQ8 takes an activation epilogue only: the instruction's in[3] slot
+// carries the dequant scale, so a fused bias has nowhere to ride (ABI note
+// in source/plan/instruction.h).
 void GemmNNQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
-              size_t K, float scale);       // C = A[M,K] @ (scale*B)[K,N]
+              size_t K, float scale,
+              seeml::update::EpilogueAct act =
+                  seeml::update::EpilogueAct::kNone);
+                                            // C = A[M,K] @ (scale*B)[K,N]
 void GemmNTQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
               size_t K, float scale);       // C = A[M,K] @ (scale*B)[N,K]^T
 

@@ -89,15 +89,14 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
     return diag::executing::Error("bad plan magic");
   // Version negotiation (schema.h): additive format bumps stay readable,
   // semantic breaks raise the floor, unknown-future formats are rejected.
-  if (header_.version < up::kSeeuOldestReadable ||
-      header_.version > up::kSeeuVersion)
+  // Checked on the freshly decoded local header — the header_ member still
+  // holds whatever plan was loaded before this call.
+  if (header.version < up::kSeeuOldestReadable ||
+      header.version > up::kSeeuVersion)
     return diag::executing::Error(
-        "unsupported plan version " + std::to_string(header_.version) +
+        "unsupported plan version " + std::to_string(header.version) +
         " (this runtime reads v" + std::to_string(up::kSeeuOldestReadable) +
         "..v" + std::to_string(up::kSeeuVersion) + ")");
-=======
-  if (header.version != up::kSeeuVersion)
-    return diag::executing::Error("unsupported plan version");
 
   // Integrity: the plan hashes over itself with the hash field zeroed.
   // A flipped bit anywhere — header, instructions, frozen weights — fails
@@ -140,27 +139,21 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   if (auto ok = VerifyExecutorContract(train, merge, eval, emit, header); !ok)
     return std::unexpected(ok.error());
 
-  // Class count for validating class-index labels at Train() time (the
-  // softmax kernels index rows of this width with raw dataset labels).
-  num_classes_ = 0;
-  for (const up::UpdateInstruction& ins : train_program_)
-    if (static_cast<up::OpCode>(ins.opcode) == up::OpCode::kSoftmaxXEntFwd)
-      num_classes_ = ins.out[1];
-
   // The accuracy metric reads the probabilities the eval program's softmax
   // already materializes (its in[3] write); no extra compute or arena space
   // is spent. Plans without a class-label softmax report loss only.
-  eval_probs_ref_ = up::kNullRef;
-  eval_softmax_rows_ = 0;
-  eval_softmax_cols_ = 0;
-  for (const up::UpdateInstruction& ins : eval_program_)
+  // Scanned on the freshly decoded local stream — like everything here,
+  // committed to members only after every contract has passed.
+  uint64_t eval_probs_ref = up::kNullRef;
+  uint64_t eval_softmax_rows = 0;
+  uint64_t eval_softmax_cols = 0;
+  for (const up::UpdateInstruction& ins : eval)
     if (static_cast<up::OpCode>(ins.opcode) == up::OpCode::kSoftmaxXEntFwd) {
-      eval_probs_ref_ = ins.in[3];
-      eval_softmax_rows_ = ins.out[0];
-      eval_softmax_cols_ = ins.out[1];
+      eval_probs_ref = ins.in[3];
+      eval_softmax_rows = ins.out[0];
+      eval_softmax_cols = ins.out[1];
     }
 
-  rodata_ = plan_ + header_.rodata_offset;
   // Class count for validating class-index labels at Train() time. The raw
   // dataset labels feed every softmax kernel in every program, so the check
   // must hold for the narrowest width anywhere — not just the train
@@ -196,6 +189,9 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   eval_program_ = std::move(eval);
   emit_table_ = std::move(emit);
   num_classes_ = num_classes;
+  eval_probs_ref_ = eval_probs_ref;
+  eval_softmax_rows_ = eval_softmax_rows;
+  eval_softmax_cols_ = eval_softmax_cols;
   plan_ = plan;
   plan_size_ = plan_size;
   rodata_ = plan + header.rodata_offset;
@@ -210,8 +206,13 @@ void UpdateEngine::Execute(const std::vector<up::UpdateInstruction>& program) {
       case up::OpCode::kNop:
         break;
       case up::OpCode::kGemmNN:
+        // v5 epilogue flags: bias ref rides the otherwise-free in[3]; the
+        // validator proved the flag/slot combination before dispatch.
         k::GemmNN(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                  ins.out[0], ins.out[1], ins.out[2]);
+                  ins.out[0], ins.out[1], ins.out[2],
+                  ins.flags & up::kFlagEpilogueBias ? ReadPtr(ins.in[3])
+                                                    : nullptr,
+                  up::EpilogueActOf(ins.flags));
         break;
       case up::OpCode::kGemmNT:
         k::GemmNT(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
@@ -229,7 +230,7 @@ void UpdateEngine::Execute(const std::vector<up::UpdateInstruction>& program) {
       case up::OpCode::kGemmNNQ8:
         k::GemmNNQ8(ReadPtr(ins.in[0]), ReadPtrQ8(ins.in[1]),
                     WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2],
-                    BitsToF32(ins.in[3]));
+                    BitsToF32(ins.in[3]), up::EpilogueActOf(ins.flags));
         break;
       case up::OpCode::kGemmNTQ8:
         k::GemmNTQ8(ReadPtr(ins.in[0]), ReadPtrQ8(ins.in[1]),
@@ -423,30 +424,6 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
                                 header_.batch);
   double total = 0.0;
   uint64_t correct = 0, counted = 0;
-  for (uint64_t b = 0; b < batches; ++b) {
-    data.FillBatch(header_.batch, input_slot, label_slot);
-    Execute(eval_program_);
-    total += LossValue();
-    if (track_accuracy) {
-      // Rows past the dataset's tail in the final batch are wrapped
-      // duplicates — the loss's fixed-shape mean cannot exclude them, but
-      // accuracy can and does: each real sample is judged exactly once.
-      const uint64_t served = b * header_.batch;
-      const uint64_t real = std::min<uint64_t>(
-          header_.batch, data.num_samples() > served
-                             ? data.num_samples() - served
-                             : 0);
-      const float* probs = ReadPtr(eval_probs_ref_);
-      const auto* labels = reinterpret_cast<const int32_t*>(label_slot);
-      for (uint64_t r = 0; r < real; ++r) {
-        const float* row = probs + r * eval_softmax_cols_;
-        uint64_t argmax = 0;
-        for (uint64_t c = 1; c < eval_softmax_cols_; ++c)
-          if (row[c] > row[argmax]) argmax = c;
-        if (labels[r] >= 0 && static_cast<uint64_t>(labels[r]) == argmax)
-          ++correct;
-      }
-      counted += real;
   {
     BatchPipeline feeder(data, header_.batch, header_.input_floats,
                          header_.label_kind == 0 ? 0 : header_.label_bytes);
@@ -454,6 +431,30 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
       feeder.NextBatch(input_slot, label_slot);
       Execute(eval_program_);
       total += LossValue();
+      if (track_accuracy) {
+        // Rows past the dataset's tail in the final batch are wrapped
+        // duplicates — the loss's fixed-shape mean cannot exclude them, but
+        // accuracy can and does: each real sample is judged exactly once.
+        // NextBatch copied the staged batch into the slots before Execute,
+        // so label_slot still holds THIS batch while the feeder stages the
+        // next one internally.
+        const uint64_t served = b * header_.batch;
+        const uint64_t real = std::min<uint64_t>(
+            header_.batch, data.num_samples() > served
+                               ? data.num_samples() - served
+                               : 0);
+        const float* probs = ReadPtr(eval_probs_ref_);
+        const auto* labels = reinterpret_cast<const int32_t*>(label_slot);
+        for (uint64_t r = 0; r < real; ++r) {
+          const float* row = probs + r * eval_softmax_cols_;
+          uint64_t argmax = 0;
+          for (uint64_t c = 1; c < eval_softmax_cols_; ++c)
+            if (row[c] > row[argmax]) argmax = c;
+          if (labels[r] >= 0 && static_cast<uint64_t>(labels[r]) == argmax)
+            ++correct;
+        }
+        counted += real;
+      }
     }
   }
   EvalMetrics m;
@@ -655,32 +656,6 @@ std::expected<void, std::string> UpdateEngine::CommitToModel(
                                  n * sizeof(float));
           !r)
         return std::unexpected(r.error());
-    uint8_t* base = bytes->data() + e.smf_data_offset;
-    // Each chunk adds into a disjoint element range of this entry's weight
-    // span, so fanning the add over the pool is race-free — and the hottest
-    // commit-path work for large adapters. Grain keeps small deltas serial.
-    constexpr size_t kCommitGrain = 64 * 1024;
-    if (reinterpret_cast<uintptr_t>(base) % alignof(float) == 0) {
-      // The SMF data section is 64-aligned, so this is the path that runs in
-      // practice: a straight vectorizable add over the weight range.
-      auto* w = reinterpret_cast<float*>(base);
-      up::ParallelFor(count, kCommitGrain,
-                      [&](size_t begin, size_t end, size_t /*chunk*/) {
-                        for (size_t i = begin; i < end; ++i) w[i] += delta[i];
-                      });
-    } else {
-      // Fallback for a container that broke the alignment contract: memcpy
-      // keeps the patch correct regardless.
-      up::ParallelFor(count, kCommitGrain,
-                      [&](size_t begin, size_t end, size_t /*chunk*/) {
-                        for (size_t i = begin; i < end; ++i) {
-                          float w;
-                          uint8_t* at = base + i * sizeof(float);
-                          std::memcpy(&w, at, sizeof(float));
-                          w += delta[i];
-                          std::memcpy(at, &w, sizeof(float));
-                        }
-                      });
     }
   }
 

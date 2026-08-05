@@ -62,7 +62,7 @@ void PrintUsage() {
                "  [--weight-decay WD] [--clip-norm C]\n"
                "  [--lr-schedule const|cosine] [--warmup N]\n"
                "  [--min-lr-factor F] [--quantize-base] [--steps N]\n"
-               "  [--report out.json] [--build]\n");
+               "  [--no-fuse-epilogue] [--report out.json] [--build]\n");
 }
 
 /// Strict argument cursor: every flag must be known, every value must parse
@@ -256,6 +256,7 @@ int main(int argc, char** argv) {
       return Fail("--min-lr-factor must be in [0, 1], got '" + *v + "'");
   }
   config.quantize_base = args.Take("--quantize-base");
+  config.fuse_epilogues = !args.Take("--no-fuse-epilogue");
 
   const auto teacher_path = args.TakeValue("--teacher");
   const auto report_path = args.TakeValue("--report");

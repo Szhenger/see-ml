@@ -44,6 +44,22 @@ void Block::insertOpsAfter(Operation* anchor,
                 std::make_move_iterator(new_ops.end()));
 }
 
+void Block::moveOpBefore(Operation* op, Operation* anchor) {
+    assert(op != anchor && "moveOpBefore: op and anchor are the same");
+    assert(op->numOperands() == 0 &&
+           "moveOpBefore: only operand-less ops (storage declarations) can "
+           "be hoisted without an SSA-order proof");
+    auto from = std::find_if(ops_.begin(), ops_.end(),
+                             [op](const auto& p) { return p.get() == op; });
+    assert(from != ops_.end() && "moveOpBefore: op not found in block");
+    auto owned = std::move(*from);
+    ops_.erase(from);
+    auto to = std::find_if(ops_.begin(), ops_.end(),
+                           [anchor](const auto& p) { return p.get() == anchor; });
+    assert(to != ops_.end() && "moveOpBefore: anchor not found in block");
+    ops_.insert(to, std::move(owned));
+}
+
 std::unique_ptr<Operation> Block::removeOp(Operation* op) {
     auto it = std::find_if(ops_.begin(), ops_.end(), [op](const auto& p) { return p.get() == op; });
     assert(it != ops_.end() && "removeOp: operation not found in block");

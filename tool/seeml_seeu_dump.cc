@@ -91,12 +91,24 @@ int ImmInSlot(uint16_t opcode) {
   }
 }
 
+/// Compact epilogue decode for the v5 flag word: "bias", "relu",
+/// "bias+gelu", ... — or nullptr when no flags are set.
+const char* EpilogueName(uint16_t flags) {
+  static const char* const kNames[] = {
+      nullptr, "bias",      "relu", "bias+relu",
+      "gelu",  "bias+gelu", "silu", "bias+silu",
+  };
+  return flags < 8 ? kNames[flags] : "unknown-flags";
+}
+
 void Disassemble(const char* title, const UpdateInstruction* instrs,
                  uint64_t count) {
   std::printf("\n%s (%" PRIu64 " instructions)\n", title, count);
   for (uint64_t i = 0; i < count; ++i) {
     const UpdateInstruction& ins = instrs[i];
     std::printf("  %4" PRIu64 "  %-18s", i, OpName(ins.opcode));
+    if (ins.flags)
+      std::printf(" epi(%s)", EpilogueName(ins.flags));
     const int imm = ImmInSlot(ins.opcode);
     for (int s = 0; s < 4; ++s) {
       if (s == imm)

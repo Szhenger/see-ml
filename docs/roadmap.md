@@ -26,6 +26,19 @@ Cross-cutting ground rules, all now in place and to be leaned on:
 
 ## Project 1 — Operator fusion (efficiency: arena-bandwidth)
 
+> **Status: Phase 1a SHIPPED (2026-08).** `GemmEpilogueFuser`
+> (`compiler/analysis/algebra/epilogue_fuser.{h,cc}`) + v5 instruction
+> flags + fused GEMM write-back epilogues, exactly per the outline below,
+> with one design delta: legality is derived from the SIR use-lists after
+> autodiff (an intermediate the backward consumes carries that consumer as
+> an extra user and never matches) instead of explicit no-backward region
+> marking — the teacher subgraph and the bias step of unadapted student
+> layers fuse, LoRA-adapted chains are naturally excluded because the
+> adapter add interposes between GEMM and AddBias. Verified bitwise
+> (fused-vs-unfused eval and loss-curve equality under distillation,
+> per-kernel exact-equality goldens, validator flag-rejection tests).
+> Phase 1b remains contingent on post-1a profiling.
+
 **Problem.** Every op materializes its full tensor to the arena; an MLP
 layer costs three round-trips (GEMM → AddBias → activation) where one would
 do. The runtime is CPU-bandwidth-bound (`runtime/executor/elementwise.cc`
@@ -178,8 +191,7 @@ review exists to prevent exactly that.
 
 ## Sequencing
 
-1. **1a GEMM epilogues** — biggest win-per-effort, exercises the new
-   flag/version machinery end to end.
+1. ~~**1a GEMM epilogues**~~ — shipped; the flag/version machinery is in.
 2. **2a gradient accumulation** — unlocks larger effective batches on the
    devices the memory gate now honestly bounds.
 3. **3 decision (A or B)** — cheap to decide, removes standing dishonesty

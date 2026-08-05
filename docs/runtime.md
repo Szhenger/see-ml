@@ -83,9 +83,9 @@ rewinds the dataset before its pass — with a partial final batch, the
 wrapped samples that get double-counted depend on the entry cursor, and
 the regression gate must compare means over the identical sample multiset
 — and stages batches through the same `BatchPipeline` overlap as
-training. Commit's delta-apply fans each emit entry's element loop over
-`ParallelFor` (disjoint ranges, race-free), and the source-model identity
-check uses the parallel `ContentHash64`.
+training. Commit streams each emit entry's read-modify-write in bounded
+chunks through `DurableFileEdit` (memory O(chunk), never O(model)), and
+the source-model identity check uses the parallel `ContentHash64`.
 
 ## feeder/ — the corpus
 
@@ -96,8 +96,11 @@ check uses the parallel `ContentHash64`.
 - **`batch_pipeline`** — overlaps feeding with compute: a feeder thread
   stages batch s+1 while step s executes. The batch sequence is exactly the
   serial sequence — pipelining changes *when* batches are materialized,
-  never *which* — and the destructor joins on every exit path. With
-  `SEEML_THREADS=1` no thread is created at all.
+  never *which* — and the destructor joins on every exit path, then
+  un-consumes any staged batch the engine never took
+  (`Dataset::RestoreServingPos`), so the cursor a later pass inherits is
+  scheduling-independent at any thread count. With `SEEML_THREADS=1` no
+  thread is created at all.
 
 ## executor/ — the kernel library
 
@@ -109,7 +112,11 @@ in chunk order) and the no-overlap aliasing contract the arena allocator
 guarantees.
 
 - **`gemm`** — the four f32 variants and two dequantizing int8 variants,
-  reduced to two cache-blocked cores.
+  reduced to two cache-blocked cores. The forward GEMMs apply the v5 fused
+  epilogue (`C = act(A@B + bias)`) in the write-back while the rows are
+  still hot — the per-element expressions are the same inline functions the
+  standalone kernels evaluate (`kernel_policy.h`), so a fused program is
+  bitwise-identical to its unfused form.
 - **`elementwise`** — pointwise arithmetic, bias broadcast, row reduction,
   serial fills/copies.
 - **`activation`** — ReLU / GELU / SiLU forward-backward pairs; each
@@ -128,7 +135,10 @@ the address space it targets, with byte extents derived exactly as the
 kernels derive their loop bounds; refs must be element-aligned (dispatch
 casts them to typed pointers — misalignment is UB, and a bus error on
 strict-alignment targets), writes may only target the mutable arena, and
-unknown opcodes are load errors, never silent skips. Its overflow-safe
+unknown opcodes are load errors, never silent skips. The flags word is
+policed against the plan version: zero before v5, and from v5 on only the
+epilogue bits, only on the GEMM opcodes they are defined for, with a fused
+bias ref joining the bounds and overlap discipline. Its overflow-safe
 helpers (`MulOk`, `RangeOk`) are the single way plan bounds math is
 written.
 
@@ -144,10 +154,6 @@ written.
   committing to the same target instead of letting the rename race decide.
   Commit memory is O(chunk), never O(model), and the hash is verified on
   the exact copy being patched — no check-to-patch window.
-- **`checkpoint`** — the SEKP container: the arena's persistent segment,
-  hash-bound to the exact plan that laid it out; fully verified before a
-  byte reaches the arena.
-=======
   The Windows branch delivers the same contract with raw Win32 (checked
   `WriteFile`, `FlushFileBuffers`, `MoveFileEx` with replace-existing —
   CRT `rename` cannot overwrite, which would fail every checkpoint after

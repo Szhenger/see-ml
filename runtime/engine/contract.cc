@@ -99,7 +99,7 @@ std::expected<void, std::string> VerifyExecutorContract(
   for (const auto* program : {&train, &merge, &eval})
     for (const up::UpdateInstruction& ins : *program)
       if (auto r = ValidateInstruction(ins, header.arena_size,
-                                       header.rodata_size);
+                                       header.rodata_size, header.version);
           !r)
         return r;
 

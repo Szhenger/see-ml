@@ -57,6 +57,12 @@ using seeml::testing::ReadArenaF32;
 using seeml::testing::ScopedTempDir;
 using seeml::testing::WriteArenaF32;
 
+PlanHeader HeaderOf(const CompiledUpdate& compiled) {
+  PlanHeader h;
+  std::memcpy(&h, compiled.plan.data(), sizeof(h));
+  return h;
+}
+
 TrainOptions Quiet() {
   TrainOptions options;
   options.log_every = 0;
@@ -344,6 +350,56 @@ TEST(UpdateSystem, DistillationFromTeacherConverges) {
   ASSERT_OK_AND_ASSIGN(Dataset data, MakeUnlabeledData(256, in_dim, 31));
   ASSERT_OK_AND_ASSIGN(auto report, engine.Train(data, 300, Quiet()));
   EXPECT_LT(report.final_avg_loss, report.initial_avg_loss * 0.9f);
+}
+
+TEST(UpdateSystem, TeacherFusionChangesNoLossBits) {
+  // The roadmap's fusion contract: a fused and an unfused compilation of
+  // the same distillation update must produce bit-identical training — the
+  // epilogue evaluates exactly the floats the standalone instruction
+  // sequence would, just without the arena round-trips. Exact float
+  // equality on every step's loss and on the eval loss, not tolerances.
+  const int64_t in_dim = 8, hidden = 12, out_dim = 4, batch = 8;
+  SmfModel student = MakeMlp(in_dim, hidden, out_dim, 41);
+  SmfModel teacher = MakeMlp(in_dim, 20, out_dim, 42);
+
+  UpdateConfig config = BaseConfig(batch);
+  config.loss = LossKind::kKLDistill;
+  config.optimizer.lr = 5e-3f;
+  UpdateConfig unfused_config = config;
+  unfused_config.fuse_epilogues = false;
+
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate fused,
+                       UpdateCompiler(config).Compile(student, &teacher));
+  ASSERT_OK_AND_ASSIGN(
+      CompiledUpdate unfused,
+      UpdateCompiler(unfused_config).Compile(student, &teacher));
+  ASSERT_LT(HeaderOf(fused).train_instr_count,
+            HeaderOf(unfused).train_instr_count);
+
+  float losses[2][2];        // [engine][pre/post]
+  std::vector<float> curves[2];
+  const CompiledUpdate* plans[2] = {&fused, &unfused};
+  for (int i = 0; i < 2; ++i) {
+    UpdateEngine engine;
+    ASSERT_OK(engine.LoadFromMemory(plans[i]->plan.data(),
+                                    plans[i]->plan.size()));
+    ASSERT_OK_AND_ASSIGN(Dataset data, MakeUnlabeledData(128, in_dim, 51));
+    data.EnableShuffle(3);
+    ASSERT_OK_AND_ASSIGN(float pre, engine.Evaluate(data));
+    TrainOptions options = Quiet();
+    options.record_loss_curve = true;
+    ASSERT_OK_AND_ASSIGN(auto report, engine.Train(data, 40, options));
+    ASSERT_OK_AND_ASSIGN(float post, engine.Evaluate(data));
+    losses[i][0] = pre;
+    losses[i][1] = post;
+    curves[i] = report.loss_curve;
+  }
+
+  EXPECT_EQ(losses[0][0], losses[1][0]);
+  EXPECT_EQ(losses[0][1], losses[1][1]);
+  ASSERT_EQ(curves[0].size(), curves[1].size());
+  for (size_t s = 0; s < curves[0].size(); ++s)
+    EXPECT_EQ(curves[0][s], curves[1][s]);
 }
 
 // =============================================================================

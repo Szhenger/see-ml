@@ -40,6 +40,11 @@ seeml-update-compile \
 Distillation from an open-weights teacher: `--loss kl --teacher teacher.smf`
 (unlabeled corpus), or `--loss xent+kl --distill-weight 0.5`.
 
+GEMM→AddBias→activation chains with no backward reader (the frozen teacher,
+unadapted layers) are fused into single-instruction epilogues by default —
+bitwise-identical results, fewer arena round-trips. `--no-fuse-epilogue`
+compiles the unfused reference form.
+
 The emitted `pkg/` is **self-contained**: the plan, the generated driver, and
 vendored runtime sources. `sh pkg/build.sh` builds `model_update` on any
 machine with a C++23 compiler — set `CXX` to cross-compile for the device.

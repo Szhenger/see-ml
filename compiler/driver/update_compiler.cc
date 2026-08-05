@@ -213,13 +213,68 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
       pm.Add("optimizer", [&](sir::Block& b) {
         return OptimizerSynthesizer(config_.optimizer).Run(b, param_grads);
       });
-    // Phase C, the optimization phase's sweep: no op whose results nothing
-    // reads may survive to lowering. The driver builds its programs
-    // minimally, so today this proves an invariant (0 removed) more than it
-    // shrinks programs — and it is the seam where rewriting passes (fusion,
-    // simplification) get to leave dead ops behind. Roots are every value
-    // read outside the stream: the loss slot, the parameter gradients, and
-    // the whole primal snapshot, which lowers again as the eval program.
+    if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
+  }
+
+  // --- 6. Merge program: Δ = (α/r)·A@B (commit adds Δ to the model file). ---
+  MergeBuilder merger;
+  auto merge = merger.Run(adapters);
+  if (!merge) return std::unexpected(merge.error());
+  // Analysis boundary: grafts, gradients, and the merge program must be fit
+  // for code generation (subsumes the former ad-hoc merge validation).
+  if (auto ok = VerifyAnalysisContract(block, adapters, param_grads, *merge);
+      !ok)
+    return std::unexpected(ok.error());
+
+  // --- 7. Frozen-weight quantization selection. ------------------------------
+  // Before the fusion phase: the epilogue fuser must know which GEMMs will
+  // lower to the q8 opcode, whose in[3] slot the dequant scale occupies —
+  // a fused bias ref has nowhere to ride there.
+  std::unordered_map<const sir::Value*, float> quant_scales;
+  if (config_.quantize_base) {
+    quant_scales = SelectQuantizedWeights(block, build);
+    seeml::diag::Note(generating::kDriver,
+                      "quantized " + std::to_string(quant_scales.size()) +
+                          " frozen weight(s) to int8 rodata");
+  }
+
+  // --- 7b. Optimization passes (phase C): epilogue fusion, then the DCE
+  // sweep — after autodiff, so fusion legality is read off the use-lists
+  // (an intermediate the backward program consumes carries that consumer
+  // as an extra user and never matches), and after quantization selection.
+  {
+    PassManager pm;
+    if (config_.fuse_epilogues)
+      pm.Add("fuse-gemm-epilogue",
+             [&](sir::Block& b) -> std::expected<void, std::string> {
+               std::unordered_set<const sir::Value*> quantized;
+               for (const auto& [w, s] : quant_scales) quantized.insert(w);
+               std::unordered_set<const sir::Value*> protected_values;
+               protected_values.insert(loss);
+               for (const auto& [p, g] : param_grads)
+                 protected_values.insert(g);
+               auto fused =
+                   GemmEpilogueFuser().Run(b, quantized, protected_values);
+               if (!fused) return std::unexpected(fused.error());
+               // Fuse-then-rebind: the primal snapshot is the eval program
+               // and the DCE root set; the orphaned ops leave it here, so
+               // eval lowers the fused GEMMs and the sweep may free them.
+               if (!fused->fused_away.empty()) {
+                 std::unordered_set<const sir::Operation*> dead(
+                     fused->fused_away.begin(), fused->fused_away.end());
+                 std::erase_if(primal_ops, [&](const sir::Operation* op) {
+                   return dead.contains(op);
+                 });
+               }
+               return {};
+             });
+    // The optimization phase's sweep: no op whose results nothing reads may
+    // survive to lowering. Beyond the fusion orphans this proves an
+    // invariant (the driver builds its programs minimally) — and it is the
+    // seam where future rewriting passes get to leave dead ops behind.
+    // Roots are every value read outside the stream: the loss slot, the
+    // parameter gradients, and the whole primal snapshot, which lowers
+    // again as the eval program.
     pm.Add("dce", [&](sir::Block& b) -> std::expected<void, std::string> {
       std::unordered_set<const sir::Value*> roots;
       roots.insert(loss);
@@ -235,25 +290,6 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
       return {};
     });
     if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
-  }
-
-  // --- 6. Merge program: Δ = (α/r)·A@B (commit adds Δ to the model file). ---
-  MergeBuilder merger;
-  auto merge = merger.Run(adapters);
-  if (!merge) return std::unexpected(merge.error());
-  // Analysis boundary: grafts, gradients, and the merge program must be fit
-  // for code generation (subsumes the former ad-hoc merge validation).
-  if (auto ok = VerifyAnalysisContract(block, adapters, param_grads, *merge);
-      !ok)
-    return std::unexpected(ok.error());
-
-  // --- 7. Frozen-weight quantization selection. ------------------------------
-  std::unordered_map<const sir::Value*, float> quant_scales;
-  if (config_.quantize_base) {
-    quant_scales = SelectQuantizedWeights(block, build);
-    seeml::diag::Note(generating::kDriver,
-                      "quantized " + std::to_string(quant_scales.size()) +
-                          " frozen weight(s) to int8 rodata");
   }
 
   // --- 8. Segmented arena binding. -------------------------------------------

@@ -14,20 +14,14 @@ namespace seeml::update_rt::kernels {
 
 namespace up = seeml::update;
 
-namespace {
-
-// gelu(x) = 0.5 x (1 + tanh(√(2/π) (x + 0.044715 x³))) — the tanh
-// approximation.
-constexpr float kGeluC = 0.7978845608028654f;  // √(2/π)
-constexpr float kGeluA = 0.044715f;
-
-inline float Sigmoid(float x) { return 1.0f / (1.0f + std::exp(-x)); }
-
-}  // namespace
+// The forward bodies evaluate the shared expressions of kernel_policy.h
+// (ReluExpr / GeluExpr / SiluExpr) — the same inline functions the fused
+// GEMM epilogues apply — so a fused and an unfused program compute
+// identical bits by construction.
 
 void ReluFwd(const float* x, float* out, size_t n) {
   up::ParallelFor(n, kGrainCheap, [&](size_t b, size_t e, size_t) {
-    for (size_t i = b; i < e; ++i) out[i] = x[i] > 0.0f ? x[i] : 0.0f;
+    for (size_t i = b; i < e; ++i) out[i] = ReluExpr(x[i]);
   });
 }
 
@@ -39,11 +33,7 @@ void ReluBwd(const float* dy, const float* x, float* dx, size_t n) {
 
 void GeluFwd(const float* x, float* out, size_t n) {
   up::ParallelFor(n, kGrainMath, [&](size_t b, size_t e, size_t) {
-    for (size_t i = b; i < e; ++i) {
-      const float v = x[i];
-      const float t = std::tanh(kGeluC * (v + kGeluA * v * v * v));
-      out[i] = 0.5f * v * (1.0f + t);
-    }
+    for (size_t i = b; i < e; ++i) out[i] = GeluExpr(x[i]);
   });
 }
 
@@ -62,14 +52,14 @@ void GeluBwd(const float* dy, const float* x, float* dx, size_t n) {
 
 void SiluFwd(const float* x, float* out, size_t n) {
   up::ParallelFor(n, kGrainMath, [&](size_t b, size_t e, size_t) {
-    for (size_t i = b; i < e; ++i) out[i] = x[i] * Sigmoid(x[i]);
+    for (size_t i = b; i < e; ++i) out[i] = SiluExpr(x[i]);
   });
 }
 
 void SiluBwd(const float* dy, const float* x, float* dx, size_t n) {
   up::ParallelFor(n, kGrainMath, [&](size_t b, size_t e, size_t) {
     for (size_t i = b; i < e; ++i) {
-      const float s = Sigmoid(x[i]);
+      const float s = SigmoidExpr(x[i]);
       dx[i] = dy[i] * (s * (1.0f + x[i] * (1.0f - s)));
     }
   });

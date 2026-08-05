@@ -1,6 +1,7 @@
 #ifndef SEEML_RUNTIME_EXECUTOR_KERNEL_POLICY_H_
 #define SEEML_RUNTIME_EXECUTOR_KERNEL_POLICY_H_
 
+#include <cmath>
 #include <cstddef>
 
 // =============================================================================
@@ -42,6 +43,28 @@ inline size_t RowGrain(size_t per_row, size_t budget) {
 }
 
 inline size_t MinZ(size_t a, size_t b) { return a < b ? a : b; }
+
+// --- Activation expressions --------------------------------------------------
+// One definition each, shared by the standalone activation kernels and the
+// fused GEMM epilogues. Sharing the expression (not just the formula) is
+// what makes fusion bitwise-neutral: a fused chain evaluates exactly the
+// floats the unfused instruction sequence would.
+
+inline float SigmoidExpr(float x) { return 1.0f / (1.0f + std::exp(-x)); }
+
+// gelu(x) = 0.5 x (1 + tanh(√(2/π) (x + 0.044715 x³))) — the tanh
+// approximation.
+inline constexpr float kGeluC = 0.7978845608028654f;  // √(2/π)
+inline constexpr float kGeluA = 0.044715f;
+
+inline float ReluExpr(float x) { return x > 0.0f ? x : 0.0f; }
+
+inline float GeluExpr(float x) {
+  const float t = std::tanh(kGeluC * (x + kGeluA * x * x * x));
+  return 0.5f * x * (1.0f + t);
+}
+
+inline float SiluExpr(float x) { return x * SigmoidExpr(x); }
 
 }  // namespace seeml::update_rt::kernels
 

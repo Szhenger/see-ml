@@ -23,6 +23,7 @@ inline constexpr std::string_view kAutodiff = "TrainableAutodiff";
 inline constexpr std::string_view kLoraGrafter = "LoraGrafter";
 inline constexpr std::string_view kMergeBuilder = "MergeBuilder";
 inline constexpr std::string_view kOptimizer = "OptimizerSynthesizer";
+inline constexpr std::string_view kEpilogueFuser = "GemmEpilogueFuser";
 
 /// Analytic failure in `unit`: "<unit>: <message>".
 [[nodiscard]] inline std::unexpected<std::string> Error(std::string_view unit,

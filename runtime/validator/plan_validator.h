@@ -35,10 +35,16 @@ inline bool RangeOk(uint64_t off, uint64_t bytes, uint64_t size) {
 /// (arena or rodata), with byte extents derived from the instruction's dims
 /// the same way the kernels derive their loop bounds, and that writes only
 /// target the mutable arena. Rejects unknown opcodes, which Execute() would
-/// silently skip.
+/// silently skip, and polices the flags word against `plan_version`: below
+/// kSeeuFlagsVersion every instruction must carry flags == 0; from it on,
+/// only the defined epilogue bits are accepted, only on the opcodes they
+/// are defined for (kGemmNN: bias + activation, with the bias ref in in[3]
+/// joining the bounds and overlap discipline; kGemmNNQ8: activation only —
+/// its in[3] is the dequant scale). An unknown bit is a hard error, never a
+/// silent skip.
 [[nodiscard]] std::expected<void, std::string> ValidateInstruction(
     const seeml::update::UpdateInstruction& ins, uint64_t arena_size,
-    uint64_t rodata_size);
+    uint64_t rodata_size, uint32_t plan_version);
 
 }  // namespace seeml::update_rt
 
