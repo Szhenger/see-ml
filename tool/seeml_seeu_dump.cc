@@ -59,6 +59,16 @@ const char* OpName(uint16_t opcode) {
   return "<unknown>";
 }
 
+// Overflow-checked section bound over fully untrusted header fields: the
+// unchecked form `offset + count * elem <= size` wraps modulo 2^64 for a
+// crafted count and "passes", walking the disassembler off the buffer —
+// in the one tool whose job is inspecting corrupt plans.
+bool SectionOk(uint64_t offset, uint64_t count, uint64_t elem, size_t size) {
+  if (elem != 0 && count > UINT64_MAX / elem) return false;
+  const uint64_t bytes = count * elem;
+  return offset <= size && bytes <= size - offset;
+}
+
 void PrintRef(uint64_t ref) {
   if (ref == kNullRef) {
     std::printf("  <null>          ");
@@ -206,6 +216,17 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "seeml-seeu-dump: bad magic\n");
     return 1;
   }
+  // The header layout is version-specific: interpreting an older plan
+  // through the current struct prints authoritative-looking garbage (and
+  // feeds garbage counts to the section walks below).
+  if (h.version != kSeeuVersion) {
+    std::fprintf(stderr,
+                 "seeml-seeu-dump: plan version %u, but this tool "
+                 "understands only version %u — refusing to interpret the "
+                 "header\n",
+                 h.version, kSeeuVersion);
+    return 1;
+  }
 
   // Verify the integrity seal the same way the runtime does.
   const uint64_t state = PlanSelfHash(plan.data(), plan.size(),
@@ -252,6 +273,9 @@ int main(int argc, char** argv) {
                   " B  <- delta ar+0x%08" PRIx64 "\n",
                   i, e.smf_data_offset, e.byte_size, e.arena_offset);
     }
+  } else {
+    std::fprintf(stderr,
+                 "seeml-seeu-dump: emit table exceeds the file — skipped\n");
   }
 
   if (want_instrs) {

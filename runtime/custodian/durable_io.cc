@@ -34,6 +34,9 @@ std::expected<void, std::string> WriteFileDurable(
     while (written < part.size) {
       const ssize_t n = ::write(fd, part.data + written, part.size - written);
       if (n < 0) {
+        // A signal landing mid-write (checkpoints are large and SIGINT-era
+        // stop flags are common) is a retry, not a failed update.
+        if (errno == EINTR) continue;
         ::close(fd);
         return diag::persisting::Error(diag::persisting::kDurableIo, "short write to '" + tmp + "'");
       }

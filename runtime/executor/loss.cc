@@ -109,10 +109,18 @@ void KLDistillFwd(const float* s_logits, const float* t_logits, float* loss,
       for (size_t c = 0; c < C; ++c) {
         const float pt = p_t[n * C + c];
         if (pt <= 0.0f) continue;
-        const float ps = std::fmax(p_s[n * C + c], 1e-12f);
+        // Same NaN discipline as SoftmaxXEntFwd: fmax(NaN, x) == x would
+        // scrub a NaN student probability into a large-but-finite loss
+        // while the backward pass poisons the parameters — the engine's
+        // finite-loss guard must trip instead. The clamp only rescues
+        // genuine underflow. (A NaN teacher probability already propagates:
+        // `pt <= 0.0f` is false for NaN, and log(NaN) is NaN.)
+        const float ps_raw = p_s[n * C + c];
+        const double ps = std::isnan(ps_raw)
+                              ? static_cast<double>(ps_raw)
+                              : static_cast<double>(std::fmax(ps_raw, 1e-12f));
         total += static_cast<double>(pt) *
-                 (std::log(static_cast<double>(pt)) -
-                  std::log(static_cast<double>(ps)));
+                 (std::log(static_cast<double>(pt)) - std::log(ps));
       }
     }
     partials[chunk] = total;

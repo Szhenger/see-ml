@@ -56,10 +56,15 @@ uint64_t LinearScanTransients(
     intervals.push_back({v, birth[v],
                          pinned.contains(v) ? SIZE_MAX : death[v],
                          ValueBytes(v)});
-  std::sort(intervals.begin(), intervals.end(),
-            [](const Interval& a, const Interval& b) {
-              return a.start < b.start;
-            });
+  // stable_sort, not sort: same-tick births (a LayerNorm's result + mean +
+  // rstd, say) tie on start, and an unspecified equal-key order would let
+  // first-fit offsets — and with them the plan bytes and plan_hash — differ
+  // across standard-library implementations for identical input. Stability
+  // pins ties to the deterministic discovery order.
+  std::stable_sort(intervals.begin(), intervals.end(),
+                   [](const Interval& a, const Interval& b) {
+                     return a.start < b.start;
+                   });
 
   struct ActiveBlock {
     uint64_t start, end;

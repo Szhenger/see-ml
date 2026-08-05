@@ -91,6 +91,18 @@ TEST(Ucb1Bandit, ConvergesOnTheBestArm) {
   EXPECT_NEAR(bandit.meanReward(1), 0.9, 1e-9);
 }
 
+TEST(Ucb1Bandit, SelectsArgmaxWhenEveryRewardIsNegative) {
+  // Rewards are any "higher is better" measurement — negated latency or
+  // loss is legitimate. A finite best-score sentinel (the old -1.0) makes
+  // Select() return arm 0 whenever every UCB score is below it, silently
+  // never exploring the better arm.
+  Ucb1Bandit bandit(2);
+  bandit.Update(bandit.Select(), -10.0);
+  bandit.Update(bandit.Select(), -5.0);
+  EXPECT_EQ(bandit.Select(), 1u);
+  EXPECT_EQ(bandit.BestArm(), 1u);
+}
+
 // =============================================================================
 // tuner/ — autotuner
 // =============================================================================
