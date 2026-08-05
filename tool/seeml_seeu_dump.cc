@@ -59,16 +59,6 @@ const char* OpName(uint16_t opcode) {
   return "<unknown>";
 }
 
-// Overflow-checked section bound over fully untrusted header fields: the
-// unchecked form `offset + count * elem <= size` wraps modulo 2^64 for a
-// crafted count and "passes", walking the disassembler off the buffer —
-// in the one tool whose job is inspecting corrupt plans.
-bool SectionOk(uint64_t offset, uint64_t count, uint64_t elem, size_t size) {
-  if (elem != 0 && count > UINT64_MAX / elem) return false;
-  const uint64_t bytes = count * elem;
-  return offset <= size && bytes <= size - offset;
-}
-
 void PrintRef(uint64_t ref) {
   if (ref == kNullRef) {
     std::printf("  <null>          ");
@@ -183,8 +173,18 @@ int main(int argc, char** argv) {
     return 2;
   }
   bool want_instrs = false;
-  for (int i = 2; i < argc; ++i)
-    if (std::strcmp(argv[i], "--instrs") == 0) want_instrs = true;
+  for (int i = 2; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--instrs") == 0) {
+      want_instrs = true;
+    } else {
+      // A typo'd flag must not silently print header-only output with
+      // exit 0 — the sibling compile CLI treats every unconsumed argv slot
+      // as a hard error for the same reason.
+      std::fprintf(stderr, "seeml-seeu-dump: unknown argument '%s'\n",
+                   argv[i]);
+      return 2;
+    }
+  }
 
   std::ifstream f(argv[1], std::ios::binary);
   if (!f) {
@@ -216,15 +216,18 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "seeml-seeu-dump: bad magic\n");
     return 1;
   }
-  // The header layout is version-specific: interpreting an older plan
-  // through the current struct prints authoritative-looking garbage (and
-  // feeds garbage counts to the section walks below).
-  if (h.version != kSeeuVersion) {
+  // Accept exactly the versions the runtime loads (schema.h): every plan in
+  // the readable range shares this header layout and the PlanSelfHash seal,
+  // and a field tool that refuses artifacts the fleet runs is useless for
+  // debugging them. Below the floor the layout/seal differ — interpreting
+  // such a plan through the current struct prints authoritative-looking
+  // garbage (and feeds garbage counts to the section walks below).
+  if (h.version < kSeeuOldestReadable || h.version > kSeeuVersion) {
     std::fprintf(stderr,
                  "seeml-seeu-dump: plan version %u, but this tool "
-                 "understands only version %u — refusing to interpret the "
+                 "understands versions %u..%u — refusing to interpret the "
                  "header\n",
-                 h.version, kSeeuVersion);
+                 h.version, kSeeuOldestReadable, kSeeuVersion);
     return 1;
   }
 

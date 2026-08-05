@@ -286,7 +286,10 @@ bool SeekTo(std::FILE* f, uint64_t offset) {
 #ifndef _WIN32
   return ::fseeko(f, static_cast<off_t>(offset), SEEK_SET) == 0;
 #else
-  return std::fseek(f, static_cast<long>(offset), SEEK_SET) == 0;
+  // CRT fseek takes a 32-bit long on Windows: a commit target with weight
+  // ranges past 2 GiB would wrap the offset and patch the wrong bytes (the
+  // bounds check upstream runs on the untruncated value, so nothing trips).
+  return ::_fseeki64(f, static_cast<long long>(offset), SEEK_SET) == 0;
 #endif
 }
 }  // namespace

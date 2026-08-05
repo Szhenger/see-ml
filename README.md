@@ -1,4 +1,4 @@
-# SeeML: An ML Update Compiler (How to Train Your Local Model)
+# SeeML: An ML Update Compiler (How to Train A Model)
 
 SeeML treats a machine-learning fine-tune the way an operating system treats
 a software update. On a build host, a compiler takes a frozen model, grafts

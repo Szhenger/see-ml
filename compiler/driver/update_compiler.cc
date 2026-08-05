@@ -378,7 +378,11 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   for (const ParamInit& p : binding->params)
     if (p.init == "randn") randn_params.push_back(&p);  // zeros already
   auto counter_randn = [](uint64_t seed, uint64_t index) -> float {
-    uint64_t s = seed + 0x9E3779B97F4A7C15ULL * (index + 1);
+    // Stride the counter by the two draws each element consumes: with a
+    // stride of one, element j's second draw and element j+1's first draw
+    // would mix the identical counter, coupling every sample's magnitude
+    // to its neighbor's angle (u1_{j+1} == u2_j + 2^-53).
+    uint64_t s = seed + 0x9E3779B97F4A7C15ULL * (2 * index + 1);
     auto next = [&s]() {
       uint64_t z = (s += 0x9E3779B97F4A7C15ULL);
       z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;

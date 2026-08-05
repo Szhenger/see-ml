@@ -105,11 +105,36 @@ std::expected<void, std::string> VerifyExecutorContract(
     std::span<const up::UpdateInstruction> eval,
     std::span<const up::EmitEntry> emit_table, const up::PlanHeader& header) {
   for (const auto* program : {&train, &merge, &eval})
-    for (const up::UpdateInstruction& ins : *program)
+    for (const up::UpdateInstruction& ins : *program) {
       if (auto r = ValidateInstruction(ins, header.arena_size,
                                        header.rodata_size, header.version);
           !r)
         return r;
+      // Label provenance for the class-indexed kernels. The softmax pair
+      // indexes probability rows with raw i32 labels
+      // (probs[n*C + labels[n]]) — the one place a validated instruction
+      // dereferences data-dependent offsets. That is only safe because the
+      // feeder contract proves every STAGED dataset label < the softmax
+      // width. The proof covers exactly the label slot's `batch` staged
+      // entries, so a softmax whose label operand is any other range, or
+      // whose row count exceeds the staged batch, or that appears in a
+      // plan not declaring class labels, would read unvalidated bytes as
+      // indices — an out-of-bounds write through the backward kernel, from
+      // a plan that passed every range check. Bind all three here.
+      const auto op = static_cast<up::OpCode>(ins.opcode);
+      if (op == up::OpCode::kSoftmaxXEntFwd ||
+          op == up::OpCode::kSoftmaxXEntBwd) {
+        if (header.label_kind != 1)
+          return diag::executing::Error(
+              "softmax cross-entropy in a plan without class labels");
+        if (ins.in[1] != header.label_ref)
+          return diag::executing::Error(
+              "softmax labels are not the plan's staged label slot");
+        if (ins.out[0] != header.batch)
+          return diag::executing::Error(
+              "softmax row count disagrees with the plan batch");
+      }
+    }
 
   // The emit table's arena side is fixed at compile time; its file side is
   // validated against the actual model at commit. Commit reads the delta
