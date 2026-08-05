@@ -2,10 +2,12 @@
 
 All formats are little-endian; loaders reject big-endian hosts at compile
 time. Every multi-byte integer is packed without padding unless a struct is
-shown (structs are `#pragma pack(1)` and part of the ABI). Integrity hashing
-comes from `source/identity/hash.h` — the deterministic parallel
-`ContentHash64` for whole-artifact identity, and its sibling `PlanSelfHash`
-for a blob whose hash field lives inside the sealed bytes — a
+shown (structs are `#pragma pack(1)` and part of the ABI — the application
+binary interface, the byte contract the compiler and runtime share).
+Integrity hashing comes from `source/identity/hash.h` — the deterministic
+parallel `ContentHash64` for whole-artifact identity, and its sibling
+`PlanSelfHash` for a blob whose hash field lives inside the sealed bytes,
+both chunked folds of 64-bit FNV-1a (Fowler–Noll–Vo). Hashing is a
 corruption/mismatch detector, not a signature; authenticate plans in your
 update transport.
 
@@ -70,7 +72,7 @@ plans' predecessors; semantic breaks (a field changing meaning or layout)
 raise `kSeeuOldestReadable`, because misreading an old plan is worse than
 rejecting it. Plans newer than the runtime are always rejected.
 
-The fully AOT-compiled update: three instruction streams (train / eval /
+The fully ahead-of-time (AOT) compiled update: three instruction streams (train / eval /
 merge), the frozen weights, the persistent segment's initial image, and the
 emit table, addressed by a single `PlanHeader` (authoritative definition:
 `source/plan/schema.h`).
@@ -88,10 +90,13 @@ Key header fields:
 Version history: v2 added the eval program, integrity hashes, LR schedule,
 and int8 rodata opcodes; v3 moved `source_model_hash` to `ContentHash64`;
 v4 moved `plan_hash` to the chunked-parallel `PlanSelfHash`; v5 gave the
-instruction's `flags` word meaning (fused GEMM epilogues — below). The
-version gate rejects plans below the readable floor — recompile. Loaders additionally prove `batch`
-nonzero and every I/O slot and instruction operand ref element-aligned;
-misaligned refs are load errors, not UB at dispatch.
+instruction's `flags` word meaning (epilogues fused into the GEMM —
+general matrix–matrix multiply — instructions; below). The version gate
+rejects plans below the readable floor — recompile.
+
+Loaders additionally prove `batch` nonzero and every I/O slot and
+instruction operand ref element-aligned; misaligned refs are load errors,
+not UB at dispatch.
 
 Tensor references are 64-bit words: bit 63 selects the address space
 (0 = mutable arena, 1 = read-only rodata), bits 0..62 are a byte offset.
@@ -109,8 +114,9 @@ would, so fusion changes memory traffic, never bits. The validator rejects
 unknown flag bits from v5 on, flags on any other opcode, and any nonzero
 flags in a pre-v5 plan.
 
-The emit table (`EmitEntry[]`) maps each adapter's **delta** (`Δ = (α/r)·A@B`,
-materialized by the merge program) to the f32 byte range of its weight inside
+The emit table (`EmitEntry[]`) maps each LoRA (Low-Rank Adaptation)
+adapter's **delta** (`Δ = (α/r)·A@B`, the adapter pair's product scaled by
+α over rank r, materialized by the merge program) to the f32 byte range of its weight inside
 the source `.smf`. Commit applies `W' = W + Δ` onto the file's pristine
 weights — a quantized plan never bakes quantization error into the committed
 model.
