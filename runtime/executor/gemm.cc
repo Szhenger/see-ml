@@ -135,15 +135,49 @@ void BlockedNT(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
   }
 }
 
+// Fused epilogue over the finished C-row range [m_begin, m_end):
+// C[m,n] = act(C[m,n] + bias[n]), applied after the row's accumulation
+// completes — the rows are still hot from the write-back. Per element this
+// is the exact expression the standalone kAddBias and k<Act>Fwd kernels
+// evaluate (the Expr functions of kernel_policy.h), in the same order, so a
+// fused program is bitwise-identical to its unfused form. The act switch is
+// hoisted out of the row loop; each case is one tight vectorizable pass.
+void EpilogueRows(float* SEEML_RESTRICT C, const float* SEEML_RESTRICT bias,
+                  size_t m_begin, size_t m_end, size_t N,
+                  up::EpilogueAct act) {
+  auto rows = [&](auto&& per_element) {
+    for (size_t m = m_begin; m < m_end; ++m) {
+      float* SEEML_RESTRICT c_row = C + m * N;
+      for (size_t n = 0; n < N; ++n)
+        c_row[n] = per_element(bias ? c_row[n] + bias[n] : c_row[n]);
+    }
+  };
+  switch (act) {
+    case up::EpilogueAct::kNone:
+      if (bias) rows([](float v) { return v; });
+      break;
+    case up::EpilogueAct::kRelu:
+      rows([](float v) { return ReluExpr(v); });
+      break;
+    case up::EpilogueAct::kGelu:
+      rows([](float v) { return GeluExpr(v); });
+      break;
+    case up::EpilogueAct::kSilu:
+      rows([](float v) { return SiluExpr(v); });
+      break;
+  }
+}
+
 }  // namespace
 
 void GemmNN(const float* A, const float* B, float* C, size_t M, size_t N,
-            size_t K) {
+            size_t K, const float* bias, up::EpilogueAct act) {
   up::ParallelFor(M, RowGrain(N * K, kGrainCheap),
                   [&](size_t m0, size_t m1, size_t) {
                     std::memset(C + m0 * N, 0, (m1 - m0) * N * sizeof(float));
                     BlockedNN(A, B, C, m0, m1, N, K, 1.0f, K,
                               /*a_transposed=*/false);
+                    EpilogueRows(C, bias, m0, m1, N, act);
                   });
 }
 
@@ -175,12 +209,13 @@ void GemmAccNN(const float* A, const float* B, float* C, size_t M, size_t N,
 }
 
 void GemmNNQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
-              size_t K, float scale) {
+              size_t K, float scale, up::EpilogueAct act) {
   up::ParallelFor(M, RowGrain(N * K, kGrainCheap),
                   [&](size_t m0, size_t m1, size_t) {
                     std::memset(C + m0 * N, 0, (m1 - m0) * N * sizeof(float));
                     BlockedNN(A, B, C, m0, m1, N, K, scale, K,
                               /*a_transposed=*/false);
+                    EpilogueRows(C, /*bias=*/nullptr, m0, m1, N, act);
                   });
 }
 

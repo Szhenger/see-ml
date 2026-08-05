@@ -72,6 +72,36 @@ enum class OpCode : uint16_t {
   kGemmNTQ8 = 30,  // C = A @ dq(B)^T;  in: A, Bq8, C, scale bits; out=M,N,K
 };
 
+// --- Instruction flags (plan v5): fused GEMM epilogues. ----------------------
+// Every plan before v5 carries flags == 0 on every instruction; from v5 on
+// the validator rejects any bit it does not know, so a future flag can never
+// be silently skipped. The epilogue applies to the C write-back of the
+// forward GEMMs: C = act(A@B + bias). Per-element expression order is
+// identical to the unfused kGemmNN + kAddBias + k<Act>Fwd sequence, so
+// fusion changes memory traffic, never bits.
+//
+// Validity: kGemmNN takes bias and/or activation (a fused bias ref rides the
+// otherwise-free in[3]); kGemmNNQ8 takes activation only — its in[3] already
+// carries the dequant scale, so a bias has nowhere to ride. Every other
+// opcode requires flags == 0.
+inline constexpr uint16_t kFlagEpilogueBias = 1u << 0;  // in[3] = bias ref [N]
+inline constexpr uint16_t kFlagEpilogueActShift = 1;    // bits 1..2: EpilogueAct
+inline constexpr uint16_t kFlagEpilogueActMask = 3u << kFlagEpilogueActShift;
+inline constexpr uint16_t kKnownFlagsMask =
+    kFlagEpilogueBias | kFlagEpilogueActMask;
+
+enum class EpilogueAct : uint16_t { kNone = 0, kRelu = 1, kGelu = 2, kSilu = 3 };
+
+inline constexpr EpilogueAct EpilogueActOf(uint16_t flags) {
+  return static_cast<EpilogueAct>((flags & kFlagEpilogueActMask) >>
+                                  kFlagEpilogueActShift);
+}
+inline constexpr uint16_t MakeEpilogueFlags(bool bias, EpilogueAct act) {
+  return (bias ? kFlagEpilogueBias : uint16_t{0}) |
+         static_cast<uint16_t>(static_cast<uint16_t>(act)
+                               << kFlagEpilogueActShift);
+}
+
 #pragma pack(push, 1)
 
 /// One 64-byte instruction: a single L1 cache line, mirroring the design of

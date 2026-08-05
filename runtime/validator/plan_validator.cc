@@ -8,7 +8,31 @@ namespace up = seeml::update;
 
 std::expected<void, std::string> ValidateInstruction(
     const up::UpdateInstruction& ins, uint64_t arena_size,
-    uint64_t rodata_size) {
+    uint64_t rodata_size, uint32_t plan_version) {
+  // Flags discipline before any operand math. Pre-v5 plans predate the
+  // flags vocabulary: a nonzero word there is corruption, not a feature.
+  // From v5 on, every set bit must be a defined epilogue bit AND defined
+  // for this opcode — Execute() applies flags blindly, so an unknown or
+  // misplaced bit must die here, loudly, not skip silently.
+  if (plan_version < up::kSeeuFlagsVersion) {
+    if (ins.flags != 0)
+      return diag::validating::Error(
+          "instruction carries flags in a pre-v" +
+          std::to_string(up::kSeeuFlagsVersion) + " plan (opcode " +
+          std::to_string(ins.opcode) + ")");
+  } else {
+    const auto opcode = static_cast<up::OpCode>(ins.opcode);
+    const uint16_t allowed =
+        opcode == up::OpCode::kGemmNN
+            ? up::kKnownFlagsMask
+            : opcode == up::OpCode::kGemmNNQ8 ? up::kFlagEpilogueActMask
+                                              : uint16_t{0};
+    if (ins.flags & static_cast<uint16_t>(~allowed))
+      return diag::validating::Error(
+          "unknown or misplaced instruction flags " +
+          std::to_string(ins.flags) + " (opcode " +
+          std::to_string(ins.opcode) + ")");
+  }
   // Every kernel is compiled with SEEML_RESTRICT pointers: a written range
   // overlapping any *other* operand of the same instruction is undefined
   // behavior, not a wrong answer. Bounds alone don't rule that out, so each
@@ -97,6 +121,11 @@ std::expected<void, std::string> ValidateInstruction(
       if (!ref_ok(ins.in[0], mk, false) ||
           !ref_ok_w(ins.in[1], kn, false, q8 ? 1 : sizeof(float)) ||
           !ref_ok(ins.in[2], mn, true))
+        return fail();
+      // Fused-bias epilogue (flags proved valid for this opcode above):
+      // in[3] is a read of N floats and joins the overlap discipline
+      // against the written C range.
+      if ((ins.flags & up::kFlagEpilogueBias) && !ref_ok(ins.in[3], d1, false))
         return fail();
       return disjoint();
     }

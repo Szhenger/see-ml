@@ -103,6 +103,8 @@ class Dataset {
   // Shuffled serving order; empty when shuffling is disabled.
   std::vector<uint64_t> order_;
   uint64_t shuffle_state_ = 0;  // splitmix64 state; 0 = shuffling off
+  uint64_t shuffle_origin_ = 0;  // state EnableShuffle started from (replay)
+  uint64_t epoch_ = 0;           // permutations drawn beyond the first
 };
 
 }  // namespace seeml::update_rt

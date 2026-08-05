@@ -26,6 +26,15 @@ BatchPipeline::~BatchPipeline() {
   }
   cv_.notify_all();
   feeder_.join();
+  // Un-consume a staged batch the engine never took (`full_` still set —
+  // NextBatch would have cleared it). Without this, whether the feeder had
+  // already advanced the dataset past the last consumed batch would depend
+  // on how the teardown raced the staging thread, and a later consumer of
+  // the same dataset (the regression gate's post-training evaluation, a
+  // resumed run) would serve a scheduling-dependent batch sequence. The
+  // restore makes pipelining invisible: at any thread count, the cursor
+  // reads exactly "the batches the engine consumed".
+  if (full_) data_.RestoreServingPos(stage_start_);
 }
 
 void BatchPipeline::FeederLoop() {
@@ -36,7 +45,10 @@ void BatchPipeline::FeederLoop() {
       if (stop_) return;
     }
     // Unlocked on purpose: the consumer never reads the staging buffers
-    // while `full_` is false, so the fill races with nothing.
+    // while `full_` is false, so the fill races with nothing. The dataset
+    // position is snapshotted first so the destructor can un-consume this
+    // batch if the engine never takes it (read only after join).
+    stage_start_ = data_.SaveServingPos();
     data_.FillBatch(batch_, staged_inputs_.data(), StagedLabelPtr());
     {
       std::lock_guard<std::mutex> lock(mutex_);

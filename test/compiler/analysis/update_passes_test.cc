@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include "compiler/frontend/parser/parser.h"
@@ -409,6 +410,171 @@ TEST(MergeBuilder, BuildsZeroedDeltaPlusGemmAccPerAdapter) {
     EXPECT_NE(mirror, original);
     EXPECT_TRUE(mirror->shape() == original->shape());
   }
+}
+
+// =============================================================================
+// GemmEpilogueFuser
+// =============================================================================
+
+/// One layer as the parser emits it: weights materialized at first use, so
+/// the bias declaration sits AFTER the matmul (the SSA-hoist case).
+struct Chain {
+  sir::Block block;
+  sir::Value* x = nullptr;
+  sir::Value* c = nullptr;      // matmul result
+  sir::Value* z = nullptr;      // chain output (act, or bias sum)
+  sir::Operation* gemm = nullptr;
+  sir::Operation* add_bias = nullptr;
+  sir::Operation* act = nullptr;
+  sir::Value* consumer_out = nullptr;  // scale op reading the chain output
+};
+
+void BuildChain(Chain& g, const char* act_mnemonic /* nullptr = bias only */) {
+  g.x = g.block.addArgument(sir::DataType::F32, sir::Shape{2, 3});
+
+  sir::Operation* w_op = g.block.appendOp("sc_mem.weight");
+  sir::Value* w = w_op->addResult("w", sir::DataType::F32, sir::Shape{3, 2});
+
+  g.gemm = g.block.appendOp("sc_high.matmul");
+  g.gemm->addOperand(g.x);
+  g.gemm->addOperand(w);
+  g.c = g.gemm->addResult("c", sir::DataType::F32, sir::Shape{2, 2});
+
+  sir::Operation* b_op = g.block.appendOp("sc_mem.weight");
+  sir::Value* b = b_op->addResult("b", sir::DataType::F32, sir::Shape{2});
+
+  g.add_bias = g.block.appendOp("sc_high.add_bias");
+  g.add_bias->addOperand(g.c);
+  g.add_bias->addOperand(b);
+  sir::Value* y = g.add_bias->addResult("y", sir::DataType::F32,
+                                        sir::Shape{2, 2});
+  g.z = y;
+
+  if (act_mnemonic) {
+    g.act = g.block.appendOp(act_mnemonic);
+    g.act->addOperand(y);
+    g.z = g.act->addResult("z", sir::DataType::F32, sir::Shape{2, 2});
+  }
+
+  sir::Operation* consumer = g.block.appendOp("sc_high.scale");
+  consumer->setAttribute("alpha", 1.0f);
+  consumer->addOperand(g.z);
+  g.consumer_out = consumer->addResult("out", sir::DataType::F32,
+                                       sir::Shape{2, 2});
+}
+
+TEST(GemmEpilogueFuser, FusesBiasAndActivationChain) {
+  Chain g;
+  BuildChain(g, "sc_high.relu");
+  ASSERT_OK_AND_ASSIGN(EpilogueFusion fusion,
+                       GemmEpilogueFuser().Run(g.block, {}, {}));
+  EXPECT_EQ(fusion.fused_chains, 1u);
+  EXPECT_EQ(fusion.fused_away.size(), 2u);
+
+  // The GEMM absorbed the bias operand and the activation attribute, and
+  // the chain output's identity migrated onto its result.
+  EXPECT_EQ(g.gemm->numOperands(), 3u);
+  const std::string act_attr =
+      g.gemm->getAttrAs<std::string>("epilogue_act").value_or("");
+  EXPECT_EQ(act_attr, "relu");
+  EXPECT_TRUE(g.z->hasNoUses());
+  ASSERT_EQ(g.consumer_out->definingOp()->operand(0), g.c);
+
+  // The hoisted bias declaration keeps the block SSA-verifiable, and DCE
+  // (with the live chain output rooted) sweeps exactly the orphaned
+  // AddBias + activation.
+  EXPECT_OK(g.block.verify());
+  ASSERT_OK_AND_ASSIGN(size_t removed,
+                       DeadCodeElimination().Run(g.block, {g.consumer_out}));
+  EXPECT_EQ(removed, 2u);
+  EXPECT_OK(g.block.verify());
+  EXPECT_EQ(CountOps(g.block, "sc_high.add_bias"), 0u);
+  EXPECT_EQ(CountOps(g.block, "sc_high.relu"), 0u);
+}
+
+TEST(GemmEpilogueFuser, FusesBiasOnlyWhenNoActivationFollows) {
+  Chain g;
+  BuildChain(g, nullptr);
+  ASSERT_OK_AND_ASSIGN(EpilogueFusion fusion,
+                       GemmEpilogueFuser().Run(g.block, {}, {}));
+  EXPECT_EQ(fusion.fused_chains, 1u);
+  EXPECT_EQ(fusion.fused_away.size(), 1u);
+  EXPECT_EQ(g.gemm->numOperands(), 3u);
+  EXPECT_FALSE(g.gemm->hasAttribute("epilogue_act"));
+  EXPECT_OK(g.block.verify());
+}
+
+TEST(GemmEpilogueFuser, SkipsWhenIntermediateHasAnotherReader) {
+  // A second reader of the pre-activation sum — exactly what a backward
+  // relu_grad is — must block the activation fold; the bias still fuses
+  // (the raw GEMM output has no other reader).
+  Chain g;
+  BuildChain(g, "sc_high.relu");
+  sir::Operation* extra = g.block.appendOp("sc_high.scale");
+  extra->setAttribute("alpha", 2.0f);
+  extra->addOperand(g.add_bias->result(0));
+  extra->addResult("extra", sir::DataType::F32, sir::Shape{2, 2});
+
+  ASSERT_OK_AND_ASSIGN(EpilogueFusion fusion,
+                       GemmEpilogueFuser().Run(g.block, {}, {}));
+  EXPECT_EQ(fusion.fused_chains, 1u);
+  EXPECT_EQ(fusion.fused_away.size(), 1u);  // AddBias only
+  EXPECT_FALSE(g.gemm->hasAttribute("epilogue_act"));
+  EXPECT_EQ(CountOps(g.block, "sc_high.relu"), 1u);  // act survives
+  EXPECT_OK(g.block.verify());
+}
+
+TEST(GemmEpilogueFuser, SkipsBiasFusionOnQuantizedWeights) {
+  // The q8 GEMM's in[3] carries the dequant scale — a fused bias has
+  // nowhere to ride, so the chain must keep its standalone AddBias.
+  Chain g;
+  BuildChain(g, "sc_high.relu");
+  std::unordered_set<const sir::Value*> quantized{g.gemm->operand(1)};
+  ASSERT_OK_AND_ASSIGN(EpilogueFusion fusion,
+                       GemmEpilogueFuser().Run(g.block, quantized, {}));
+  EXPECT_EQ(fusion.fused_chains, 0u);
+  EXPECT_EQ(g.gemm->numOperands(), 2u);
+  EXPECT_OK(g.block.verify());
+}
+
+TEST(GemmEpilogueFuser, NeverRewiresProtectedValues) {
+  Chain g;
+  BuildChain(g, "sc_high.relu");
+  std::unordered_set<const sir::Value*> protected_values{g.z};
+  ASSERT_OK_AND_ASSIGN(EpilogueFusion fusion,
+                       GemmEpilogueFuser().Run(g.block, {}, protected_values));
+  // The activation output is read outside the program; the bias may still
+  // fuse but z's producing op must survive with its identity intact.
+  for (const sir::Operation* dead : fusion.fused_away)
+    EXPECT_TRUE(dead != g.act);
+  EXPECT_OK(g.block.verify());
+}
+
+TEST(GemmEpilogueFuser, ActOnlyChainFusesWithoutBias) {
+  sir::Block block;
+  sir::Value* x = block.addArgument(sir::DataType::F32, sir::Shape{2, 3});
+  sir::Operation* w_op = block.appendOp("sc_mem.weight");
+  sir::Value* w = w_op->addResult("w", sir::DataType::F32, sir::Shape{3, 2});
+  sir::Operation* mm = block.appendOp("sc_high.matmul");
+  mm->addOperand(x);
+  mm->addOperand(w);
+  sir::Value* c = mm->addResult("c", sir::DataType::F32, sir::Shape{2, 2});
+  sir::Operation* act = block.appendOp("sc_high.gelu");
+  act->addOperand(c);
+  sir::Value* z = act->addResult("z", sir::DataType::F32, sir::Shape{2, 2});
+  sir::Operation* consumer = block.appendOp("sc_high.scale");
+  consumer->setAttribute("alpha", 1.0f);
+  consumer->addOperand(z);
+  consumer->addResult("out", sir::DataType::F32, sir::Shape{2, 2});
+
+  ASSERT_OK_AND_ASSIGN(EpilogueFusion fusion,
+                       GemmEpilogueFuser().Run(block, {}, {}));
+  EXPECT_EQ(fusion.fused_chains, 1u);
+  EXPECT_EQ(mm->numOperands(), 2u);  // no bias operand
+  const std::string act_attr =
+      mm->getAttrAs<std::string>("epilogue_act").value_or("");
+  EXPECT_EQ(act_attr, "gelu");
+  EXPECT_OK(block.verify());
 }
 
 TEST(MergeBuilder, RejectsEmptyAdapterSet) {

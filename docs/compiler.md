@@ -31,10 +31,11 @@ SMF ingest ──▶ feasibility gate ──▶ forward SIR (+ frozen teacher)
            ──▶ loss grafting
            ──▶ pass phase A: conv-lowering, lora-graft     (PassManager)
            ──▶ primal snapshot (becomes the eval program)
-           ──▶ pass phase B: autodiff, optimizer synthesis,
-               dead-code sweep                              (PassManager)
+           ──▶ pass phase B: autodiff, optimizer synthesis (PassManager)
            ──▶ merge program (Δ = (α/r)·A@B)
            ──▶ int8 quantization review
+           ──▶ pass phase C: GEMM-epilogue fusion, then the
+               dead-code sweep of its orphans               (PassManager)
            ──▶ segmented arena binding: RODATA | PERSISTENT | IO | TRANSIENT
            ──▶ persistent image init (counter-based randn: bit-identical
                at any thread count, parallel within a tensor)
@@ -100,7 +101,7 @@ flow.
 
 ## compiler/analysis/ — the training program
 
-All seven units re-exported by the `update_passes.h` façade.
+All eight units re-exported by the `update_passes.h` façade.
 
 - **`updater/`** — orchestration and structural lowering. `PassManager`
   runs named passes and re-verifies the block after each one, so a
@@ -110,10 +111,10 @@ All seven units re-exported by the `update_passes.h` façade.
   forms it cannot model. `DeadCodeElimination` is the optimization phase's
   sweep, run after autodiff and optimizer synthesis: every op whose
   results are unrooted (roots: the loss slot, parameter gradients, the
-  primal snapshot the eval program lowers) and unused is removed — today
-  the driver's programs are minimal by construction and the sweep proves
-  it (0 removed); it is the seam where rewriting passes (fusion,
-  simplification) leave dead ops to be collected.
+  primal snapshot the eval program lowers) and unused is removed — the
+  seam where rewriting passes leave dead ops to be collected. The epilogue
+  fuser's orphans are exactly what it sweeps; a compile with fusion off
+  still runs it and proves the driver's programs minimal (0 removed).
 - **`algebra/`** — kernel-fusion algebra. `LoraGrafter` grafts rank-r
   adapters onto every eligible frozen MatMul (A randn-initialized, B zeros,
   so step 0 is exactly the base model). A tied weight — one frozen tensor
@@ -123,7 +124,18 @@ All seven units re-exported by the `update_passes.h` façade.
   (per-site pairs would commit `W + ΣΔ_i`, polluting every site with every
   other's delta). `MergeBuilder` builds the separate merge program — one
   fused `sc_low.gemm_acc` per adapter materializing Δ = (α/r)·A@B — and
-  rejects duplicate frozen weights outright.
+  rejects duplicate frozen weights outright. `GemmEpilogueFuser` (phase C,
+  after autodiff and quantization selection) folds
+  `C = X@W; Y = C + b; Z = act(Y)` chains into one matmul carrying the
+  epilogue as v5 instruction flags: legality is read off the use-lists (an
+  intermediate the backward program consumes carries that consumer as an
+  extra user and never matches), so exactly the no-backward compute fuses —
+  the frozen teacher subgraph, and the bias step of unadapted student
+  layers. Fuse-then-rebind: the chain output's identity migrates onto the
+  matmul's result, the driver drops the orphans from the primal snapshot,
+  and DCE frees them. Bitwise-neutral by construction (the runtime epilogue
+  evaluates the standalone kernels' exact expressions); `--no-fuse-epilogue`
+  compiles the reference form.
 - **`calculus/`** — the mathematics of the update. `TrainableAutodiff` is
   reverse-mode autodiff pruned to the trainable set (needs-grad marking,
   a VJP rule registry; frozen and teacher subgraphs get no backward
@@ -154,18 +166,11 @@ All seven units re-exported by the `update_passes.h` façade.
   half of L1, mc×kc in half of L2) as a pure function of the host
   description, and `ValidateGemmTiling` enforces that contract —
   overflow-safely, since it is the trust boundary for deserialized
-  tilings — on any tiling handed in from outside.
-=======
-  target for this compiler) and cache/core geometry from sysctl/sysconf,
-  warning and falling back when a probe comes back empty.
-  `SuggestGemmTiling` derives BLIS-style blocking (kc×nc panel in half of
-  L1, mc×kc in half of L2) as a pure function of the host description, and
-  `ValidateGemmTiling` enforces that contract on any tiling handed in from
-  outside. The suggested (and validated) tiling reaches the delivered
-  program through `native_emitter`: the generated `build.sh` bakes it into
-  the vendored GEMM as build-line defines, overridable via
-  `SEEML_TILE_FLAGS` when cross-compiling for a device with different
-  caches.
+  tilings — on any tiling handed in from outside. The suggested (and
+  validated) tiling reaches the delivered program through
+  `native_emitter`: the generated `build.sh` bakes it into the vendored
+  GEMM as build-line defines, overridable via `SEEML_TILE_FLAGS` when
+  cross-compiling for a device with different caches.
 - **`tuner/`** — reinforcement tuning that refines the architecture hint on
   the real machine. `Ucb1Bandit` is a deterministic UCB1 multi-armed bandit
   (no RNG; ties break to the lowest index). `TilingCandidates` spans the
@@ -187,7 +192,7 @@ module is header-only and owns its unit registry and message shapes:
 | `tokenizing/` | SMF byte-stream decode/encode | `SMF`, `Ingressor` |
 | `parsing/` | SMF graph → forward SIR | `Parser` |
 | `passing/` | pass orchestration + lowering legality | `PassManager`, `ConvLowering` |
-| `updating/` | the analytic methods | `TrainableAutodiff`, `LoraGrafter`, `MergeBuilder`, `OptimizerSynthesizer` |
+| `updating/` | the analytic methods | `TrainableAutodiff`, `LoraGrafter`, `MergeBuilder`, `OptimizerSynthesizer`, `GemmEpilogueFuser` |
 | `architecting/` | local device analysis | `HostArch`, `Autotuner` |
 | `generating/` | code generation + the driver | `UpdateCompiler`, `ArenaBinder`, `InstructionLowering`, `NativeEmitter` |
 

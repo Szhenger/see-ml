@@ -46,6 +46,13 @@ class Block {
     void insertOpsAfter(Operation* anchor,
                         std::vector<std::unique_ptr<Operation>> new_ops);
 
+    /// Moves `op` immediately before `anchor` (both must belong to this
+    /// block). Only sound when every operand of `op` remains defined before
+    /// the new position; the canonical caller hoists an operand-less storage
+    /// declaration (`sc_mem.*`) above a consumer it is being fused into
+    /// (asserted). No use-lists change — only program order does.
+    void moveOpBefore(Operation* op, Operation* anchor);
+
     /// The structural verifier — the invariant gate passes rerun after
     /// mutating the graph. Checks, with a diagnostic naming the first
     /// violation: SSA order (every operand defined by an earlier op or an

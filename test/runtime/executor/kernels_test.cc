@@ -62,6 +62,69 @@ TEST(Gemm, TNMatchesNNWithExplicitTranspose) {
   for (size_t i = 0; i < M * N; ++i) EXPECT_NEAR(got[i], want[i], 1e-5);
 }
 
+TEST(Gemm, EpilogueIsBitwiseIdenticalToUnfusedSequence) {
+  // The fused write-back must evaluate exactly the floats the standalone
+  // kGemmNN + kAddBias + k<Act>Fwd sequence would — fusion is a bandwidth
+  // optimization, never a numerics change. Exact equality, not tolerance.
+  using seeml::update::EpilogueAct;
+  const size_t M = 5, N = 7, K = 6;
+  const std::vector<float> a = RandnVector(M * K, 11);
+  const std::vector<float> b = RandnVector(K * N, 12);
+  const std::vector<float> bias = RandnVector(N, 13);
+
+  const struct {
+    EpilogueAct act;
+    void (*fwd)(const float*, float*, size_t);
+  } acts[] = {
+      {EpilogueAct::kNone, nullptr},
+      {EpilogueAct::kRelu, k::ReluFwd},
+      {EpilogueAct::kGelu, k::GeluFwd},
+      {EpilogueAct::kSilu, k::SiluFwd},
+  };
+  for (const auto& [act, fwd] : acts) {
+    // Distinct buffers per stage: the standalone kernels carry the
+    // no-overlap restrict contract the arena binder guarantees.
+    std::vector<float> raw(M * N), summed(M * N), want(M * N), got(M * N);
+    k::GemmNN(a.data(), b.data(), raw.data(), M, N, K);
+    k::AddBias(raw.data(), bias.data(), summed.data(), M, N);
+    if (fwd) fwd(summed.data(), want.data(), M * N);
+    else want = summed;
+
+    k::GemmNN(a.data(), b.data(), got.data(), M, N, K, bias.data(), act);
+    for (size_t i = 0; i < M * N; ++i) EXPECT_EQ(got[i], want[i]);
+  }
+}
+
+TEST(Gemm, ActOnlyEpilogueSkipsBias) {
+  using seeml::update::EpilogueAct;
+  const size_t M = 3, N = 5, K = 4;
+  const std::vector<float> a = RandnVector(M * K, 21);
+  const std::vector<float> b = RandnVector(K * N, 22);
+  std::vector<float> raw(M * N), want(M * N), got(M * N);
+  k::GemmNN(a.data(), b.data(), raw.data(), M, N, K);
+  k::SiluFwd(raw.data(), want.data(), M * N);
+  k::GemmNN(a.data(), b.data(), got.data(), M, N, K, nullptr,
+            EpilogueAct::kSilu);
+  for (size_t i = 0; i < M * N; ++i) EXPECT_EQ(got[i], want[i]);
+}
+
+TEST(Gemm, Q8ActEpilogueMatchesUnfusedSequence) {
+  using seeml::update::EpilogueAct;
+  const size_t M = 4, N = 6, K = 5;
+  const std::vector<float> a = RandnVector(M * K, 31);
+  std::vector<int8_t> bq(K * N);
+  for (size_t i = 0; i < bq.size(); ++i)
+    bq[i] = static_cast<int8_t>((static_cast<int>(i * 37) % 255) - 127);
+  const float scale = 0.033f;
+
+  std::vector<float> raw(M * N), want(M * N), got(M * N);
+  k::GemmNNQ8(a.data(), bq.data(), raw.data(), M, N, K, scale);
+  k::ReluFwd(raw.data(), want.data(), M * N);
+  k::GemmNNQ8(a.data(), bq.data(), got.data(), M, N, K, scale,
+              EpilogueAct::kRelu);
+  for (size_t i = 0; i < M * N; ++i) EXPECT_EQ(got[i], want[i]);
+}
+
 TEST(Gemm, AccNNAccumulatesScaledProduct) {
   const std::vector<float> a = {1, 0, 0, 1};  // I2
   const std::vector<float> b = {5, 6, 7, 8};

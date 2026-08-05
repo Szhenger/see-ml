@@ -25,7 +25,16 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // v4: plan_hash is computed with PlanSelfHash (the chunked parallel form of
 // the same fold, hash field zeroed) instead of a serial Fnv1a64 pass over
 // the whole blob. Older plans are rejected by the version gate; recompile.
-inline constexpr uint32_t kSeeuVersion = 4;
+// v5: UpdateInstruction::flags carries fused GEMM epilogues (instruction.h).
+// A pre-v5 runtime ignores flags entirely and would silently skip the fused
+// bias/activation — exactly the misread the version gate exists to reject —
+// so plans that may set flags must declare v5. From v5 on the validator
+// rejects unknown flag bits, keeping every future flag loud.
+inline constexpr uint32_t kSeeuVersion = 5;
+
+// The version that introduced instruction flags: plans below it must carry
+// flags == 0 on every instruction, and are validated to.
+inline constexpr uint32_t kSeeuFlagsVersion = 5;
 
 // Version negotiation policy. The runtime accepts every version in
 // [kSeeuOldestReadable, kSeeuVersion], not just the version it was built

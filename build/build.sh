@@ -28,6 +28,7 @@ compile compiler/frontend/parser/parser.cc    parser.o
 compile compiler/analysis/updater/pass_manager.cc  pass_manager.o
 compile compiler/analysis/updater/conv_lowering.cc conv_lowering.o
 compile compiler/analysis/updater/dce.cc           dce.o
+compile compiler/analysis/algebra/epilogue_fuser.cc epilogue_fuser.o
 compile compiler/analysis/algebra/lora_grafter.cc  lora_grafter.o
 compile compiler/analysis/algebra/merge_builder.cc merge_builder.o
 compile compiler/analysis/calculus/autodiff.cc     autodiff.o
@@ -68,7 +69,7 @@ LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/resource_analyzer.o \
       build/value_resolver.o build/sema.o build/parser.o \
       build/pass_manager.o build/conv_lowering.o build/dce.o \
-      build/lora_grafter.o \
+      build/epilogue_fuser.o build/lora_grafter.o \
       build/merge_builder.o build/autodiff.o build/optimizer_synth.o \
       build/quantization.o \
       build/arena_binder.o build/instruction_lowering.o \

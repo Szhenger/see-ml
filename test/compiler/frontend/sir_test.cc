@@ -155,6 +155,29 @@ TEST(Block, InsertOpsAfterPreservesOrder) {
   EXPECT_EQ(block.operations()[1]->parentBlock(), &block);
 }
 
+TEST(Block, MoveOpBeforeHoistsStorageDeclarations) {
+  // The epilogue fuser hoists a bias weight declared after its GEMM (the
+  // parser materializes weights at first use) above it, so the fused
+  // operand respects SSA order. Storage declarations are operand-less, so
+  // the move is always sound and no use-list changes.
+  Block block;
+  Value* x = block.addArgument(DataType::F32, Shape{2, 3});
+  Operation* mm = block.appendOp("sc_high.matmul");
+  mm->addOperand(x);
+  Operation* w = block.appendOp("sc_mem.weight");
+  Value* wv = w->addResult("w", DataType::F32, Shape{2});
+
+  block.moveOpBefore(w, mm);
+  ASSERT_EQ(block.numOps(), 2u);
+  EXPECT_EQ(block.operations()[0].get(), w);
+  EXPECT_EQ(block.operations()[1].get(), mm);
+
+  // Now the moved declaration's result is usable as an earlier operand.
+  mm->addOperand(wv);
+  mm->addResult("c", DataType::F32, Shape{2, 2});
+  EXPECT_OK(block.verify());
+}
+
 TEST(Block, RemoveOpDropsUserEntries) {
   Block block;
   Value* x = block.addArgument(DataType::F32, Shape{4});

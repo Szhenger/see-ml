@@ -59,7 +59,7 @@ u32 pad; u64 label_dim
 records[num_samples]: f32 input[input_dim], then the label
 ```
 
-## SEEU — Update Plan (`.seeu`, v4)
+## SEEU — Update Plan (`.seeu`, v5)
 
 **Version negotiation.** The runtime accepts every plan version in
 `[kSeeuOldestReadable, kSeeuVersion]` (`source/plan/schema.h`), not only the
@@ -87,17 +87,27 @@ Key header fields:
 
 Version history: v2 added the eval program, integrity hashes, LR schedule,
 and int8 rodata opcodes; v3 moved `source_model_hash` to `ContentHash64`;
-v4 moved `plan_hash` to the chunked-parallel `PlanSelfHash`. The version
-gate rejects older plans — recompile. Loaders additionally prove `batch`
+v4 moved `plan_hash` to the chunked-parallel `PlanSelfHash`; v5 gave the
+instruction's `flags` word meaning (fused GEMM epilogues — below). The
+version gate rejects plans below the readable floor — recompile. Loaders additionally prove `batch`
 nonzero and every I/O slot and instruction operand ref element-aligned;
 misaligned refs are load errors, not UB at dispatch.
 
 Tensor references are 64-bit words: bit 63 selects the address space
 (0 = mutable arena, 1 = read-only rodata), bits 0..62 are a byte offset.
-Instructions are exactly 64 bytes (`UpdateInstruction`): opcode, four input
-refs, three dim/aux words. Frozen weights selected by `--quantize-base` are
-stored in rodata as per-tensor symmetric int8 with the dequant scale carried
-in the GEMM instruction (`kGemmNNQ8` / `kGemmNTQ8`).
+Instructions are exactly 64 bytes (`UpdateInstruction`): opcode, a `flags`
+word, four input refs, three dim/aux words. Frozen weights selected by
+`--quantize-base` are stored in rodata as per-tensor symmetric int8 with the
+dequant scale carried in the GEMM instruction (`kGemmNNQ8` / `kGemmNTQ8`).
+
+**Epilogue flags (v5).** On the forward GEMMs, `flags` fuses the layer's
+epilogue into the C write-back: bit 0 = add a bias (`in[3]` carries the bias
+ref — f32 GEMM only, since the q8 GEMM's `in[3]` is its scale), bits 1–2
+select an activation (relu / gelu / silu). `C = act(A@B + bias)` evaluates
+per element exactly what the standalone `kAddBias` + activation instructions
+would, so fusion changes memory traffic, never bits. The validator rejects
+unknown flag bits from v5 on, flags on any other opcode, and any nonzero
+flags in a pre-v5 plan.
 
 The emit table (`EmitEntry[]`) maps each adapter's **delta** (`Δ = (α/r)·A@B`,
 materialized by the merge program) to the f32 byte range of its weight inside

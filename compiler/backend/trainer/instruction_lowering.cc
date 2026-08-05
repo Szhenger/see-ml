@@ -64,6 +64,31 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.out[2] = static_cast<uint64_t>(                          // K
           m == "sc_low.matmul_tn" ? a->shape().dims.at(0)
                                   : a->shape().dims.at(1));
+      // Fused epilogue (plan v5): a third operand is the fused bias, whose
+      // ref rides the free in[3]; "epilogue_act" selects the activation.
+      // Both are produced only by GemmEpilogueFuser, and only on
+      // sc_high.matmul — the fuser also guarantees a bias never lands on a
+      // q8 GEMM (in[3] is its scale), so a clash here is a compiler bug.
+      const bool fused_bias =
+          m == "sc_high.matmul" && op->numOperands() == 3;
+      if (fused_bias && q8) {
+        error = "fused bias on a quantized GEMM ('" +
+                std::string(c->id()) + "')";
+        break;
+      }
+      if (fused_bias) ins.in[3] = ref(op->operand(2));
+      EpilogueAct act = EpilogueAct::kNone;
+      if (auto act_name = op->getAttrAs<std::string>("epilogue_act")) {
+        act = *act_name == "relu"   ? EpilogueAct::kRelu
+              : *act_name == "gelu" ? EpilogueAct::kGelu
+              : *act_name == "silu" ? EpilogueAct::kSilu
+                                    : EpilogueAct::kNone;
+        if (act == EpilogueAct::kNone) {
+          error = "unknown epilogue activation '" + *act_name + "'";
+          break;
+        }
+      }
+      ins.flags = MakeEpilogueFlags(fused_bias, act);
     } else if (m == "sc_low.gemm_acc") {
       const sir::Value* a = op->operand(0);
       const sir::Value* b = op->operand(1);

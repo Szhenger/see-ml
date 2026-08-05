@@ -217,6 +217,50 @@ TEST(UpdateCompiler, CompositeLossCombinesBothTerms) {
   EXPECT_EQ(CountOpcode(instrs, OpCode::kKLDistillFwd), 1u);
 }
 
+TEST(UpdateCompiler, EpilogueFusionShrinksDistillPrograms) {
+  // Under distillation the frozen teacher's GEMM -> AddBias -> activation
+  // chains fuse into flagged GEMM epilogues; the orphaned ops are DCE'd, so
+  // both the train and eval programs shrink and the arena loses their
+  // transient slots. The same compile with fusion off is the reference.
+  SmfModel student = MakeMlp(kInDim, kHidden, kOutDim, 31);
+  SmfModel teacher = MakeMlp(kInDim, 14, kOutDim, 32);
+  UpdateConfig config = BaseConfig(kBatch);
+  config.loss = LossKind::kKLDistill;
+  UpdateConfig unfused_config = config;
+  unfused_config.fuse_epilogues = false;
+
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate fused,
+                       UpdateCompiler(config).Compile(student, &teacher));
+  ASSERT_OK_AND_ASSIGN(
+      CompiledUpdate unfused,
+      UpdateCompiler(unfused_config).Compile(student, &teacher));
+
+  const PlanHeader fh = HeaderOf(fused);
+  const PlanHeader uh = HeaderOf(unfused);
+  EXPECT_LT(fh.train_instr_count, uh.train_instr_count);
+  EXPECT_LT(fh.eval_instr_count, uh.eval_instr_count);
+  EXPECT_LE(fh.arena_size, uh.arena_size);
+
+  // The fused stream carries epilogue flags on forward GEMMs; the unfused
+  // stream carries none anywhere (flags == 0 was the pre-v5 invariant).
+  size_t flagged = 0;
+  for (const UpdateInstruction& ins : TrainProgramOf(fused)) {
+    if (ins.flags == 0) continue;
+    ++flagged;
+    EXPECT_EQ(ins.opcode, static_cast<uint16_t>(OpCode::kGemmNN));
+    EXPECT_EQ(ins.flags & static_cast<uint16_t>(~kKnownFlagsMask), 0);
+  }
+  EXPECT_GT(flagged, 0u);
+  for (const UpdateInstruction& ins : TrainProgramOf(unfused))
+    EXPECT_EQ(ins.flags, 0);
+
+  // The teacher's hidden layer fused bias+relu, its logits layer bias-only:
+  // no teacher AddBias survives, and the student's (LoRA-interposed) ones
+  // remain — 2 in the fused stream vs 4 unfused.
+  EXPECT_EQ(CountOpcode(TrainProgramOf(fused), OpCode::kAddBias),
+            CountOpcode(TrainProgramOf(unfused), OpCode::kAddBias) - 2);
+}
+
 TEST(UpdateCompiler, OptimizerSelectionShapesTheProgram) {
   SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 13);
 

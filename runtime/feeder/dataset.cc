@@ -246,6 +246,7 @@ void Dataset::FillBatch(uint64_t batch, float* input_slot,
     if (cursor_ == num_samples_) {
       cursor_ = 0;
       Reshuffle();  // fresh permutation every epoch
+      ++epoch_;
     }
   }
 }
@@ -269,9 +270,27 @@ void Dataset::EnableShuffle(uint64_t seed) {
   // (shuffle_state_ == 0 means "shuffling off").
   shuffle_state_ = seed;
   shuffle_state_ = SplitMix64(&shuffle_state_) | 1ULL;
+  shuffle_origin_ = shuffle_state_;
+  epoch_ = 0;
   order_.resize(num_samples_);
   Reshuffle();
   cursor_ = 0;
+}
+
+void Dataset::RestoreServingPos(ServingPos pos) {
+  cursor_ = pos.cursor;
+  if (order_.empty() || epoch_ == pos.epoch) return;
+  // The epoch moved past the snapshot: replay the permutation sequence from
+  // the shuffle origin. Each epoch's permutation is a pure function of
+  // (origin, epoch index), so the replay reproduces the exact order the
+  // snapshot indexed — O(epoch * n), paid once at feeder teardown.
+  shuffle_state_ = shuffle_origin_;
+  epoch_ = 0;
+  Reshuffle();
+  while (epoch_ < pos.epoch) {
+    Reshuffle();
+    ++epoch_;
+  }
 }
 
 void Dataset::Reshuffle() {
