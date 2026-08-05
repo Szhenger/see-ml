@@ -189,12 +189,68 @@ review exists to prevent exactly that.
 
 ---
 
+## Project 4 — Transformer-scale coverage
+
+> **Status: Phase T1 SHIPPED (2026-08).** SMF v3 (Add / RmsNorm / Rope /
+> Attention op kinds, model-level `seq_len`, per-op `attr0` heads), plan
+> v6 (the ten transformer opcodes with packed `B<<32|S` / `H<<32|d`
+> geometry words, version-gated and alias-disciplined in the validator),
+> deterministic CPU kernels decomposed over (b, h, row) units, VJP rules
+> decomposing attention over the cached probability matrix, and
+> `export_decoder_smf` for pre-norm decoder stacks. LoRA / merge / commit
+> needed zero changes — the adapter algebra already covers every
+> projection. Verified by decoder finite-difference gradient checks and a
+> full train→merge→commit system test.
+
+**Phase T2 — remaining scope (M/L).** Embedding lookup (frozen gather —
+needs-grad pruning already guarantees no backward reaches it; until then
+corpora carry pre-embedded rows), a Hugging-Face import path in
+`export_model.py` (module walker for Llama-class decoders), and the scale
+passes this unlocks: gradient accumulation (2a), bf16 storage (2c), and
+int8-rodata defaults for ≤1B-parameter on-device fine-tuning. Sequence
+geometry today is one `seq_len` per model; ragged/packed sequences are
+out of scope until a corpus format carries them.
+
+## Project 5 — GPU dispatch (Metal)
+
+> **Status: Phase G1a SHIPPED (2026-08).** `runtime/executor/metal_gemm.mm`
+> JIT-compiles the kernel emitter's MSL on the local device and dispatches
+> the four GEMM-family kernels; the hardware-gated suite proves them
+> against the CPU references (ragged sizes, accumulate variant) and that
+> dispatch is bitwise-reproducible run-to-run. This is the first time the
+> emitted `.metal` source has executed anywhere — it is now
+> hardware-validated, not just text-tested.
+
+**Determinism doctrine (decided with G1a):** determinism is
+**per-backend**. A backend must be bitwise-reproducible against itself at
+any thread/threadgroup count, but CPU and GPU are not bitwise-comparable
+(FMA contraction differs); cross-backend checks are tolerance-based, and
+the backend choice must be recorded wherever results are compared (the
+regression gate, checkpoints do not care — the persistent segment is
+backend-neutral f32).
+
+**Phase G1b — engine integration (M).** A backend switch in the engine
+dispatch: GEMM-family opcodes route to the Metal runner, everything else
+stays on CPU (unified memory makes mixed dispatch cheap). Requires
+zero-copy arena buffers (`newBufferWithBytesNoCopy` over a page-aligned
+arena allocation) and batched command encoding instead of G1a's
+one-synchronous-command-per-call harness. **Phase G1c — vendoring (M).**
+The emitted package gains the `.metal` source, the runner TU, and an
+Apple-only branch in the generated `build.sh`, making GPU training a
+run-time flag of `model_update`. Linux GPU (Vulkan) is out of scope until
+a product target needs it.
+
 ## Sequencing
 
 1. ~~**1a GEMM epilogues**~~ — shipped; the flag/version machinery is in.
-2. **2a gradient accumulation** — unlocks larger effective batches on the
+2. ~~**4/T1 transformer coverage**~~ — shipped; SMF v3 + plan v6 are in.
+3. ~~**5/G1a Metal dispatch harness**~~ — shipped; the MSL is
+   hardware-validated.
+4. **5/G1b engine integration** — the throughput unlock now that the
+   kernels are proven; then **4/T2** scale passes ride it.
+5. **2a gradient accumulation** — unlocks larger effective batches on the
    devices the memory gate now honestly bounds.
-3. **3 decision (A or B)** — cheap to decide, removes standing dishonesty
+6. **3 decision (A or B)** — cheap to decide, removes standing dishonesty
    either way.
-4. **2b rematerialization**, then **1b chain fusion**, then **2c bf16** —
+7. **2b rematerialization**, then **1b chain fusion**, then **2c bf16** —
    each contingent on profiling evidence from the phases before it.

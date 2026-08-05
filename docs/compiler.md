@@ -97,7 +97,11 @@ stage of compilation. Partitioned by functionality in the same fashion:
 SIR ops live in three dialects — `sc_mem.*` (storage declarations),
 `sc_high.*` (differentiable forward ops), `sc_low.*` (adjoints, optimizer
 steps, merge kernels) — with the `sc_ctrl.*` prefix reserved for control
-flow.
+flow. The SMF v3 transformer vocabulary (Add / RmsNorm / Rope / Attention)
+imports as `sc_high.{add,rms_norm,rope,attention}` with sequence geometry
+(the model's `seq_len`, per-op heads) carried as attributes; attention
+caches its probability matrix as a second result the way LayerNorm caches
+mean/rstd, and the calculus registry decomposes its VJP over that cache.
 
 ## compiler/analysis/ — the training program
 

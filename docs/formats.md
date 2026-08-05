@@ -16,11 +16,12 @@ The dependency-free model container consumed by `seeml-update-compile`
 
 ```
 u32 magic  "SMF1" (0x31464D53)
-u32 version         1 or 2 accepted; writer emits 2
+u32 version         1..3 accepted; writer emits 3
 u32 num_tensors
 u32 num_ops
 str input_name      (str = u16 length + bytes, no terminator)
 str output_name
+u64 seq_len         (v3 only) rows per sequence; 0 = non-sequential
 tensors[num_tensors]:
   str  name
   u8   rank
@@ -31,15 +32,24 @@ tensors[num_tensors]:
 data section: each constant tensor's f32 blob at its 64-aligned offset
 ops[num_ops] (topologically ordered):
   u8   kind         0 MatMul  1 AddBias  2 Relu
-                    3 Gelu    4 Silu     5 Mul    6 LayerNorm   (v2)
+                    3 Gelu    4 Silu     5 Mul    6 LayerNorm    (v2)
+                    7 Add     8 RmsNorm  9 Rope   10 Attention   (v3)
   str  name
   u8   num_inputs
   str  inputs[num_inputs]
   str  output
+  u32  attr0        (v3 only) num_heads for Rope/Attention, else 0
 ```
 
 Op signatures: `MatMul(x, W)`, `AddBias(x, b)`, unary activations `(x)`,
-`Mul(x, y)` (same shape), `LayerNorm(x, gamma, beta)` over the last dim.
+`Mul(x, y)` / `Add(x, y)` (same shape), `LayerNorm(x, gamma, beta)` and
+`RmsNorm(x, gamma)` over the last dim, `Rope(x)` (rotary position
+embedding), and `Attention(q, k, v)` (causal scaled-dot-product). The
+sequence ops read rows as positions grouped into sequences of the model's
+`seq_len` (which must divide the compiled batch), with `attr0` heads
+dividing the width — an even head width for RoPE's rotation pairs. A v3
+kind or field inside a pre-v3 file is a load error, not forward
+compatibility.
 
 The absolute `data_offset` of every weight is preserved through compilation:
 it is how the emit table addresses the byte ranges that commit patches.
@@ -88,8 +98,11 @@ Key header fields:
 Version history: v2 added the eval program, integrity hashes, LR schedule,
 and int8 rodata opcodes; v3 moved `source_model_hash` to `ContentHash64`;
 v4 moved `plan_hash` to the chunked-parallel `PlanSelfHash`; v5 gave the
-instruction's `flags` word meaning (fused GEMM epilogues — below). The
-version gate rejects plans below the readable floor — recompile. Loaders additionally prove `batch`
+instruction's `flags` word meaning (fused GEMM epilogues — below); v6
+added the transformer opcode family (RMSNorm, RoPE, causal attention and
+its backward primitives), whose sequence geometry rides packed `B<<32|S` /
+`H<<32|d` dim words — the validator rejects those opcodes in any pre-v6
+plan. The version gate rejects plans below the readable floor — recompile. Loaders additionally prove `batch`
 nonzero and every I/O slot and instruction operand ref element-aligned;
 misaligned refs are load errors, not UB at dispatch.
 
