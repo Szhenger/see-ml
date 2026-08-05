@@ -249,14 +249,14 @@ TEST(PlanValidator, RejectsZeroExtentOperands) {
   sm.in[3] = up::MakeArenaRef(640);
   sm.out[0] = 4;  // N
   sm.out[1] = 0;  // C == 0: the exploit
-  EXPECT_ERROR(ValidateInstruction(sm, kArena, kRodata));
+  EXPECT_ERROR(ValidateInstruction(sm, kArena, kRodata, up::kSeeuVersion));
   sm.out[1] = 4;
-  EXPECT_OK(ValidateInstruction(sm, kArena, kRodata));
+  EXPECT_OK(ValidateInstruction(sm, kArena, kRodata, up::kSeeuVersion));
 
   EXPECT_ERROR(ValidateInstruction(
       AddEw(up::MakeArenaRef(0), up::MakeArenaRef(256), up::MakeArenaRef(512),
             0),
-      kArena, kRodata));
+      kArena, kRodata, up::kSeeuVersion));
 }
 
 TEST(PlanValidator, RejectsMisalignedRefs) {
@@ -265,7 +265,7 @@ TEST(PlanValidator, RejectsMisalignedRefs) {
   EXPECT_ERROR(ValidateInstruction(AddEw(up::MakeArenaRef(2),
                                          up::MakeArenaRef(256),
                                          up::MakeArenaRef(512), 16),
-                                   kArena, kRodata));
+                                   kArena, kRodata, up::kSeeuVersion));
   // Quantized B is 1-byte-per-element rodata: any offset is fine there.
   up::UpdateInstruction q8;
   q8.opcode = static_cast<uint16_t>(up::OpCode::kGemmNNQ8);
@@ -275,7 +275,7 @@ TEST(PlanValidator, RejectsMisalignedRefs) {
   q8.out[0] = 2;
   q8.out[1] = 2;
   q8.out[2] = 2;
-  EXPECT_OK(ValidateInstruction(q8, kArena, kRodata));
+  EXPECT_OK(ValidateInstruction(q8, kArena, kRodata, up::kSeeuVersion));
 }
 
 TEST(PlanValidator, RejectsAliasingWriteAndReadOperands) {
@@ -285,11 +285,11 @@ TEST(PlanValidator, RejectsAliasingWriteAndReadOperands) {
   EXPECT_ERROR(ValidateInstruction(
       AddEw(up::MakeArenaRef(0), up::MakeArenaRef(256), up::MakeArenaRef(32),
             16),  // write [32,96) overlaps read [0,64)
-      kArena, kRodata));
+      kArena, kRodata, up::kSeeuVersion));
   EXPECT_OK(ValidateInstruction(
       AddEw(up::MakeArenaRef(0), up::MakeArenaRef(0), up::MakeArenaRef(512),
             16),  // x and y share storage: reads may alias
-      kArena, kRodata));
+      kArena, kRodata, up::kSeeuVersion));
 }
 
 TEST(PlanValidator, EveryCompiledInstructionValidates) {

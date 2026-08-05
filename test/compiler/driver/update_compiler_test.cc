@@ -239,7 +239,10 @@ TEST(UpdateCompiler, EpilogueFusionShrinksDistillPrograms) {
   const PlanHeader uh = HeaderOf(unfused);
   EXPECT_LT(fh.train_instr_count, uh.train_instr_count);
   EXPECT_LT(fh.eval_instr_count, uh.eval_instr_count);
-  EXPECT_LE(fh.arena_size, uh.arena_size);
+  // No arena-size assertion: fusion removes transient values, but first-fit
+  // offsets are not monotone in the interval set (the fused GEMM's result
+  // inherits the chain output's longer liveness), so the high-water mark
+  // may move either way by a packing accident.
 
   // The fused stream carries epilogue flags on forward GEMMs; the unfused
   // stream carries none anywhere (flags == 0 was the pre-v5 invariant).
