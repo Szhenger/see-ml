@@ -5,7 +5,8 @@ exact memory gating, tiling wiring, CI, gate accuracy, version negotiation,
 streaming/locked commit, the DCE optimization phase). Three findings remain,
 each a genuine project rather than a fix. This outline scopes them: what to
 build, in what order, against which seams in the current tree, and how each
-is verified. Effort marks are relative (S/M/L per phase).
+is verified. Effort marks are relative (S/M/L per phase). Terms and
+abbreviations are defined in the [README glossary](../README.md#glossary).
 
 Cross-cutting ground rules, all now in place and to be leaned on:
 

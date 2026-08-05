@@ -2,11 +2,11 @@
 
 `runtime/` is the zero-dependency half of the product: the code vendored
 into every emitted package and executed on the device. It is partitioned in
-the same fashion as [the compiler](compiler.md) — subsystems named for
-their role in the update, folders for the discipline of the work inside,
-façade headers where a subsystem's units are split — with the engine
-playing the driver's role: it owns the *process* and verifies every
-boundary it crosses.
+the same fashion as [the compiler](compiler.md), with the same structural
+vocabulary — subsystems, disciplines, units, façade headers — defined
+there and collected in the [README glossary](../README.md#glossary). The
+engine plays the driver's role: it owns the update *process* and verifies
+every boundary it crosses.
 
 ```
 runtime/
@@ -90,7 +90,8 @@ the source-model identity check uses the parallel `ContentHash64`.
 
 ## feeder/ — the corpus
 
-- **`dataset`** — the SDS container ([formats.md](formats.md)): fully
+- **`dataset`** — the SDS (SeeML Dataset) container
+  ([formats.md](formats.md)): fully
   validated before the first sample is served; batches served sequentially
   with wraparound or through a seeded per-epoch permutation, deterministic
   and allocation-free per batch.
@@ -110,9 +111,12 @@ kernel family, all sharing `kernel_policy.h` — the decomposition policy
 that makes parallel execution bitwise-deterministic (chunk boundaries are a
 pure function of the problem shape; reductions combine per-chunk partials
 in chunk order) and the no-overlap aliasing contract the arena allocator
-guarantees.
+guarantees. Determinism is a tested contract: the `ParallelDeterminism`
+suite (`test/runtime/executor/kernels_test.cc`) re-proves every kernel
+family bit-for-bit across thread counts.
 
-- **`gemm`** — the four f32 variants and two dequantizing int8 variants,
+- **`gemm`** — GEMM (general matrix–matrix multiply): the four f32
+  variants and two dequantizing int8 variants,
   reduced to two cache-blocked cores. The forward GEMMs apply the v5 fused
   epilogue (`C = act(A@B + bias)`) in the write-back while the rows are
   still hot — the per-element expressions are the same inline functions the
@@ -169,7 +173,8 @@ written.
   `WriteFile`, `FlushFileBuffers`, `MoveFileEx` with replace-existing —
   CRT `rename` cannot overwrite, which would fail every checkpoint after
   the first).
-- **`checkpoint`** — the SEKP container (v3): the arena's persistent
+- **`checkpoint`** — the SEKP (SeeML Checkpoint) container (v3): the
+  arena's persistent
   segment, hash-bound to the exact plan that laid it out and integrity-
   hashed with the parallel `ContentHash64`; fully verified before a byte
   reaches the arena.

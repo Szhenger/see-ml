@@ -1,13 +1,27 @@
 # The SeeML Update Compiler — Architecture
 
-`compiler/` is partitioned into five subsystems, each named for its role in
-the compilation, and each subsystem into folders named for the discipline of
-the work inside it. A folder's façade header (where one exists) is the only
-include consumers need; the units behind it can be reorganized without
-churning the rest of the tree.
+Four structural terms recur throughout these docs (the [README
+glossary](../README.md#glossary) collects the full vocabulary): a
+*subsystem* is a top-level folder named for its role in the process; a
+*discipline* is a folder inside a subsystem, named for the kind of work
+done there; a *unit* is one class or function family with its own header;
+and a *façade header* is the single include that re-exports a folder's
+units, so the files behind it can be reorganized without churning the rest
+of the tree.
+
+The compiler consumes SMF (the SeeML Model Format, the on-disk model
+container — [formats.md](formats.md)), works on SIR (the SeeML Intermediate
+Representation, its in-memory program form), and produces a `.seeu` update
+plan. The update it compiles is a LoRA fine-tune (Low-Rank Adaptation: a
+pair of small trainable matrices `A` and `B` grafted beside each frozen
+weight, whose scaled product `Δ = (α/r)·A@B` is the trained delta).
+
+`compiler/` is partitioned into five subsystems, each subsystem into
+disciplines:
 
 ```
 source/                     the source language (not a compiler subsystem)
+tool/                       the command-line surface (not a compiler subsystem)
 compiler/
   driver/                   orchestrates the process, verifies every boundary
   frontend/                 SMF bytes -> forward SIR
@@ -83,9 +97,11 @@ stage of compilation. Partitioned by functionality in the same fashion:
   whole-graph checks first (`sema`: topological order, unique outputs,
   producible model output), then per-op shape semantics, with
   `value_resolver` materializing frozen weights on first use and recording
-  them in `GraphBuild` for rodata packing and the emit table.
-- **`representation/`** — SIR, the SSA intermediate representation, split
-  per core definition (`type` / `value` / `operation` / `block`) behind the
+  them in `GraphBuild` for rodata (read-only data) packing and the emit
+  table.
+- **`representation/`** — SIR, the intermediate representation, in SSA
+  form (static single assignment: every value is defined exactly once),
+  split per core definition (`type` / `value` / `operation` / `block`) behind the
   `sir.h` façade. `Block::verify()` is the invariant gate the rest of the
   compiler leans on. Threading model: single writer — use-lists are written
   during construction, so a block is built by one thread, then freely read
@@ -105,14 +121,14 @@ mean/rstd, and the calculus registry decomposes its VJP over that cache.
 
 ## compiler/analysis/ — the training program
 
-All eight units re-exported by the `update_passes.h` façade.
+Every unit below is re-exported by the `update_passes.h` façade.
 
 - **`updater/`** — orchestration and structural lowering. `PassManager`
   runs named passes and re-verifies the block after each one, so a
   corrupting rewrite is attributed to its author; a pass's own error is
   propagated verbatim. `ConvLowering` rewrites `sc_high.conv2d` into
-  im2col + filter-matrix + GEMM (+ bias) + col2im, rejecting group/dilated
-  forms it cannot model. `DeadCodeElimination` is the optimization phase's
+  im2col + filter-matrix + GEMM (general matrix–matrix multiply) + bias +
+  col2im, rejecting group/dilated forms it cannot model. `DeadCodeElimination` is the optimization phase's
   sweep, run after autodiff and optimizer synthesis: every op whose
   results are unrooted (roots: the loss slot, parameter gradients, the
   primal snapshot the eval program lowers) and unused is removed — the
@@ -142,8 +158,8 @@ All eight units re-exported by the `update_passes.h` façade.
   compiles the reference form.
 - **`calculus/`** — the mathematics of the update. `TrainableAutodiff` is
   reverse-mode autodiff pruned to the trainable set (needs-grad marking,
-  a VJP rule registry; frozen and teacher subgraphs get no backward
-  compute). `OptimizerSynthesizer` appends SGD or AdamW as SIR, so one
+  a registry of VJP — vector–Jacobian product — rules; frozen and teacher
+  subgraphs get no backward compute). `OptimizerSynthesizer` appends SGD or AdamW as SIR, so one
   program execution is one full training step.
 - **`reviewer/`** — preprocessing that configures backend behavior:
   `SelectQuantizedWeights` scans frozen weights (parallel max-abs sweep,
@@ -162,11 +178,13 @@ All eight units re-exported by the `update_passes.h` façade.
   backward transposes, and the merge's scaled accumulate) from a `GpuTiling`
   clamped out of the host tiling.
 - **`architecture/`** — local device analysis informing the trainer.
-  `DetectHostArch` reads ISA/SIMD/FMA from the compilation target (host =
+  `DetectHostArch` reads the instruction set (ISA), vector width (SIMD),
+  and fused multiply–add (FMA) support from the compilation target (host =
   target for this compiler) and cache/core geometry from sysctl on macOS
   and the sysfs CPU topology (physical cores, not hardware threads) plus
   sysconf on Linux, warning and falling back when a probe comes back
-  empty. `SuggestGemmTiling` derives BLIS-style blocking (kc×nc panel in
+  empty. `SuggestGemmTiling` derives BLIS-style blocking (the cache-blocking
+  scheme of the BLIS linear-algebra library: kc×nc panel in
   half of L1, mc×kc in half of L2) as a pure function of the host
   description, and `ValidateGemmTiling` enforces that contract —
   overflow-safely, since it is the trust boundary for deserialized
@@ -176,8 +194,8 @@ All eight units re-exported by the `update_passes.h` façade.
   GEMM as build-line defines, overridable via `SEEML_TILE_FLAGS` when
   cross-compiling for a device with different caches.
 - **`tuner/`** — reinforcement tuning that refines the architecture hint on
-  the real machine. `Ucb1Bandit` is a deterministic UCB1 multi-armed bandit
-  (no RNG; ties break to the lowest index). `TilingCandidates` spans the
+  the real machine. `Ucb1Bandit` is a deterministic UCB1 (Upper Confidence
+  Bound) multi-armed bandit (no RNG; ties break to the lowest index). `TilingCandidates` spans the
   hint and its halved/doubled neighbors; `AutotuneGemmTiling` spends an
   injected measurement budget (the benchmark is a parameter, so tuning is
   testable without a GPU or wall clock) and reports the winning tiling with
@@ -225,6 +243,20 @@ it verifies at every boundary that each subsystem was used correctly
 
 Contract violations are driver bugs, not user errors, and report under the
 driver's own unit.
+
+## tool/ — the command-line surface
+
+Not under `compiler/` for the same reason as `source/`: the tools are
+consumers of the compiler and the formats, not stages of compilation.
+
+- **`seeml_update_compile.cc`** — the compiler CLI; every flag is
+  documented in [usage.md](usage.md). Argument parsing is strict: an
+  unknown flag, a flag missing its value, or a numeric with trailing
+  garbage is a hard error, never a silent default.
+- **`seeml_seeu_dump.cc`** — the plan disassembler: header fields, arena
+  segments, and (with `--instrs`) the decoded instruction streams.
+- **`export_model.py`** — the PyTorch exporter producing SMF models and
+  SDS corpora; the accepted module set is listed in [usage.md](usage.md).
 
 ## Testing
 
