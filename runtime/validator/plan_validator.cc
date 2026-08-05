@@ -226,24 +226,10 @@ std::expected<void, std::string> ValidateInstruction(
       if (!ref_ok(ins.in[0], d0, true)) return fail();
       return disjoint();
   }
-
-  // Aliasing proof: the kernels are compiled with no-alias (restrict)
-  // qualifiers on the promise the arena binder keeps for compiled plans; a
-  // foreign plan must prove it here or blind dispatch is UB. Any operand
-  // pair where at least one side is written must be disjoint (read-read
-  // overlap is harmless — nothing is modified through either pointer).
-  for (size_t i = 0; i < n_extents; ++i)
-    for (size_t j = i + 1; j < n_extents; ++j) {
-      const Extent& a = extents[i];
-      const Extent& b = extents[j];
-      if (!a.write && !b.write) continue;
-      if (a.rodata != b.rodata) continue;
-      if (a.begin < b.begin + b.bytes && b.begin < a.begin + a.bytes)
-        return diag::validating::Error(
-            "instruction operands alias (opcode " +
-            std::to_string(ins.opcode) + ")");
-    }
-  return {};
+  // Every known opcode returned through disjoint() above; anything else
+  // must be a load error — Execute() would silently skip it.
+  return diag::validating::Error("unknown opcode " +
+                                 std::to_string(ins.opcode));
 }
 
 }  // namespace seeml::update_rt

@@ -193,6 +193,28 @@ TEST(UpdateEngineLoad, RejectsOperandOutsideItsAddressSpace) {
                         "out of bounds");
 }
 
+TEST(UpdateEngineLoad, RejectsClassLabelPlanWithoutSoftmax) {
+  // label_kind == 1 promises the raw dataset labels are validated against a
+  // softmax class width; a plan claiming class labels while carrying no
+  // softmax would leave them indexing kernels unvalidated. Regression: the
+  // check must run against the candidate plan being loaded — a previous
+  // implementation scanned the engine's (still empty) member programs and
+  // the previous plan's header, so on a fresh engine it never fired.
+  UpdateConfig config = BaseConfig(kBatch);
+  config.loss = LossKind::kMse;
+  std::vector<uint8_t> plan = CompilePlan(config);
+  ASSERT_FALSE(plan.empty());
+  PlanHeader h = HeaderOf(plan);
+  ASSERT_EQ(h.label_kind, 2u);
+  h.label_kind = 1;  // lie: class labels, but no softmax in any program
+  h.label_bytes = kBatch * sizeof(int32_t);
+  PutHeader(plan, h);
+
+  UpdateEngine engine;
+  EXPECT_ERROR_CONTAINS(engine.LoadFromMemory(plan.data(), plan.size()),
+                        "carries no softmax");
+}
+
 TEST(UpdateEngineLoad, LoadFromFileMatchesLoadFromMemory) {
   ScopedTempDir dir;
   const std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
