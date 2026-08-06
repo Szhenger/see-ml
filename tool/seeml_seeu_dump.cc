@@ -55,18 +55,18 @@ const char* OpName(uint16_t opcode) {
     case OpCode::kClipNorm:       return "clip.norm";
     case OpCode::kGemmNNQ8:       return "gemm.nn.q8";
     case OpCode::kGemmNTQ8:       return "gemm.nt.q8";
+    case OpCode::kRmsNormFwd:     return "rms_norm.fwd";
+    case OpCode::kRmsNormBwd:     return "rms_norm.bwd";
+    case OpCode::kRopeFwd:        return "rope.fwd";
+    case OpCode::kRopeBwd:        return "rope.bwd";
+    case OpCode::kAttnFwd:        return "attn.fwd";
+    case OpCode::kAttnDP:         return "attn.dp";
+    case OpCode::kAttnDV:         return "attn.dv";
+    case OpCode::kSoftmaxRowsBwd: return "softmax_rows.bwd";
+    case OpCode::kAttnDQ:         return "attn.dq";
+    case OpCode::kAttnDK:         return "attn.dk";
   }
   return "<unknown>";
-}
-
-// Overflow-checked section bound over fully untrusted header fields: the
-// unchecked form `offset + count * elem <= size` wraps modulo 2^64 for a
-// crafted count and "passes", walking the disassembler off the buffer —
-// in the one tool whose job is inspecting corrupt plans.
-bool SectionOk(uint64_t offset, uint64_t count, uint64_t elem, size_t size) {
-  if (elem != 0 && count > UINT64_MAX / elem) return false;
-  const uint64_t bytes = count * elem;
-  return offset <= size && bytes <= size - offset;
 }
 
 void PrintRef(uint64_t ref) {
@@ -78,17 +78,140 @@ void PrintRef(uint64_t ref) {
               RefOffset(ref));
 }
 
+float ImmBitsToF32(uint64_t bits) {
+  float f = 0.0f;
+  const uint32_t u = static_cast<uint32_t>(bits);
+  std::memcpy(&f, &u, sizeof(f));
+  return f;
+}
+
+/// The in[] slot carrying f32 immediate bits rather than a tensor ref, per
+/// the ISA in source/plan/instruction.h; -1 when every slot is a ref.
+/// Decoding immediates as refs printed "ar+0x3f800000" for alpha = 1.0 — an
+/// apparently valid ~1 GB arena reference a field debugger would chase.
+int ImmInSlot(uint16_t opcode) {
+  switch (static_cast<OpCode>(opcode)) {
+    case OpCode::kScale:     return 2;
+    case OpCode::kFill:      return 1;
+    case OpCode::kClipNorm:  return 1;
+    case OpCode::kGemmAccNN: return 3;
+    case OpCode::kGemmNNQ8:  return 3;
+    case OpCode::kGemmNTQ8:  return 3;
+    default:                 return -1;
+  }
+}
+
+/// Compact epilogue decode for the v5 flag word: "bias", "relu",
+/// "bias+gelu", ... — or nullptr when no flags are set.
+const char* EpilogueName(uint16_t flags) {
+  static const char* const kNames[] = {
+      nullptr, "bias",      "relu", "bias+relu",
+      "gelu",  "bias+gelu", "silu", "bias+silu",
+  };
+  return flags < 8 ? kNames[flags] : "unknown-flags";
+}
+
 void Disassemble(const char* title, const UpdateInstruction* instrs,
                  uint64_t count) {
   std::printf("\n%s (%" PRIu64 " instructions)\n", title, count);
   for (uint64_t i = 0; i < count; ++i) {
     const UpdateInstruction& ins = instrs[i];
     std::printf("  %4" PRIu64 "  %-18s", i, OpName(ins.opcode));
-    for (uint64_t in : ins.in)
-      if (in != kNullRef) PrintRef(in);
-    std::printf("   dims/aux: %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
-                ins.out[0], ins.out[1], ins.out[2]);
+    if (ins.flags)
+      std::printf(" epi(%s)", EpilogueName(ins.flags));
+    const int imm = ImmInSlot(ins.opcode);
+    for (int s = 0; s < 4; ++s) {
+      if (s == imm)
+        std::printf("  imm(%-11g)", ImmBitsToF32(ins.in[s]));
+      else if (ins.in[s] != kNullRef)
+        PrintRef(ins.in[s]);
+    }
+    // out[] words that hold tensor refs are printed as refs; everything
+    // else stays raw dims/aux.
+    switch (static_cast<OpCode>(ins.opcode)) {
+      case OpCode::kLayerNormFwd:
+        std::printf("   stats:");
+        PrintRef(ins.out[1]);
+        PrintRef(ins.out[2]);
+        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
+        break;
+      case OpCode::kLayerNormBwd:
+        std::printf("   stats:");
+        PrintRef(ins.out[0]);
+        PrintRef(ins.out[1]);
+        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
+                    ins.out[2] >> 32, ins.out[2] & 0xFFFFFFFFu);
+        break;
+      case OpCode::kKLDistillFwd:
+        std::printf("   p_t:");
+        PrintRef(ins.out[0]);
+        std::printf("   n/c: %" PRIu64 " %" PRIu64 "  T %g\n",
+                    ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu,
+                    ImmBitsToF32(ins.out[2]));
+        break;
+      case OpCode::kKLDistillBwd:
+        std::printf("   n/c: %" PRIu64 " %" PRIu64 "  T %g\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                    ImmBitsToF32(ins.out[1]));
+        break;
+      case OpCode::kRmsNormFwd:
+        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
+        break;
+      case OpCode::kRmsNormBwd:
+        std::printf("   rstd:");
+        PrintRef(ins.out[0]);
+        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
+                    ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
+        break;
+      case OpCode::kRopeFwd:
+      case OpCode::kRopeBwd:
+        std::printf("   B/S: %" PRIu64 " %" PRIu64 "  H/d: %" PRIu64
+                    " %" PRIu64 "  base %g\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                    ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu,
+                    ImmBitsToF32(ins.out[2]));
+        break;
+      case OpCode::kAttnFwd:
+        std::printf("   probs:");
+        PrintRef(ins.out[0]);
+        std::printf("   B/S: %" PRIu64 " %" PRIu64 "  H/d: %" PRIu64
+                    " %" PRIu64 "\n",
+                    ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu,
+                    ins.out[2] >> 32, ins.out[2] & 0xFFFFFFFFu);
+        break;
+      case OpCode::kAttnDP:
+      case OpCode::kAttnDV:
+      case OpCode::kAttnDQ:
+      case OpCode::kAttnDK:
+        std::printf("   B/S: %" PRIu64 " %" PRIu64 "  H/d: %" PRIu64
+                    " %" PRIu64 "\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                    ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
+        break;
+      case OpCode::kSoftmaxRowsBwd:
+        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
+        break;
+      default:
+        std::printf("   dims/aux: %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
+                    ins.out[0], ins.out[1], ins.out[2]);
+        break;
+    }
   }
+}
+
+/// Overflow-checked section bounds. Header fields are untrusted — this tool
+/// exists to debug corrupt plans and deliberately keeps going after a hash
+/// MISMATCH — and offset + count * elem can wrap in uint64 exactly for the
+/// inputs the check exists to reject (the runtime's contract.cc uses the
+/// same MulOk/RangeOk discipline).
+bool SectionInBounds(uint64_t offset, uint64_t count, uint64_t elem_bytes,
+                     uint64_t plan_size) {
+  if (elem_bytes != 0 && count > UINT64_MAX / elem_bytes) return false;
+  const uint64_t bytes = count * elem_bytes;
+  return offset <= plan_size && bytes <= plan_size - offset;
 }
 
 }  // namespace
@@ -99,8 +222,18 @@ int main(int argc, char** argv) {
     return 2;
   }
   bool want_instrs = false;
-  for (int i = 2; i < argc; ++i)
-    if (std::strcmp(argv[i], "--instrs") == 0) want_instrs = true;
+  for (int i = 2; i < argc; ++i) {
+    if (std::strcmp(argv[i], "--instrs") == 0) {
+      want_instrs = true;
+    } else {
+      // A typo'd flag must not silently print header-only output with
+      // exit 0 — the sibling compile CLI treats every unconsumed argv slot
+      // as a hard error for the same reason.
+      std::fprintf(stderr, "seeml-seeu-dump: unknown argument '%s'\n",
+                   argv[i]);
+      return 2;
+    }
+  }
 
   std::ifstream f(argv[1], std::ios::binary);
   if (!f) {
@@ -132,26 +265,24 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "seeml-seeu-dump: bad magic\n");
     return 1;
   }
-  // The header layout is version-specific: interpreting an older plan
-  // through the current struct prints authoritative-looking garbage (and
-  // feeds garbage counts to the section walks below).
-  if (h.version != kSeeuVersion) {
+  // Accept exactly the versions the runtime loads (schema.h): every plan in
+  // the readable range shares this header layout and the PlanSelfHash seal,
+  // and a field tool that refuses artifacts the fleet runs is useless for
+  // debugging them. Below the floor the layout/seal differ — interpreting
+  // such a plan through the current struct prints authoritative-looking
+  // garbage (and feeds garbage counts to the section walks below).
+  if (h.version < kSeeuOldestReadable || h.version > kSeeuVersion) {
     std::fprintf(stderr,
                  "seeml-seeu-dump: plan version %u, but this tool "
-                 "understands only version %u — refusing to interpret the "
+                 "understands versions %u..%u — refusing to interpret the "
                  "header\n",
-                 h.version, kSeeuVersion);
+                 h.version, kSeeuOldestReadable, kSeeuVersion);
     return 1;
   }
 
   // Verify the integrity seal the same way the runtime does.
-  uint64_t state = kFnvOffsetBasis;
-  constexpr size_t kHashAt = offsetof(PlanHeader, plan_hash);
-  constexpr uint8_t kZero[sizeof(uint64_t)] = {};
-  state = Fnv1a64(plan.data(), kHashAt, state);
-  state = Fnv1a64(kZero, sizeof(kZero), state);
-  state = Fnv1a64(plan.data() + kHashAt + sizeof(uint64_t),
-                  plan.size() - kHashAt - sizeof(uint64_t), state);
+  const uint64_t state = PlanSelfHash(plan.data(), plan.size(),
+                                      offsetof(PlanHeader, plan_hash));
 
   std::printf("seeu plan: %s\n", argv[1]);
   std::printf("  version            %u\n", h.version);
@@ -184,8 +315,8 @@ int main(int argc, char** argv) {
   std::printf("  emit table         %" PRIu64 " entr%s\n", h.emit_count,
               h.emit_count == 1 ? "y" : "ies");
 
-  if (SectionOk(h.emit_table_offset, h.emit_count, sizeof(EmitEntry),
-                plan.size())) {
+  if (SectionInBounds(h.emit_table_offset, h.emit_count, sizeof(EmitEntry),
+                      plan.size())) {
     for (uint64_t i = 0; i < h.emit_count; ++i) {
       EmitEntry e;
       std::memcpy(&e, plan.data() + h.emit_table_offset + i * sizeof(e),
@@ -203,18 +334,15 @@ int main(int argc, char** argv) {
     auto stream = [&](uint64_t off) {
       return reinterpret_cast<const UpdateInstruction*>(plan.data() + off);
     };
-    auto dump = [&](const char* title, uint64_t off, uint64_t count) {
-      if (SectionOk(off, count, sizeof(UpdateInstruction), plan.size()))
-        Disassemble(title, stream(off), count);
-      else
-        std::fprintf(stderr,
-                     "seeml-seeu-dump: %s program exceeds the file — "
-                     "skipped\n",
-                     title);
-    };
-    dump("train", h.train_instr_offset, h.train_instr_count);
-    dump("eval", h.eval_instr_offset, h.eval_instr_count);
-    dump("merge", h.merge_instr_offset, h.merge_instr_count);
+    if (SectionInBounds(h.train_instr_offset, h.train_instr_count,
+                        sizeof(UpdateInstruction), plan.size()))
+      Disassemble("train", stream(h.train_instr_offset), h.train_instr_count);
+    if (SectionInBounds(h.eval_instr_offset, h.eval_instr_count,
+                        sizeof(UpdateInstruction), plan.size()))
+      Disassemble("eval", stream(h.eval_instr_offset), h.eval_instr_count);
+    if (SectionInBounds(h.merge_instr_offset, h.merge_instr_count,
+                        sizeof(UpdateInstruction), plan.size()))
+      Disassemble("merge", stream(h.merge_instr_offset), h.merge_instr_count);
   }
   return 0;
 }

@@ -71,7 +71,8 @@ TEST(NativeEmitter, EmitsCompletePackage) {
         "runtime/executor/update_kernels.h", "runtime/executor/gemm.cc",
         "runtime/executor/elementwise.cc", "runtime/executor/activation.cc",
         "runtime/executor/normalization.cc", "runtime/executor/loss.cc",
-        "runtime/executor/optimizer.cc", "runtime/feeder/dataset.cc",
+        "runtime/executor/optimizer.cc", "runtime/executor/attention.cc",
+        "runtime/feeder/dataset.cc",
         "runtime/feeder/batch_pipeline.cc", "runtime/custodian/durable_io.cc",
         "runtime/validator/plan_validator.cc",
         "runtime/custodian/checkpoint.cc",
@@ -91,6 +92,16 @@ TEST(NativeEmitter, EmitsCompletePackage) {
   EXPECT_STR_CONTAINS(script, "source/parallel/parallel_for.cc");
   EXPECT_STR_CONTAINS(script, "feeder/batch_pipeline");
   EXPECT_STR_CONTAINS(script, "-pthread");
+
+  // The architecture analysis reaches the delivered program: the script
+  // bakes the host-derived GEMM tiling as build-line defines, overridable
+  // (or clearable) through SEEML_TILE_FLAGS for cross-compilation. The
+  // suggested tiling always validates on the suggesting host, so the
+  // fallback no-define form must not appear here.
+  EXPECT_STR_CONTAINS(script, "-DSEEML_GEMM_TILE_K=");
+  EXPECT_STR_CONTAINS(script, "-DSEEML_GEMM_TILE_N=");
+  EXPECT_STR_CONTAINS(script, "SEEML_TILE_FLAGS");
+  EXPECT_STR_CONTAINS(script, "$TILE_FLAGS");
 
   // The build script is marked executable.
   const auto perms = std::filesystem::status(paths.build_script).permissions();

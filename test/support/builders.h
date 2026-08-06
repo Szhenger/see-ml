@@ -46,6 +46,17 @@ update::SmfModel MakeTiedMlp(int64_t dim, uint64_t seed);
 update::SmfModel MakeGatedNet(int64_t in_dim, int64_t hidden, int64_t out_dim,
                               uint64_t seed);
 
+/// A one-block pre-norm causal decoder exercising every v3 operator
+/// (RmsNorm / Rope / Attention / Add plus the SwiGLU MLP), with a
+/// vocab-logit head. Rows are pre-embedded positions grouped into
+/// sequences of `seq` (m.seq_len = seq); requires heads | dim and an even
+/// head width:
+///   n1 = rms_norm(x, g1); q/k/v = n1@wq/wk/wv; a = attn(rope(q), rope(k), v)
+///   x1 = x + a@wo; n2 = rms_norm(x1, g2)
+///   x2 = x1 + (silu(n2@wg) * (n2@wu))@wd; logits = rms_norm(x2, gf)@wh
+update::SmfModel MakeTinyDecoder(int64_t dim, int64_t heads, int64_t seq,
+                                 int64_t ffn, int64_t vocab, uint64_t seed);
+
 /// The repository checkout the test binaries were configured from (the
 /// emitter suite vendors runtime sources out of it).
 std::string RepoRoot();

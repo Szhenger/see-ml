@@ -61,14 +61,31 @@ class Dataset {
   /// (pure distillation).
   void FillBatch(uint64_t batch, float* input_slot, uint8_t* label_slot);
 
+  /// Restarts batch serving from the beginning of the current order (the
+  /// current permutation, if shuffling). Evaluation passes rewind first so
+  /// every pass consumes the identical sample multiset regardless of where
+  /// earlier passes left the cursor.
+  void Rewind() { cursor_ = 0; }
+
   /// Switches batch serving to a seeded random permutation, re-shuffled at
   /// every epoch boundary. Deterministic for a given (seed, epoch) pair.
   void EnableShuffle(uint64_t seed);
 
-  /// Resets the serving cursor to the first sample (the current shuffle
-  /// order, if any, is kept). Evaluation passes rewind so that every pass
-  /// over a set scores the same sample sequence.
-  void Rewind() { cursor_ = 0; }
+  /// Opaque serving-position snapshot: the cursor plus the permutation
+  /// epoch it indexes. Trivially cheap — no permutation is copied.
+  struct ServingPos {
+    uint64_t cursor = 0;
+    uint64_t epoch = 0;
+  };
+  ServingPos SaveServingPos() const { return {cursor_, epoch_}; }
+
+  /// Restores a snapshot taken earlier on this dataset. The batch feeder
+  /// un-consumes its staged-but-unserved batch at teardown with this, so
+  /// the cursor always reads "exactly the batches the engine consumed" at
+  /// any thread count — pipelining must never be observable in the serving
+  /// sequence. When the epoch moved past the snapshot, the permutation is
+  /// replayed deterministically from the shuffle seed.
+  void RestoreServingPos(ServingPos pos);
 
   /// Splits off the LAST `fraction` of samples (before any shuffling) as a
   /// held-out validation set, removing them from this dataset. Deterministic:
@@ -97,6 +114,8 @@ class Dataset {
   // Shuffled serving order; empty when shuffling is disabled.
   std::vector<uint64_t> order_;
   uint64_t shuffle_state_ = 0;  // splitmix64 state; 0 = shuffling off
+  uint64_t shuffle_origin_ = 0;  // state EnableShuffle started from (replay)
+  uint64_t epoch_ = 0;           // permutations drawn beyond the first
 };
 
 }  // namespace seeml::update_rt

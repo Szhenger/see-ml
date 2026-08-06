@@ -94,18 +94,27 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
   uint64_t const_bytes = 0;
   model.input_name = r.ReadStr();
   model.output_name = r.ReadStr();
+  if (version >= 3) model.seq_len = r.Read<uint64_t>();
   // Counts are validated implicitly by the bounded Reader; reserving to the
-  // declared sizes (capped against the file size so a hostile header cannot
-  // demand gigabytes) avoids re-growth during the parse.
-  model.tensors.reserve(std::min<size_t>(num_tensors, bytes.size()));
-  model.ops.reserve(std::min<size_t>(num_ops, bytes.size()));
+  // declared sizes (capped against what the file could physically contain,
+  // so a hostile header cannot demand gigabytes) avoids re-growth during the
+  // parse. The caps divide by the minimum on-disk record size — capping at
+  // bytes.size() *elements* would still let a small file demand
+  // bytes.size() * sizeof(SmfTensor) of capacity up front.
+  constexpr size_t kMinTensorRecordBytes = 28;  // name len + rank + flags +
+                                                // 1 dim + offset + size
+  constexpr size_t kMinOpRecordBytes = 6;  // kind + 2 empty names + input cnt
+  model.tensors.reserve(
+      std::min<size_t>(num_tensors, bytes.size() / kMinTensorRecordBytes));
+  model.ops.reserve(std::min<size_t>(num_ops, bytes.size() / kMinOpRecordBytes));
 
   // Tensor names key every downstream binding (resolver, analyzer, sema);
   // a duplicate would silently resolve last-writer-wins, so it is a load
   // error, not a tolerated redundancy. Owning strings: the tensors vector
   // moves its names, which would dangle any view taken here.
   std::unordered_set<std::string> tensor_names;
-  tensor_names.reserve(std::min<size_t>(num_tensors, bytes.size()));
+  tensor_names.reserve(
+      std::min<size_t>(num_tensors, bytes.size() / kMinTensorRecordBytes));
 
   for (uint32_t i = 0; i < num_tensors && r.ok; ++i) {
     SmfTensor t;
@@ -118,6 +127,9 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     for (uint8_t d = 0; d < rank; ++d) t.dims.push_back(r.Read<int64_t>());
     t.data_offset = r.Read<uint64_t>();
     t.byte_size = r.Read<uint64_t>();
+    // A short read leaves zeroed fields; validating those zeros would blame
+    // the tensor ("invalid dims") for what is really a cut-off file.
+    if (!r.ok) return tokenizing::FileError("truncated file", path);
 
     // Dims must be strictly positive — except a dynamic (-1) dim on non-const
     // tensors, which the compiler binds to the compiled batch size — with a
@@ -161,8 +173,13 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     SmfOp op;
     const uint8_t kind = r.Read<uint8_t>();
     // Range-check before the cast: an unknown kind must be a load error, not
-    // an out-of-range enum that a downstream switch silently skips.
-    if (kind > kSmfOpKindMax)
+    // an out-of-range enum that a downstream switch silently skips. The
+    // ceiling is per-version — a v3 kind inside a pre-v3 file is corruption,
+    // not forward compatibility.
+    const uint8_t kind_max = version >= 3   ? kSmfOpKindMax
+                             : version == 2 ? kSmfOpKindMaxV2
+                                            : kSmfOpKindMaxV1;
+    if (kind > kind_max)
       return tokenizing::Error("unknown op kind " + std::to_string(kind) +
                                " in '" + path + "'");
     op.kind = static_cast<SmfOpKind>(kind);
@@ -170,6 +187,7 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     const uint8_t n_in = r.Read<uint8_t>();
     for (uint8_t k = 0; k < n_in; ++k) op.inputs.push_back(r.ReadStr());
     op.output = r.ReadStr();
+    if (version >= 3) op.attr0 = r.Read<uint32_t>();
     model.ops.push_back(std::move(op));
   }
 

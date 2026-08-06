@@ -137,19 +137,15 @@ TEST(UpdateCompiler, TiedWeightMaterializesOnce) {
   ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
                        UpdateCompiler(config).Compile(model));
 
-  // The tied tensor resolves to a single SIR value: each consuming MatMul
-  // still gets its own adapter, but both share one frozen rodata copy and
-  // their emit entries patch the same source byte range.
+  // The tied tensor resolves to a single SIR value, and both consuming
+  // MatMuls share ONE adapter pair: per-site pairs would train fine but
+  // commit W + Δ_1 + Δ_2 to the single file range, polluting every site
+  // with every other site's delta. One adapter -> one delta -> one emit
+  // entry, and the committed weight is exactly the W + Δ every site
+  // computed during training.
   const PlanHeader h = HeaderOf(compiled);
-  ASSERT_EQ(compiled.adapters.size(), 2u);
-  EXPECT_EQ(compiled.adapters[0].weight_rodata_ref,
-            compiled.adapters[1].weight_rodata_ref);
-  ASSERT_EQ(h.emit_count, 2u);
-  std::vector<EmitEntry> emits(h.emit_count);
-  std::memcpy(emits.data(), compiled.plan.data() + h.emit_table_offset,
-              h.emit_count * sizeof(EmitEntry));
-  EXPECT_EQ(emits[0].smf_data_offset, emits[1].smf_data_offset);
-  EXPECT_EQ(emits[0].byte_size, emits[1].byte_size);
+  ASSERT_EQ(compiled.adapters.size(), 1u);
+  ASSERT_EQ(h.emit_count, 1u);
 }
 
 TEST(UpdateCompiler, MseLossUsesDenseLabels) {
@@ -221,6 +217,53 @@ TEST(UpdateCompiler, CompositeLossCombinesBothTerms) {
   EXPECT_EQ(CountOpcode(instrs, OpCode::kKLDistillFwd), 1u);
 }
 
+TEST(UpdateCompiler, EpilogueFusionShrinksDistillPrograms) {
+  // Under distillation the frozen teacher's GEMM -> AddBias -> activation
+  // chains fuse into flagged GEMM epilogues; the orphaned ops are DCE'd, so
+  // both the train and eval programs shrink and the arena loses their
+  // transient slots. The same compile with fusion off is the reference.
+  SmfModel student = MakeMlp(kInDim, kHidden, kOutDim, 31);
+  SmfModel teacher = MakeMlp(kInDim, 14, kOutDim, 32);
+  UpdateConfig config = BaseConfig(kBatch);
+  config.loss = LossKind::kKLDistill;
+  UpdateConfig unfused_config = config;
+  unfused_config.fuse_epilogues = false;
+
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate fused,
+                       UpdateCompiler(config).Compile(student, &teacher));
+  ASSERT_OK_AND_ASSIGN(
+      CompiledUpdate unfused,
+      UpdateCompiler(unfused_config).Compile(student, &teacher));
+
+  const PlanHeader fh = HeaderOf(fused);
+  const PlanHeader uh = HeaderOf(unfused);
+  EXPECT_LT(fh.train_instr_count, uh.train_instr_count);
+  EXPECT_LT(fh.eval_instr_count, uh.eval_instr_count);
+  // No arena-size assertion: fusion removes transient values, but first-fit
+  // offsets are not monotone in the interval set (the fused GEMM's result
+  // inherits the chain output's longer liveness), so the high-water mark
+  // may move either way by a packing accident.
+
+  // The fused stream carries epilogue flags on forward GEMMs; the unfused
+  // stream carries none anywhere (flags == 0 was the pre-v5 invariant).
+  size_t flagged = 0;
+  for (const UpdateInstruction& ins : TrainProgramOf(fused)) {
+    if (ins.flags == 0) continue;
+    ++flagged;
+    EXPECT_EQ(ins.opcode, static_cast<uint16_t>(OpCode::kGemmNN));
+    EXPECT_EQ(ins.flags & static_cast<uint16_t>(~kKnownFlagsMask), 0);
+  }
+  EXPECT_GT(flagged, 0u);
+  for (const UpdateInstruction& ins : TrainProgramOf(unfused))
+    EXPECT_EQ(ins.flags, 0);
+
+  // The teacher's hidden layer fused bias+relu, its logits layer bias-only:
+  // no teacher AddBias survives, and the student's (LoRA-interposed) ones
+  // remain — 2 in the fused stream vs 4 unfused.
+  EXPECT_EQ(CountOpcode(TrainProgramOf(fused), OpCode::kAddBias),
+            CountOpcode(TrainProgramOf(unfused), OpCode::kAddBias) - 2);
+}
+
 TEST(UpdateCompiler, OptimizerSelectionShapesTheProgram) {
   SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 13);
 
@@ -262,6 +305,27 @@ TEST(UpdateCompiler, HyperparametersReachThePlanHeader) {
   EXPECT_NEAR(h.lr, 0.025f, 1e-9);
   EXPECT_NEAR(h.weight_decay, 0.005f, 1e-9);
   EXPECT_EQ(h.default_steps, 123u);
+}
+
+TEST(UpdateCompiler, RegatesTheBudgetOnTheExactCompiledFootprint) {
+  // The step-0 estimate is a lower bound blind to gradients, optimizer
+  // state, and transients; the driver must re-prove the budget against the
+  // bytes the runtime actually keeps resident — arena + plan blob.
+  SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 1);
+  UpdateConfig config = BaseConfig(kBatch);
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+  const uint64_t need = compiled.arena_size + compiled.plan.size();
+
+  config.memory_budget_bytes = need;
+  EXPECT_OK(UpdateCompiler(config).Compile(model));
+
+  // One byte short of the real footprint: the early lower bound admits it,
+  // the final gate must not.
+  config.memory_budget_bytes = need - 1;
+  const auto r = UpdateCompiler(config).Compile(model);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_STR_CONTAINS(r.error(), "cannot run locally");
 }
 
 TEST(UpdateCompiler, RejectsModelWithoutInputMetadata) {

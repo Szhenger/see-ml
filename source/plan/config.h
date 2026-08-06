@@ -65,6 +65,12 @@ struct UpdateConfig {
   // symmetric int8 in the plan's rodata (QLoRA-style). Adapters, gradients,
   // and all activations stay f32; the source .smf on disk is untouched.
   bool quantize_base = false;
+  // Fuse GEMM -> AddBias -> activation chains into flagged GEMM epilogues
+  // wherever the SIR use-lists prove no other reader of the intermediates
+  // (teacher subgraphs, unadapted layers). Bitwise-neutral by construction;
+  // exposed so a fused and an unfused compilation of the same model can be
+  // compared bit-for-bit.
+  bool fuse_epilogues = true;
   // Test hook: when false, the plan contains forward+backward only (no
   // parameter mutation), enabling finite-difference gradient verification.
   bool emit_optimizer = true;

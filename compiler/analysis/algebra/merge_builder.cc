@@ -1,5 +1,7 @@
 #include "compiler/analysis/algebra/merge_builder.h"
 
+#include <unordered_set>
+
 #include "compiler/diagnostics/updating/error.h"
 
 namespace seeml::update {
@@ -11,6 +13,20 @@ std::expected<MergeProgram, std::string> MergeBuilder::Run(
     const std::vector<GraftedAdapter>& adapters) {
   if (adapters.empty())
     return updating::Error(updating::kMergeBuilder, "no adapters to merge");
+
+  // Commit applies every delta additively to its weight's file bytes, so
+  // two adapters over one frozen weight would commit W + Δ_1 + Δ_2 — a model
+  // the training graph never computed. LoraGrafter shares one adapter pair
+  // per tied weight precisely so this cannot happen; reject rather than
+  // silently corrupt if a future grafter change reintroduces duplicates.
+  std::unordered_set<const sir::Value*> seen_weights;
+  for (const GraftedAdapter& adapter : adapters)
+    if (!seen_weights.insert(adapter.frozen_weight).second)
+      return updating::Error(
+          updating::kMergeBuilder,
+          "two adapters share frozen weight '" +
+              std::string(adapter.frozen_weight->id()) +
+              "'; tied weights must share one adapter pair");
 
   MergeProgram program;
   program.block = std::make_unique<sir::Block>();
@@ -33,8 +49,8 @@ std::expected<MergeProgram, std::string> MergeBuilder::Run(
     // adds Δ to the model file's own f32 weights (see EmitEntry).
     sir::Operation* fill = program.block->appendOp("sc_low.fill");
     fill->setAttribute("value", 0.0f);
-    // Named from the adapter's unique site stem, not the frozen weight: a
-    // tied weight has one delta per graft site.
+    // Named from the adapter's unique id stem; one delta per unique frozen
+    // weight (tied weights share a single adapter pair).
     sir::Value* delta = fill->addResult(adapter.id_base + ".delta",
                                         sir::DataType::F32,
                                         adapter.frozen_weight->shape());

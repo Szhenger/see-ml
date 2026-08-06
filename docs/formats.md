@@ -38,11 +38,12 @@ The dependency-free model container consumed by `seeml-update-compile` (source a
 
 ```
 u32 magic  "SMF1" (0x31464D53)
-u32 version         1 or 2 accepted; writer emits 2
+u32 version         1..3 accepted; writer emits 3
 u32 num_tensors
 u32 num_ops
 str input_name      (str = u16 length + bytes, no terminator)
 str output_name
+u64 seq_len         (v3 only) rows per sequence; 0 = non-sequential
 tensors[num_tensors]:
   str  name
   u8   rank
@@ -53,11 +54,13 @@ tensors[num_tensors]:
 data section: each constant tensor's f32 blob at its 64-aligned offset
 ops[num_ops] (topologically ordered):
   u8   kind         0 MatMul  1 AddBias  2 Relu
-                    3 Gelu    4 Silu     5 Mul    6 LayerNorm   (v2)
+                    3 Gelu    4 Silu     5 Mul    6 LayerNorm    (v2)
+                    7 Add     8 RmsNorm  9 Rope   10 Attention   (v3)
   str  name
   u8   num_inputs
   str  inputs[num_inputs]
   str  output
+  u32  attr0        (v3 only) num_heads for Rope/Attention, else 0
 ```
 
 Op signatures: `MatMul(x, W)`, `AddBias(x, b)`, unary activations `(x)`, `Mul(x, y)` (same shape), `LayerNorm(x, gamma, beta)` over the last dim.
@@ -121,16 +124,16 @@ Frozen weights selected by `--quantize-base` are stored in rodata as per-tensor 
 
 **The emit table** (`EmitEntry[]`, 24 bytes each: `smf_data_offset`, `byte_size`, `arena_offset`) is the bridge back to the model file: it maps each adapter's **delta** (`Δ = (α/r)·A@B`, materialized by the merge program at `arena_offset`) to the f32 byte range of its weight inside the source `.smf`. Commit applies `W′ = W + Δ` onto the file's pristine weights — which is why a quantized plan never bakes quantization error into the committed model: the int8 copy trains, but the original floats get patched.
 
-## Checkpoint (`SEKP`, v2)
+## Checkpoint (`SEKP`, v3)
 
 Training state you can power-cycle through:
 
 ```
-u32 magic "SEKP"; u32 version = 2
+u32 magic "SEKP"; u32 version = 3
 u64 plan_hash        must match the plan's PlanHeader::plan_hash
 u64 step             1-indexed AdamW timestep at save
 u64 persistent_size  payload length
-u64 payload_hash     FNV-1a of the payload
+u64 payload_hash     ContentHash64 of the payload (v3; v2 used serial FNV-1a)
 payload              the arena's persistent segment (adapters + moments)
 ```
 

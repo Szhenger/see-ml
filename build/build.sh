@@ -27,6 +27,8 @@ compile compiler/frontend/parser/sema.cc      sema.o
 compile compiler/frontend/parser/parser.cc    parser.o
 compile compiler/analysis/updater/pass_manager.cc  pass_manager.o
 compile compiler/analysis/updater/conv_lowering.cc conv_lowering.o
+compile compiler/analysis/updater/dce.cc           dce.o
+compile compiler/analysis/algebra/epilogue_fuser.cc epilogue_fuser.o
 compile compiler/analysis/algebra/lora_grafter.cc  lora_grafter.o
 compile compiler/analysis/algebra/merge_builder.cc merge_builder.o
 compile compiler/analysis/calculus/autodiff.cc     autodiff.o
@@ -47,6 +49,20 @@ compile runtime/executor/activation.cc        rt_activation.o
 compile runtime/executor/normalization.cc     rt_normalization.o
 compile runtime/executor/loss.cc              rt_loss.o
 compile runtime/executor/optimizer.cc         rt_optimizer.o
+compile runtime/executor/attention.cc         rt_attention.o
+
+# Metal GEMM dispatch (G1a) exists only on Apple hosts; elsewhere the
+# hardware-gated suite reduces to one vacuous test and nothing links the
+# runner. Note: -fobjc-arc requires a clang-family CXX on Darwin (GCC's
+# ObjC++ front end rejects it) — the rest of the tree is standard C++23.
+METAL_OBJS=""
+METAL_LDFLAGS=""
+if [ "$(uname)" = "Darwin" ]; then
+  echo "  OBJCXX runtime/executor/metal_gemm.mm"
+  eval "$CXX $FLAGS -x objective-c++ -fobjc-arc -c runtime/executor/metal_gemm.mm -o build/rt_metal_gemm.o"
+  METAL_OBJS="build/rt_metal_gemm.o"
+  METAL_LDFLAGS="-framework Metal -framework Foundation"
+fi
 compile runtime/feeder/dataset.cc             dataset.o
 compile runtime/feeder/batch_pipeline.cc      batch_pipeline.o
 compile runtime/custodian/durable_io.cc       durable_io.o
@@ -66,7 +82,8 @@ compile test/support/probes.cc                fixtures_probes.o
 LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/resource_analyzer.o \
       build/value_resolver.o build/sema.o build/parser.o \
-      build/pass_manager.o build/conv_lowering.o build/lora_grafter.o \
+      build/pass_manager.o build/conv_lowering.o build/dce.o \
+      build/epilogue_fuser.o build/lora_grafter.o \
       build/merge_builder.o build/autodiff.o build/optimizer_synth.o \
       build/quantization.o \
       build/arena_binder.o build/instruction_lowering.o \
@@ -80,6 +97,7 @@ LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/logger.o \
       build/rt_gemm.o build/rt_elementwise.o build/rt_activation.o \
       build/rt_normalization.o build/rt_loss.o build/rt_optimizer.o \
+      build/rt_attention.o \
       build/dataset.o \
       build/batch_pipeline.o build/durable_io.o build/plan_validator.o \
       build/checkpoint.o build/engine_contract.o build/update_engine.o \
@@ -91,7 +109,8 @@ TESTING="build/seetest_registry.o build/seetest_main.o \
 echo "  LINK seeml-update-compile"
 eval "$CXX -pthread build/seeml_update_compile.o $LIBS -o build/seeml-update-compile"
 echo "  LINK seeml-seeu-dump"
-eval "$CXX build/seeml_seeu_dump.o -o build/seeml-seeu-dump"
+# PlanSelfHash (the v4 integrity seal) runs on the parallel substrate.
+eval "$CXX -pthread build/seeml_seeu_dump.o build/parallel_for.o -o build/seeml-seeu-dump"
 
 for suite in \
     source/identity/hash_test source/parallel/parallel_for_test \
@@ -105,13 +124,14 @@ for suite in \
     compiler/driver/update_compiler_test compiler/driver/driver_test \
     compiler/diagnostics/diagnostics_test \
     runtime/feeder/dataset_test runtime/feeder/batch_pipeline_test \
-    runtime/executor/kernels_test runtime/validator/validator_test \
+    runtime/executor/kernels_test runtime/executor/metal_gemm_test \
+    runtime/validator/validator_test \
     runtime/custodian/custodian_test \
     runtime/engine/engine_test runtime/engine/update_engine_test \
     system/update_system_test; do
   name="seeml_$(basename "$suite")"
   echo "  CXX+LINK $name"
   eval "$CXX $FLAGS -c 'test/$suite.cc' -o 'build/$name.o'"
-  eval "$CXX -pthread 'build/$name.o' $TESTING $LIBS -o 'build/$name'"
+  eval "$CXX -pthread 'build/$name.o' $TESTING $LIBS $METAL_OBJS $METAL_LDFLAGS -o 'build/$name'"
 done
 echo "build complete"

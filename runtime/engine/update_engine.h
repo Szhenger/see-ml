@@ -62,6 +62,17 @@ struct TrainOptions {
   bool record_loss_curve = false;
 };
 
+/// One evaluation pass's results. Loss is the mean over compiled-batch
+/// chunks (the final partial batch wraps, per the fixed-shape contract);
+/// accuracy — available when the plan trains against class labels — is
+/// exact: argmax-vs-label over every real sample once, with the wrapped
+/// duplicates of the final batch excluded from the count.
+struct EvalMetrics {
+  float loss = 0.0f;
+  float accuracy = 0.0f;
+  bool has_accuracy = false;
+};
+
 struct TrainReport {
   uint64_t steps = 0;             // steps actually executed
   bool stopped_early = false;     // should_stop() interrupted the run
@@ -71,6 +82,14 @@ struct TrainReport {
   bool has_validation = false;
   float val_initial_loss = 0.0f;  // eval-program loss before training
   float val_final_loss = 0.0f;    // eval-program loss after training
+
+  // Task-level metric next to the loss the gate compares: exact held-out
+  // argmax accuracy before/after, for plans trained on class labels. The
+  // gate itself stays loss-driven — accuracy is reported so callers (and
+  // the generated driver) can see what the update did to task quality.
+  bool has_val_accuracy = false;
+  float val_initial_accuracy = 0.0f;
+  float val_final_accuracy = 0.0f;
 
   std::vector<float> loss_curve;  // per-step loss (record_loss_curve)
 
@@ -104,6 +123,13 @@ class UpdateEngine {
   /// mean loss. The training state is untouched.
   [[nodiscard]] std::expected<float, std::string> Evaluate(Dataset& data);
 
+  /// Evaluate(), plus exact argmax accuracy for class-label plans (the
+  /// probabilities the eval program's softmax already materializes are
+  /// compared against the staged labels; wrapped duplicate samples in the
+  /// final batch are excluded, so every sample counts exactly once).
+  [[nodiscard]] std::expected<EvalMetrics, std::string> EvaluateMetrics(
+      Dataset& data);
+
   /// Executes the merge program (materializes each adapter's weight delta).
   [[nodiscard]] std::expected<void, std::string> RunMerge();
 
@@ -131,7 +157,11 @@ class UpdateEngine {
   void ExecuteTrainOnce();
 
  private:
-  [[nodiscard]] std::expected<void, std::string> Initialize();
+  /// Validates the candidate plan and commits engine state only if every
+  /// contract passes: a rejected re-Load leaves the previous plan loaded
+  /// and fully usable.
+  [[nodiscard]] std::expected<void, std::string> Initialize(
+      const uint8_t* plan, size_t plan_size);
   /// The training loop itself; Train wraps it with the diagnostics contract.
   [[nodiscard]] std::expected<TrainReport, std::string> TrainImpl(
       Dataset& data, uint64_t steps, const TrainOptions& options);
@@ -159,6 +189,13 @@ class UpdateEngine {
   uint64_t step_ = 0;                     // 1-indexed AdamW timestep
   uint64_t num_classes_ = 0;              // softmax width, 0 = no class loss
   bool merged_ = false;
+
+  // Where the eval program materializes its softmax probabilities — the
+  // basis of the accuracy metric. kNullRef when the eval program carries no
+  // class-label softmax (MSE / pure-distillation plans).
+  uint64_t eval_probs_ref_ = seeml::update::kNullRef;
+  uint64_t eval_softmax_rows_ = 0;
+  uint64_t eval_softmax_cols_ = 0;
 };
 
 }  // namespace seeml::update_rt

@@ -68,19 +68,31 @@ std::expected<void, std::string> VerifyPlanContract(
       header.persistent_size > header.arena_size)
     return diag::executing::Error("persistent segment exceeds arena");
 
-  // The header's I/O slots are written by the data feeder each step.
+  // Execution ceil-divides by the batch (Evaluate's pass count) and the
+  // feeder stages batch-sized copies; zero would reach an integer division
+  // by zero that no later guard checks — batch = 0 with input_floats = 0
+  // passes every slot check below.
+  if (header.batch == 0)
+    return diag::executing::Error("plan batch must be nonzero");
+
+  // The header's I/O slots are written by the data feeder each step and
+  // read through typed pointers, so they must be in bounds and element-
+  // aligned (labels are i32 or f32 — 4 bytes either way).
   uint64_t input_bytes = 0;
   if (up::IsRodataRef(header.input_ref) ||
+      up::RefOffset(header.input_ref) % sizeof(float) != 0 ||
       !MulOk(header.input_floats, sizeof(float), &input_bytes) ||
       !RangeOk(up::RefOffset(header.input_ref), input_bytes,
                header.arena_size))
     return diag::executing::Error("plan input slot out of bounds");
   if (header.label_kind != 0 &&
       (up::IsRodataRef(header.label_ref) ||
+       up::RefOffset(header.label_ref) % sizeof(float) != 0 ||
        !RangeOk(up::RefOffset(header.label_ref), header.label_bytes,
                 header.arena_size)))
     return diag::executing::Error("plan label slot out of bounds");
   if (up::IsRodataRef(header.loss_ref) ||
+      up::RefOffset(header.loss_ref) % sizeof(float) != 0 ||
       !RangeOk(up::RefOffset(header.loss_ref), sizeof(float),
                header.arena_size))
     return diag::executing::Error("plan loss slot out of bounds");
@@ -93,21 +105,47 @@ std::expected<void, std::string> VerifyExecutorContract(
     std::span<const up::UpdateInstruction> eval,
     std::span<const up::EmitEntry> emit_table, const up::PlanHeader& header) {
   for (const auto* program : {&train, &merge, &eval})
-    for (const up::UpdateInstruction& ins : *program)
+    for (const up::UpdateInstruction& ins : *program) {
       if (auto r = ValidateInstruction(ins, header.arena_size,
-                                       header.rodata_size);
+                                       header.rodata_size, header.version);
           !r)
         return r;
+      // Label provenance for the class-indexed kernels. The softmax pair
+      // indexes probability rows with raw i32 labels
+      // (probs[n*C + labels[n]]) — the one place a validated instruction
+      // dereferences data-dependent offsets. That is only safe because the
+      // feeder contract proves every STAGED dataset label < the softmax
+      // width. The proof covers exactly the label slot's `batch` staged
+      // entries, so a softmax whose label operand is any other range, or
+      // whose row count exceeds the staged batch, or that appears in a
+      // plan not declaring class labels, would read unvalidated bytes as
+      // indices — an out-of-bounds write through the backward kernel, from
+      // a plan that passed every range check. Bind all three here.
+      const auto op = static_cast<up::OpCode>(ins.opcode);
+      if (op == up::OpCode::kSoftmaxXEntFwd ||
+          op == up::OpCode::kSoftmaxXEntBwd) {
+        if (header.label_kind != 1)
+          return diag::executing::Error(
+              "softmax cross-entropy in a plan without class labels");
+        if (ins.in[1] != header.label_ref)
+          return diag::executing::Error(
+              "softmax labels are not the plan's staged label slot");
+        if (ins.out[0] != header.batch)
+          return diag::executing::Error(
+              "softmax row count disagrees with the plan batch");
+      }
+    }
 
   // The emit table's arena side is fixed at compile time; its file side is
-  // validated against the actual model at commit. Commit reads each delta
-  // through a float* at arena + offset, so the range must be f32-aligned
-  // and f32-granular as well as in bounds.
-  for (const up::EmitEntry& e : emit_table)
-    if (!RangeOk(e.arena_offset, e.byte_size, header.arena_size) ||
-        e.arena_offset % sizeof(float) != 0 ||
-        e.byte_size % sizeof(float) != 0)
+  // validated against the actual model at commit. Commit reads the delta
+  // through a float*, so the arena offset must be element-aligned too.
+  for (const up::EmitEntry& e : emit_table) {
+    if (!RangeOk(e.arena_offset, e.byte_size, header.arena_size))
       return diag::executing::Error("emit entry outside the arena");
+    if (e.arena_offset % sizeof(float) != 0 ||
+        e.byte_size % sizeof(float) != 0)
+      return diag::executing::Error("emit entry misaligned");
+  }
   return {};
 }
 

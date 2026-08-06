@@ -38,6 +38,9 @@ std::expected<sir::Value*, std::string> BuildForward(
         sir::Operation* mm = block.appendOp("sc_high.matmul");
         mm->addOperand(*x);
         mm->addOperand(*w);
+        // Rows come from the actual LHS, not the config batch: x may be a
+        // materialized constant with its own row count, and lowering sizes
+        // the GEMM M dimension from this declared shape.
         resolver.Bind(op.output,
                       mm->addResult(prefix + op.output, sir::DataType::F32,
                                     sir::Shape{(*x)->shape().dims.at(0),
@@ -96,6 +99,92 @@ std::expected<sir::Value*, std::string> BuildForward(
                                      (*x)->shape()));
         break;
       }
+      case SmfOpKind::kAdd: {
+        if (op.inputs.size() != 2)
+          return parsing::OpError("Add", op.name, "needs 2 inputs");
+        auto x = resolver.Resolve(op.inputs[0]);
+        if (!x) return std::unexpected(x.error());
+        auto y = resolver.Resolve(op.inputs[1]);
+        if (!y) return std::unexpected(y.error());
+        if (auto ok = sema::CheckAdd(op, **x, **y); !ok)
+          return std::unexpected(ok.error());
+        sir::Operation* add = block.appendOp("sc_high.add");
+        add->addOperand(*x);
+        add->addOperand(*y);
+        resolver.Bind(op.output,
+                      add->addResult(prefix + op.output, sir::DataType::F32,
+                                     (*x)->shape()));
+        break;
+      }
+      case SmfOpKind::kRmsNorm: {
+        if (op.inputs.size() != 2)
+          return parsing::OpError("RmsNorm", op.name,
+                                  "needs 2 inputs (x, gamma)");
+        auto x = resolver.Resolve(op.inputs[0]);
+        if (!x) return std::unexpected(x.error());
+        auto gamma = resolver.Resolve(op.inputs[1]);
+        if (!gamma) return std::unexpected(gamma.error());
+        if (auto ok = sema::CheckRmsNorm(op, **x, **gamma); !ok)
+          return std::unexpected(ok.error());
+        sir::Operation* rn = block.appendOp("sc_high.rms_norm");
+        rn->addOperand(*x);
+        rn->addOperand(*gamma);
+        resolver.Bind(op.output,
+                      rn->addResult(prefix + op.output, sir::DataType::F32,
+                                    (*x)->shape()));
+        // Row statistic cached for the backward kernel.
+        rn->addResult(prefix + op.output + ".rstd", sir::DataType::F32,
+                      sir::Shape{(*x)->shape().dims.at(0)});
+        break;
+      }
+      case SmfOpKind::kRope: {
+        if (op.inputs.size() != 1)
+          return parsing::OpError("Rope", op.name, "needs 1 input");
+        auto x = resolver.Resolve(op.inputs[0]);
+        if (!x) return std::unexpected(x.error());
+        if (auto ok = sema::CheckRope(op, **x, op.attr0, model.seq_len); !ok)
+          return std::unexpected(ok.error());
+        sir::Operation* r = block.appendOp("sc_high.rope");
+        r->setAttribute("heads", static_cast<int64_t>(op.attr0));
+        r->setAttribute("seq", static_cast<int64_t>(model.seq_len));
+        r->addOperand(*x);
+        resolver.Bind(op.output,
+                      r->addResult(prefix + op.output, sir::DataType::F32,
+                                   (*x)->shape()));
+        break;
+      }
+      case SmfOpKind::kAttention: {
+        if (op.inputs.size() != 3)
+          return parsing::OpError("Attention", op.name,
+                                  "needs 3 inputs (q, k, v)");
+        auto q = resolver.Resolve(op.inputs[0]);
+        if (!q) return std::unexpected(q.error());
+        auto k = resolver.Resolve(op.inputs[1]);
+        if (!k) return std::unexpected(k.error());
+        auto v = resolver.Resolve(op.inputs[2]);
+        if (!v) return std::unexpected(v.error());
+        if (auto ok =
+                sema::CheckAttention(op, **q, **k, **v, op.attr0, model.seq_len);
+            !ok)
+          return std::unexpected(ok.error());
+        const int64_t rows = (*q)->shape().dims.at(0);
+        const auto heads = static_cast<int64_t>(op.attr0);
+        const auto seq = static_cast<int64_t>(model.seq_len);
+        sir::Operation* at = block.appendOp("sc_high.attention");
+        at->setAttribute("heads", heads);
+        at->setAttribute("seq", seq);
+        at->addOperand(*q);
+        at->addOperand(*k);
+        at->addOperand(*v);
+        resolver.Bind(op.output,
+                      at->addResult(prefix + op.output, sir::DataType::F32,
+                                    (*q)->shape()));
+        // Probability matrix P[B,H,S,S] flattened [B*H*S, S] = [rows*H, S],
+        // cached for the backward primitives.
+        at->addResult(prefix + op.output + ".probs", sir::DataType::F32,
+                      sir::Shape{rows * heads, seq});
+        break;
+      }
       case SmfOpKind::kLayerNorm: {
         if (op.inputs.size() != 3)
           return parsing::OpError("LayerNorm", op.name,
@@ -133,6 +222,13 @@ std::expected<sir::Value*, std::string> BuildForward(
   if (!out)
     return parsing::Error("model output '" + model.output_name +
                           "' was never produced");
+  // Loss grafting consumes [batch, classes] logits, and the driver reads
+  // dims[1] unchecked; a rank-1 output (reachable via an activation of a
+  // rank-1 constant) must be a diagnostic, not an out_of_range crash.
+  if (out->shape().dims.size() != 2)
+    return parsing::Error("model output '" + model.output_name +
+                          "' must be rank-2 [batch, classes], got rank " +
+                          std::to_string(out->shape().dims.size()));
   return out;
 }
 

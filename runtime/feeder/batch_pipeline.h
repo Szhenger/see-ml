@@ -25,8 +25,13 @@
 // forth under one mutex (feeder writes while `full` is false, consumer
 // reads while it is true). The destructor joins on every path, so an early
 // engine exit (non-finite loss, checkpoint failure, cancellation) cannot
-// leak the thread. Because the feeder stays one batch ahead, an interrupted
-// run leaves the dataset cursor one batch past the last consumed batch.
+// leak the thread — and then un-consumes any staged batch the engine never
+// took (Dataset::RestoreServingPos), so the dataset cursor always reads
+// exactly "the batches the engine consumed". Without that restore, the
+// cursor after teardown would depend on how the join raced the staging
+// thread, and any later consumer of the same dataset (the regression
+// gate's post-training evaluation, a resumed run) would see a
+// scheduling-dependent batch sequence.
 //
 // When the configured thread count is 1 (SEEML_THREADS=1 — the bare-metal
 // serial contract) no thread is created and NextBatch() fills the slots
@@ -66,6 +71,10 @@ class BatchPipeline {
   std::condition_variable cv_;
   bool full_ = false;   // guarded by mutex_: staged batch ready to consume
   bool stop_ = false;   // guarded by mutex_
+  // Dataset position before the in-flight stage. Written by the feeder
+  // thread only; the destructor reads it after join() to un-consume a
+  // staged batch the engine never took.
+  Dataset::ServingPos stage_start_;
   bool threaded_ = false;
   std::thread feeder_;
 };

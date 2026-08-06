@@ -33,6 +33,18 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
   auto vol = [](const sir::Value* v) {
     return static_cast<uint64_t>(v->shape().volume());
   };
+  // Packed dim words carry two dims in 32-bit halves. Shapes are int64:
+  // a half that does not fit must be a refusal, never a silent truncation —
+  // the validator cannot tell a truncated word from an honest small one.
+  auto pack32 = [&](int64_t hi, int64_t lo) -> uint64_t {
+    if (hi < 0 || lo < 0 || hi > 0xFFFFFFFFll || lo > 0xFFFFFFFFll) {
+      if (error.empty())
+        error = "dimension pair (" + std::to_string(hi) + ", " +
+                std::to_string(lo) + ") exceeds the 32-bit ISA dim fields";
+      return 0;
+    }
+    return (static_cast<uint64_t>(hi) << 32) | static_cast<uint64_t>(lo);
+  };
 
   for (sir::Operation* op : ops) {
     if (!error.empty()) break;
@@ -64,6 +76,31 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.out[2] = static_cast<uint64_t>(                          // K
           m == "sc_low.matmul_tn" ? a->shape().dims.at(0)
                                   : a->shape().dims.at(1));
+      // Fused epilogue (plan v5): a third operand is the fused bias, whose
+      // ref rides the free in[3]; "epilogue_act" selects the activation.
+      // Both are produced only by GemmEpilogueFuser, and only on
+      // sc_high.matmul — the fuser also guarantees a bias never lands on a
+      // q8 GEMM (in[3] is its scale), so a clash here is a compiler bug.
+      const bool fused_bias =
+          m == "sc_high.matmul" && op->numOperands() == 3;
+      if (fused_bias && q8) {
+        error = "fused bias on a quantized GEMM ('" +
+                std::string(c->id()) + "')";
+        break;
+      }
+      if (fused_bias) ins.in[3] = ref(op->operand(2));
+      EpilogueAct act = EpilogueAct::kNone;
+      if (auto act_name = op->getAttrAs<std::string>("epilogue_act")) {
+        act = *act_name == "relu"   ? EpilogueAct::kRelu
+              : *act_name == "gelu" ? EpilogueAct::kGelu
+              : *act_name == "silu" ? EpilogueAct::kSilu
+                                    : EpilogueAct::kNone;
+        if (act == EpilogueAct::kNone) {
+          error = "unknown epilogue activation '" + *act_name + "'";
+          break;
+        }
+      }
+      ins.flags = MakeEpilogueFlags(fused_bias, act);
     } else if (m == "sc_low.gemm_acc") {
       const sir::Value* a = op->operand(0);
       const sir::Value* b = op->operand(1);
@@ -118,8 +155,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[1] = ref(op->operand(1));   // gamma
       ins.in[2] = ref(op->operand(2));   // beta
       ins.in[3] = ref(y);
-      ins.out[0] = (static_cast<uint64_t>(y->shape().dims.at(0)) << 32) |
-                   static_cast<uint64_t>(y->shape().dims.at(1));
+      ins.out[0] = pack32(y->shape().dims.at(0), y->shape().dims.at(1));
       ins.out[1] = ref(op->result(1));   // mean cache
       ins.out[2] = ref(op->result(2));   // rstd cache
     } else if (m == "sc_low.layer_norm_grad") {
@@ -131,8 +167,78 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[3] = ref(dx);
       ins.out[0] = ref(op->operand(3));  // mean cache
       ins.out[1] = ref(op->operand(4));  // rstd cache
-      ins.out[2] = (static_cast<uint64_t>(dx->shape().dims.at(0)) << 32) |
-                   static_cast<uint64_t>(dx->shape().dims.at(1));
+      ins.out[2] = pack32(dx->shape().dims.at(0), dx->shape().dims.at(1));
+    } else if (m == "sc_high.rms_norm") {
+      const sir::Value* y = op->result(0);
+      set(OpCode::kRmsNormFwd);
+      ins.in[0] = ref(op->operand(0));   // x
+      ins.in[1] = ref(op->operand(1));   // gamma
+      ins.in[2] = ref(y);
+      ins.in[3] = ref(op->result(1));    // rstd cache
+      ins.out[0] = pack32(y->shape().dims.at(0), y->shape().dims.at(1));
+    } else if (m == "sc_low.rms_norm_grad") {
+      const sir::Value* dx = op->result(0);
+      set(OpCode::kRmsNormBwd);
+      ins.in[0] = ref(op->operand(0));   // dy
+      ins.in[1] = ref(op->operand(1));   // x
+      ins.in[2] = ref(op->operand(2));   // gamma
+      ins.in[3] = ref(dx);
+      ins.out[0] = ref(op->operand(3));  // rstd cache
+      ins.out[1] = pack32(dx->shape().dims.at(0), dx->shape().dims.at(1));
+    } else if (m == "sc_high.rope" || m == "sc_low.rope_grad" ||
+               m == "sc_high.attention" || m == "sc_low.attn_dp" ||
+               m == "sc_low.attn_dv" || m == "sc_low.attn_dq" ||
+               m == "sc_low.attn_dk") {
+      // Shared sequence geometry, packed as B<<32|S and H<<32|d. Derived
+      // from a designated [T, H*d] activation of the op plus the heads/seq
+      // attributes the frontend validated (seq | T, heads | D).
+      const sir::Value* act = m == "sc_high.attention" ? op->operand(0)
+                              : m == "sc_low.attn_dp"  ? op->operand(0)
+                                                       : op->result(0);
+      const int64_t heads = op->getAttrAs<int64_t>("heads").value_or(0);
+      const int64_t seq = op->getAttrAs<int64_t>("seq").value_or(0);
+      const int64_t rows = act->shape().dims.at(0);
+      const int64_t width = act->shape().dims.at(1);
+      if (heads <= 0 || seq <= 0 || rows % seq != 0 || width % heads != 0) {
+        error = "malformed sequence geometry on '" + std::string(m) + "'";
+        break;
+      }
+      const uint64_t bs = pack32(rows / seq, seq);
+      const uint64_t hd = pack32(heads, width / heads);
+      if (m == "sc_high.rope" || m == "sc_low.rope_grad") {
+        set(m == "sc_high.rope" ? OpCode::kRopeFwd : OpCode::kRopeBwd);
+        ins.in[0] = ref(op->operand(0));
+        ins.in[1] = ref(op->result(0));
+        ins.out[0] = bs;
+        ins.out[1] = hd;
+        ins.out[2] = F32Bits(op->getAttrAs<float>("base").value_or(10000.0f));
+      } else if (m == "sc_high.attention") {
+        set(OpCode::kAttnFwd);
+        ins.in[0] = ref(op->operand(0));   // q
+        ins.in[1] = ref(op->operand(1));   // k
+        ins.in[2] = ref(op->operand(2));   // v
+        ins.in[3] = ref(op->result(0));    // o
+        ins.out[0] = ref(op->result(1));   // probs cache
+        ins.out[1] = bs;
+        ins.out[2] = hd;
+      } else {
+        set(m == "sc_low.attn_dp"   ? OpCode::kAttnDP
+            : m == "sc_low.attn_dv" ? OpCode::kAttnDV
+            : m == "sc_low.attn_dq" ? OpCode::kAttnDQ
+                                    : OpCode::kAttnDK);
+        ins.in[0] = ref(op->operand(0));
+        ins.in[1] = ref(op->operand(1));
+        ins.in[2] = ref(op->result(0));
+        ins.out[0] = bs;
+        ins.out[1] = hd;
+      }
+    } else if (m == "sc_low.softmax_rows_grad") {
+      const sir::Value* ds = op->result(0);
+      set(OpCode::kSoftmaxRowsBwd);
+      ins.in[0] = ref(op->operand(0));   // probs
+      ins.in[1] = ref(op->operand(1));   // dp
+      ins.in[2] = ref(ds);
+      ins.out[0] = pack32(ds->shape().dims.at(0), ds->shape().dims.at(1));
     } else if (m == "sc_low.clip_norm") {
       set(OpCode::kClipNorm);
       ins.in[0] = ref(op->operand(0));
@@ -187,8 +293,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[2] = ref(op->result(0));    // loss
       ins.in[3] = ref(op->result(1));    // p_s
       ins.out[0] = ref(op->result(2));   // p_t
-      ins.out[1] = (static_cast<uint64_t>(s->shape().dims.at(0)) << 32) |
-                   static_cast<uint64_t>(s->shape().dims.at(1));
+      ins.out[1] = pack32(s->shape().dims.at(0), s->shape().dims.at(1));
       ins.out[2] = F32Bits(op->getAttrAs<float>("temperature").value_or(1.0f));
     } else if (m == "sc_low.kl_grad") {
       const sir::Value* d = op->result(0);
@@ -197,8 +302,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[1] = ref(op->operand(1));   // p_t
       ins.in[2] = ref(op->operand(2));   // seed
       ins.in[3] = ref(d);                // dlogits
-      ins.out[0] = (static_cast<uint64_t>(d->shape().dims.at(0)) << 32) |
-                   static_cast<uint64_t>(d->shape().dims.at(1));
+      ins.out[0] = pack32(d->shape().dims.at(0), d->shape().dims.at(1));
       ins.out[1] = F32Bits(op->getAttrAs<float>("temperature").value_or(1.0f));
     } else if (m == "sc_low.sgd_step") {
       set(OpCode::kSgdStep);

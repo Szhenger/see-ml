@@ -8,15 +8,44 @@ namespace up = seeml::update;
 
 std::expected<void, std::string> ValidateInstruction(
     const up::UpdateInstruction& ins, uint64_t arena_size,
-    uint64_t rodata_size) {
-  // Byte ranges admitted so far, for the aliasing proof after the switch.
-  // No opcode carries more than 6 validated operands (LayerNormFwd).
-  struct Extent {
-    uint64_t begin = 0, bytes = 0;
-    bool write = false, rodata = false;
+    uint64_t rodata_size, uint32_t plan_version) {
+  // Flags discipline before any operand math. Pre-v5 plans predate the
+  // flags vocabulary: a nonzero word there is corruption, not a feature.
+  // From v5 on, every set bit must be a defined epilogue bit AND defined
+  // for this opcode — Execute() applies flags blindly, so an unknown or
+  // misplaced bit must die here, loudly, not skip silently.
+  if (plan_version < up::kSeeuFlagsVersion) {
+    if (ins.flags != 0)
+      return diag::validating::Error(
+          "instruction carries flags in a pre-v" +
+          std::to_string(up::kSeeuFlagsVersion) + " plan (opcode " +
+          std::to_string(ins.opcode) + ")");
+  } else {
+    const auto opcode = static_cast<up::OpCode>(ins.opcode);
+    const uint16_t allowed =
+        opcode == up::OpCode::kGemmNN
+            ? up::kKnownFlagsMask
+            : opcode == up::OpCode::kGemmNNQ8 ? up::kFlagEpilogueActMask
+                                              : uint16_t{0};
+    if (ins.flags & static_cast<uint16_t>(~allowed))
+      return diag::validating::Error(
+          "unknown or misplaced instruction flags " +
+          std::to_string(ins.flags) + " (opcode " +
+          std::to_string(ins.opcode) + ")");
+  }
+  // Every kernel is compiled with SEEML_RESTRICT pointers: a written range
+  // overlapping any *other* operand of the same instruction is undefined
+  // behavior, not a wrong answer. Bounds alone don't rule that out, so each
+  // validated operand's byte range is recorded and proven disjoint from
+  // every written range before the instruction is accepted. A single ref
+  // that is read and written through one pointer (SGD's param, GemmAcc's C)
+  // is one operand, not an alias.
+  struct OperandRange {
+    uint64_t off, bytes;
+    bool write, rodata;
   };
-  Extent extents[8];
-  size_t n_extents = 0;
+  OperandRange ranges[8];
+  size_t num_ranges = 0;
 
   // elem_bytes: f32/i32 operands are 4 bytes; quantized weights are 1.
   // A ref is admitted only if its extent is nonzero (every kernel
@@ -31,12 +60,15 @@ std::expected<void, std::string> ValidateInstruction(
     if (elems == 0) return false;
     uint64_t bytes = 0;
     if (!MulOk(elems, elem_bytes, &bytes)) return false;
-    const uint64_t offset = up::RefOffset(ref);
-    if (offset % elem_bytes != 0) return false;
+    // Execute() reinterpret_casts the ref to its element type and
+    // dereferences directly, so alignment is part of "safe to dispatch
+    // blindly": a misaligned offset is UB, and a bus error on the
+    // strict-alignment targets this runtime ships to.
+    if (up::RefOffset(ref) % elem_bytes != 0) return false;
     const uint64_t space = up::IsRodataRef(ref) ? rodata_size : arena_size;
-    if (!RangeOk(offset, bytes, space)) return false;
-    extents[n_extents++] =
-        Extent{offset, bytes, write, up::IsRodataRef(ref)};
+    if (!RangeOk(up::RefOffset(ref), bytes, space)) return false;
+    ranges[num_ranges++] = {up::RefOffset(ref), bytes, write,
+                            up::IsRodataRef(ref)};
     return true;
   };
   auto ref_ok = [&](uint64_t ref, uint64_t elems, bool write) {
@@ -47,12 +79,50 @@ std::expected<void, std::string> ValidateInstruction(
                            "(opcode " +
                            std::to_string(ins.opcode) + ")");
   };
+  // Accept only if no written range overlaps another operand's range in the
+  // same address space. Called in place of a bare success return by every
+  // case that records operands.
+  auto disjoint = [&]() -> std::expected<void, std::string> {
+    for (size_t i = 0; i < num_ranges; ++i)
+      for (size_t j = i + 1; j < num_ranges; ++j) {
+        const OperandRange& a = ranges[i];
+        const OperandRange& b = ranges[j];
+        if (!(a.write || b.write) || a.rodata != b.rodata) continue;
+        if (a.bytes == 0 || b.bytes == 0) continue;
+        if (a.off < b.off + b.bytes && b.off < a.off + a.bytes)
+          return diag::validating::Error(
+              "instruction operands alias a written range (opcode " +
+              std::to_string(ins.opcode) + ")");
+      }
+    return {};
+  };
 
   const uint64_t d0 = ins.out[0], d1 = ins.out[1], d2 = ins.out[2];
   uint64_t mk = 0, kn = 0, mn = 0, nc = 0;
+  // Transformer opcodes exist only from v6: no earlier compiler emits them,
+  // so their appearance in an older plan is corruption, not a feature.
+  if (ins.opcode >= static_cast<uint16_t>(up::OpCode::kRmsNormFwd) &&
+      ins.opcode <= static_cast<uint16_t>(up::OpCode::kAttnDK) &&
+      plan_version < up::kSeeuTransformerVersion)
+    return diag::validating::Error(
+        "transformer opcode " + std::to_string(ins.opcode) + " in a pre-v" +
+        std::to_string(up::kSeeuTransformerVersion) + " plan");
+  // Shared geometry for the transformer family: activations are
+  // [B*S, H*d] f32, the probability matrix [B*H*S, S]. Derived with the
+  // same overflow-safe chain the kernels' loop bounds imply.
+  auto attn_geometry = [&](uint64_t bs_word, uint64_t hd_word, uint64_t* td,
+                           uint64_t* pn) {
+    const uint64_t B = bs_word >> 32, S = bs_word & 0xFFFFFFFFu;
+    const uint64_t H = hd_word >> 32, d = hd_word & 0xFFFFFFFFu;
+    uint64_t t = 0, dm = 0, bhs = 0;
+    if (B == 0 || S == 0 || H == 0 || d == 0) return false;
+    if (!MulOk(B, S, &t) || !MulOk(H, d, &dm) || !MulOk(t, dm, td)) return false;
+    if (!MulOk(t, H, &bhs) || !MulOk(bhs, S, pn)) return false;
+    return true;
+  };
   switch (static_cast<up::OpCode>(ins.opcode)) {
     case up::OpCode::kNop:
-      break;
+      return disjoint();
     case up::OpCode::kGemmNN:
     case up::OpCode::kGemmNT:
     case up::OpCode::kGemmTN:
@@ -73,7 +143,12 @@ std::expected<void, std::string> ValidateInstruction(
           !ref_ok_w(ins.in[1], kn, false, q8 ? 1 : sizeof(float)) ||
           !ref_ok(ins.in[2], mn, true))
         return fail();
-      break;
+      // Fused-bias epilogue (flags proved valid for this opcode above):
+      // in[3] is a read of N floats and joins the overlap discipline
+      // against the written C range.
+      if ((ins.flags & up::kFlagEpilogueBias) && !ref_ok(ins.in[3], d1, false))
+        return fail();
+      return disjoint();
     }
     case up::OpCode::kAddEW:
     case up::OpCode::kMulEW:
@@ -83,13 +158,13 @@ std::expected<void, std::string> ValidateInstruction(
       if (!ref_ok(ins.in[0], d0, false) || !ref_ok(ins.in[1], d0, false) ||
           !ref_ok(ins.in[2], d0, true))
         return fail();
-      break;
+      return disjoint();
     case up::OpCode::kAddBias:
       if (!MulOk(d0, d1, &mn)) return fail();
       if (!ref_ok(ins.in[0], mn, false) || !ref_ok(ins.in[1], d1, false) ||
           !ref_ok(ins.in[2], mn, true))
         return fail();
-      break;
+      return disjoint();
     case up::OpCode::kReluFwd:
     case up::OpCode::kGeluFwd:
     case up::OpCode::kSiluFwd:
@@ -97,7 +172,7 @@ std::expected<void, std::string> ValidateInstruction(
     case up::OpCode::kCopy:
       if (!ref_ok(ins.in[0], d0, false) || !ref_ok(ins.in[1], d0, true))
         return fail();
-      break;
+      return disjoint();
     case up::OpCode::kLayerNormFwd: {
       const uint64_t rows = d0 >> 32, cols = d0 & 0xFFFFFFFFu;
       if (!MulOk(rows, cols, &nc)) return fail();
@@ -105,7 +180,7 @@ std::expected<void, std::string> ValidateInstruction(
           !ref_ok(ins.in[2], cols, false) || !ref_ok(ins.in[3], nc, true) ||
           !ref_ok(ins.out[1], rows, true) || !ref_ok(ins.out[2], rows, true))
         return fail();
-      break;
+      return disjoint();
     }
     case up::OpCode::kLayerNormBwd: {
       const uint64_t rows = d2 >> 32, cols = d2 & 0xFFFFFFFFu;
@@ -114,85 +189,137 @@ std::expected<void, std::string> ValidateInstruction(
           !ref_ok(ins.in[2], cols, false) || !ref_ok(ins.in[3], nc, true) ||
           !ref_ok(ins.out[0], rows, false) || !ref_ok(ins.out[1], rows, false))
         return fail();
-      break;
+      return disjoint();
     }
     case up::OpCode::kClipNorm:
       if (!ref_ok(ins.in[0], d0, true)) return fail();
-      break;
+      return disjoint();
     case up::OpCode::kReduceRows:
       if (!MulOk(d0, d1, &mn)) return fail();
       if (!ref_ok(ins.in[0], mn, false) || !ref_ok(ins.in[1], d1, true))
         return fail();
-      break;
+      return disjoint();
     case up::OpCode::kSoftmaxXEntFwd:
       if (!MulOk(d0, d1, &nc)) return fail();
       if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], d0, false) ||
           !ref_ok(ins.in[2], 1, true) || !ref_ok(ins.in[3], nc, true))
         return fail();
-      break;
+      return disjoint();
     case up::OpCode::kSoftmaxXEntBwd:
       if (!MulOk(d0, d1, &nc)) return fail();
       if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], d0, false) ||
           !ref_ok(ins.in[2], 1, false) || !ref_ok(ins.in[3], nc, true))
         return fail();
-      break;
+      return disjoint();
     case up::OpCode::kMseFwd:
       if (!ref_ok(ins.in[0], d0, false) || !ref_ok(ins.in[1], d0, false) ||
           !ref_ok(ins.in[2], 1, true))
         return fail();
-      break;
+      return disjoint();
     case up::OpCode::kMseBwd:
       if (!ref_ok(ins.in[0], d0, false) || !ref_ok(ins.in[1], d0, false) ||
           !ref_ok(ins.in[2], 1, false) || !ref_ok(ins.in[3], d0, true))
         return fail();
-      break;
+      return disjoint();
     case up::OpCode::kKLDistillFwd:
       if (!MulOk(d1 >> 32, d1 & 0xFFFFFFFFu, &nc)) return fail();
       if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], nc, false) ||
           !ref_ok(ins.in[2], 1, true) || !ref_ok(ins.in[3], nc, true) ||
           !ref_ok(ins.out[0], nc, true))
         return fail();
-      break;
+      return disjoint();
     case up::OpCode::kKLDistillBwd:
       if (!MulOk(d0 >> 32, d0 & 0xFFFFFFFFu, &nc)) return fail();
       if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], nc, false) ||
           !ref_ok(ins.in[2], 1, false) || !ref_ok(ins.in[3], nc, true))
         return fail();
-      break;
+      return disjoint();
     case up::OpCode::kSgdStep:
       if (!ref_ok(ins.in[0], d0, true) || !ref_ok(ins.in[1], d0, false))
         return fail();
-      break;
+      return disjoint();
     case up::OpCode::kAdamWStep:
       if (!ref_ok(ins.in[0], d0, true) || !ref_ok(ins.in[1], d0, false) ||
           !ref_ok(ins.in[2], d0, true) || !ref_ok(ins.in[3], d0, true))
         return fail();
-      break;
+      return disjoint();
     case up::OpCode::kFill:
       if (!ref_ok(ins.in[0], d0, true)) return fail();
-      break;
-    default:
-      return diag::validating::Error("unknown opcode " +
-                                     std::to_string(ins.opcode));
-  }
-
-  // Aliasing proof: the kernels are compiled with no-alias (restrict)
-  // qualifiers on the promise the arena binder keeps for compiled plans; a
-  // foreign plan must prove it here or blind dispatch is UB. Any operand
-  // pair where at least one side is written must be disjoint (read-read
-  // overlap is harmless — nothing is modified through either pointer).
-  for (size_t i = 0; i < n_extents; ++i)
-    for (size_t j = i + 1; j < n_extents; ++j) {
-      const Extent& a = extents[i];
-      const Extent& b = extents[j];
-      if (!a.write && !b.write) continue;
-      if (a.rodata != b.rodata) continue;
-      if (a.begin < b.begin + b.bytes && b.begin < a.begin + a.bytes)
-        return diag::validating::Error(
-            "instruction operands alias (opcode " +
-            std::to_string(ins.opcode) + ")");
+      return disjoint();
+    case up::OpCode::kRmsNormFwd: {
+      const uint64_t rows = d0 >> 32, cols = d0 & 0xFFFFFFFFu;
+      if (!MulOk(rows, cols, &nc)) return fail();
+      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], cols, false) ||
+          !ref_ok(ins.in[2], nc, true) || !ref_ok(ins.in[3], rows, true))
+        return fail();
+      return disjoint();
     }
-  return {};
+    case up::OpCode::kRmsNormBwd: {
+      const uint64_t rows = d1 >> 32, cols = d1 & 0xFFFFFFFFu;
+      if (!MulOk(rows, cols, &nc)) return fail();
+      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], nc, false) ||
+          !ref_ok(ins.in[2], cols, false) || !ref_ok(ins.in[3], nc, true) ||
+          !ref_ok(ins.out[0], rows, false))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kRopeFwd:
+    case up::OpCode::kRopeBwd: {
+      uint64_t td = 0, pn = 0;
+      if (!attn_geometry(d0, d1, &td, &pn)) return fail();
+      // The rotation pairs (2c, 2c+1) require an even head width.
+      if ((d1 & 0xFFFFFFFFu) % 2 != 0) return fail();
+      if (!ref_ok(ins.in[0], td, false) || !ref_ok(ins.in[1], td, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kAttnFwd: {
+      uint64_t td = 0, pn = 0;
+      if (!attn_geometry(d1, d2, &td, &pn)) return fail();
+      if (!ref_ok(ins.in[0], td, false) || !ref_ok(ins.in[1], td, false) ||
+          !ref_ok(ins.in[2], td, false) || !ref_ok(ins.in[3], td, true) ||
+          !ref_ok(ins.out[0], pn, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kAttnDP: {
+      uint64_t td = 0, pn = 0;
+      if (!attn_geometry(d0, d1, &td, &pn)) return fail();
+      if (!ref_ok(ins.in[0], td, false) || !ref_ok(ins.in[1], td, false) ||
+          !ref_ok(ins.in[2], pn, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kAttnDV: {
+      uint64_t td = 0, pn = 0;
+      if (!attn_geometry(d0, d1, &td, &pn)) return fail();
+      if (!ref_ok(ins.in[0], pn, false) || !ref_ok(ins.in[1], td, false) ||
+          !ref_ok(ins.in[2], td, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kSoftmaxRowsBwd: {
+      const uint64_t rows = d0 >> 32, cols = d0 & 0xFFFFFFFFu;
+      if (!MulOk(rows, cols, &nc)) return fail();
+      if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], nc, false) ||
+          !ref_ok(ins.in[2], nc, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kAttnDQ:
+    case up::OpCode::kAttnDK: {
+      uint64_t td = 0, pn = 0;
+      if (!attn_geometry(d0, d1, &td, &pn)) return fail();
+      if (!ref_ok(ins.in[0], pn, false) || !ref_ok(ins.in[1], td, false) ||
+          !ref_ok(ins.in[2], td, true))
+        return fail();
+      return disjoint();
+    }
+  }
+  // Every known opcode returned through disjoint() above; anything else
+  // must be a load error — Execute() would silently skip it.
+  return diag::validating::Error("unknown opcode " +
+                                 std::to_string(ins.opcode));
 }
 
 }  // namespace seeml::update_rt

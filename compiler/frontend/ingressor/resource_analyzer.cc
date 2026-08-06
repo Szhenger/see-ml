@@ -26,12 +26,11 @@ uint64_t SatMul(uint64_t a, uint64_t b) {
 }
 
 std::string FormatMiB(uint64_t bytes) {
-  // Round up without wrapping: the saturated UINT64_MAX footprints SatAdd /
-  // SatMul produce must format as a huge count, not overflow to "0 MiB".
-  constexpr uint64_t kRound = (uint64_t{1} << 20) - 1;
-  const uint64_t mib =
-      bytes > UINT64_MAX - kRound ? (bytes >> 20) + 1 : (bytes + kRound) >> 20;
-  return std::to_string(mib) + " MiB";
+  // Round up without the additive form: bytes near UINT64_MAX (exactly what
+  // SatAdd/SatMul saturate to) would wrap and print "0 MiB".
+  const uint64_t whole = bytes >> 20;
+  const uint64_t frac = bytes & ((uint64_t{1} << 20) - 1);
+  return std::to_string(whole + (frac != 0 ? 1 : 0)) + " MiB";
 }
 
 }  // namespace
@@ -57,20 +56,34 @@ TrainingFootprint EstimateTrainingFootprint(const SmfModel& model,
   // dynamic batch dim, which never appears last).
   std::unordered_map<std::string_view, const SmfTensor*> tensors;
   std::unordered_map<std::string_view, uint64_t> width;
+  std::unordered_map<std::string_view, uint64_t> row_count;
   tensors.reserve(model.tensors.size());
   for (const SmfTensor& t : model.tensors) {
     tensors[t.name] = &t;
     if (t.is_const) fp.weight_bytes = SatAdd(fp.weight_bytes, t.byte_size);
     if (!t.dims.empty() && t.dims.back() > 0)
       width[t.name] = static_cast<uint64_t>(t.dims.back());
+    // Row seed: a constant tensor keeps its declared row count (the parser
+    // sizes a MatMul from its actual LHS, which may be a const with rows !=
+    // batch); anything else is served at the compiled batch. Over-counting
+    // rows would break the lower-bound guarantee rejections rely on.
+    row_count[t.name] =
+        t.is_const ? (t.dims.size() >= 2 && t.dims.front() > 0
+                          ? static_cast<uint64_t>(t.dims.front())
+                          : 1)
+                   : rows;
   }
 
-  // Forward activations: propagate output widths with the parser's shape
-  // rules. Every activation is [batch, width] f32 and is cached for the
-  // backward pass. An unresolvable width contributes zero — the estimate
-  // must stay a lower bound.
+  // Forward activations: propagate output widths and row counts with the
+  // parser's shape rules. Every activation is [rows, width] f32 and is
+  // cached for the backward pass. An unresolvable width contributes zero —
+  // the estimate must stay a lower bound.
   for (const SmfOp& op : model.ops) {
     uint64_t w = 0;
+    uint64_t r = rows;
+    if (!op.inputs.empty())
+      if (auto it = row_count.find(op.inputs[0]); it != row_count.end())
+        r = it->second;
     switch (op.kind) {
       case SmfOpKind::kMatMul: {
         if (op.inputs.size() != 2) break;
@@ -85,22 +98,41 @@ TrainingFootprint EstimateTrainingFootprint(const SmfModel& model,
       case SmfOpKind::kGelu:
       case SmfOpKind::kSilu:
       case SmfOpKind::kMul:
-      case SmfOpKind::kLayerNorm: {
+      case SmfOpKind::kLayerNorm:
+      case SmfOpKind::kAdd:
+      case SmfOpKind::kRmsNorm:
+      case SmfOpKind::kRope:
+      case SmfOpKind::kAttention: {
         if (op.inputs.empty()) break;
         if (auto it = width.find(op.inputs[0]); it != width.end())
           w = it->second;
         // LayerNorm additionally caches per-row mean/rstd for the backward
-        // kernel: two f32 per batch row.
+        // kernel (two f32 per row); RMSNorm caches rstd (one).
         if (op.kind == SmfOpKind::kLayerNorm)
           fp.activation_bytes =
-              SatAdd(fp.activation_bytes, SatMul(2 * sizeof(float), rows));
+              SatAdd(fp.activation_bytes, SatMul(2 * sizeof(float), r));
+        if (op.kind == SmfOpKind::kRmsNorm)
+          fp.activation_bytes =
+              SatAdd(fp.activation_bytes, SatMul(sizeof(float), r));
+        // Attention caches the probability matrix P[B,H,S,S] — flattened
+        // [rows * heads, seq_len] — for the backward primitives; usually
+        // the dominant transformer activation. heads/seq_len of zero mean
+        // an invalid model the parser will reject; contribute nothing here
+        // so the estimate stays a lower bound.
+        if (op.kind == SmfOpKind::kAttention && op.attr0 > 0 &&
+            model.seq_len > 0)
+          fp.activation_bytes = SatAdd(
+              fp.activation_bytes,
+              SatMul(SatMul(SatMul(r, op.attr0), model.seq_len),
+                     sizeof(float)));
         break;
       }
     }
     if (w == 0) continue;
     width[op.output] = w;
-    fp.activation_bytes = SatAdd(fp.activation_bytes,
-                                 SatMul(SatMul(rows, w), sizeof(float)));
+    row_count[op.output] = r;
+    fp.activation_bytes =
+        SatAdd(fp.activation_bytes, SatMul(SatMul(r, w), sizeof(float)));
   }
   return fp;
 }
@@ -132,6 +164,20 @@ std::expected<void, std::string> CheckTrainableLocally(
       FormatMiB(footprint.activation_bytes) + " need at least " +
       FormatMiB(need) + ", but the local memory budget is " +
       FormatMiB(budget));
+}
+
+std::expected<void, std::string> CheckPlanFitsLocally(uint64_t arena_bytes,
+                                                      uint64_t plan_bytes,
+                                                      uint64_t budget_bytes) {
+  const uint64_t budget =
+      budget_bytes != 0 ? budget_bytes : DetectLocalMemoryBytes();
+  if (budget == 0) return {};  // cannot prove infeasibility — do not reject
+  const uint64_t need = SatAdd(arena_bytes, plan_bytes);
+  if (need <= budget) return {};
+  return seeml::diag::tokenizing::IngressError(
+      "compiled update cannot run locally: arena " + FormatMiB(arena_bytes) +
+      " + plan " + FormatMiB(plan_bytes) + " need " + FormatMiB(need) +
+      ", but the local memory budget is " + FormatMiB(budget));
 }
 
 }  // namespace seeml::update

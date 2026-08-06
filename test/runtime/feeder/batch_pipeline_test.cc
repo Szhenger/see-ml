@@ -58,6 +58,39 @@ TEST(BatchPipeline, StagesExactlyTheSerialSequence) {
   }
 }
 
+TEST(BatchPipeline, TeardownLeavesTheSerialCursor) {
+  // The feeder stays one staged batch ahead; at teardown that batch must be
+  // un-consumed, or the dataset position after the pipeline dies would
+  // depend on how the join raced the staging thread — and the next consumer
+  // of the same dataset (the regression gate's post-training evaluation, a
+  // resumed run) would serve a scheduling-dependent sequence. Shuffled, so
+  // the staged batch crosses an epoch boundary and the restore must also
+  // replay the permutation, not just the cursor.
+  Dataset serial = MakeCorpus();
+  Dataset piped = MakeCorpus();
+  serial.EnableShuffle(7);
+  piped.EnableShuffle(7);
+
+  std::vector<float> want_x(kInputFloats), got_x(kInputFloats);
+  std::vector<uint8_t> want_l(kLabelBytes), got_l(kLabelBytes);
+  {
+    BatchPipeline pipeline(piped, kBatch, kInputFloats, kLabelBytes);
+    // Two batches of four over ten samples: the staged third batch crosses
+    // the first epoch wrap.
+    for (int step = 0; step < 2; ++step) {
+      serial.FillBatch(kBatch, want_x.data(), want_l.data());
+      pipeline.NextBatch(got_x.data(), got_l.data());
+    }
+  }
+  // After teardown, both datasets must serve identical continuations.
+  for (int step = 0; step < 5; ++step) {
+    serial.FillBatch(kBatch, want_x.data(), want_l.data());
+    piped.FillBatch(kBatch, got_x.data(), got_l.data());
+    EXPECT_TRUE(want_x == got_x);
+    EXPECT_TRUE(want_l == got_l);
+  }
+}
+
 TEST(BatchPipeline, StagesExactlyTheSerialShuffledSequence) {
   Dataset serial = MakeCorpus();
   Dataset piped = MakeCorpus();

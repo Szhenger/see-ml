@@ -79,6 +79,20 @@ model_update --model model.smf --data corpus.sds --out updated.smf \
   --loss-log curve.csv
 ```
 
+| flag | meaning (default) |
+|---|---|
+| `--model source.smf` | the model the plan was compiled from (required; must hash-match the plan) |
+| `--data corpus.sds` | the training corpus (required) |
+| `--out updated.smf` | where the committed model is written (`updated_model.smf`) |
+| `--steps N` | training steps (0 = the plan's compiled default) |
+| `--seed S` | shuffle-permutation seed (0) |
+| `--val-frac F` | held-out fraction for the regression gate (0.1); 0 gates on the training-loss trend instead |
+| `--checkpoint path` | checkpoint file, hash-bound to the plan |
+| `--checkpoint-every N` | steps between checkpoints (0 = off) |
+| `--resume` | resume from `--checkpoint` if present |
+| `--loss-log curve.csv` | write the per-step loss curve |
+| `--force` | commit even if the gate shows no improvement |
+
 What happens, in order:
 
 1. **Load + verify** — the plan's hash is checked, then every instruction operand is bounds-validated *before anything executes*. One arena allocation, sized at compile time. A corrupt or foreign plan is refused at this door.
@@ -99,6 +113,12 @@ SEEML_THREADS=4 model_update ...   # pin the pool width; default = all cores
 ```
 
 Here's the property that makes this knob safe to turn: parallel execution is **bitwise-deterministic**. Work is split into chunks whose boundaries depend only on the problem shape (never the thread count), and reductions combine per-chunk partials in a fixed order — so the same plan, data, and seed produce the *same bits* at any thread count. Thread count is a throughput knob, not a numerics knob. Practically: a loss curve from an 8-core dev board reproduces exactly on a single-core target, and any bug you find is reproducible by construction. ([runtime.md](runtime.md) explains the mechanism.)
+
+This is a tested contract, not an aspiration:
+`ParallelFor.OrderedPartialReductionIsBitwiseThreadCountInvariant`
+(`test/source/parallel/parallel_for_test.cc`) proves the substrate, and
+the `ParallelDeterminism` suite (`test/runtime/executor/kernels_test.cc`)
+re-proves every kernel family bit-for-bit across thread counts.
 
 ## Development
 

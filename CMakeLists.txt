@@ -77,6 +77,8 @@ add_library(seeml_update STATIC
     compiler/frontend/parser/parser.cc
     compiler/analysis/updater/pass_manager.cc
     compiler/analysis/updater/conv_lowering.cc
+    compiler/analysis/updater/dce.cc
+    compiler/analysis/algebra/epilogue_fuser.cc
     compiler/analysis/algebra/lora_grafter.cc
     compiler/analysis/algebra/merge_builder.cc
     compiler/analysis/calculus/autodiff.cc
@@ -107,6 +109,7 @@ add_library(seeml_update_rt STATIC
     runtime/executor/normalization.cc
     runtime/executor/loss.cc
     runtime/executor/optimizer.cc
+    runtime/executor/attention.cc
     runtime/feeder/dataset.cc
     runtime/feeder/batch_pipeline.cc
     runtime/custodian/durable_io.cc
@@ -117,6 +120,16 @@ add_library(seeml_update_rt STATIC
 )
 target_link_libraries(seeml_update_rt PUBLIC seeml_parallel)
 
+# Metal GEMM dispatch (G1a): Apple hosts only. JIT-compiles the kernel
+# emitter's MSL on the local device; hardware-gated tests skip without one.
+if(APPLE)
+    target_sources(seeml_update_rt PRIVATE runtime/executor/metal_gemm.mm)
+    set_source_files_properties(runtime/executor/metal_gemm.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(seeml_update_rt PUBLIC
+        "-framework Metal" "-framework Foundation")
+endif()
+
 # ==============================================================================
 # Tools
 # ==============================================================================
@@ -125,6 +138,8 @@ add_executable(seeml-update-compile tool/seeml_update_compile.cc)
 target_link_libraries(seeml-update-compile PRIVATE seeml_update)
 
 add_executable(seeml-seeu-dump tool/seeml_seeu_dump.cc)
+# PlanSelfHash (the v4 integrity seal) runs on the parallel substrate.
+target_link_libraries(seeml-seeu-dump PRIVATE seeml_parallel)
 
 # ==============================================================================
 # Tests
@@ -175,6 +190,7 @@ seeml_add_test(seeml_diagnostics_test     test/compiler/diagnostics/diagnostics_
 seeml_add_test(seeml_dataset_test         test/runtime/feeder/dataset_test.cc)
 seeml_add_test(seeml_batch_pipeline_test  test/runtime/feeder/batch_pipeline_test.cc)
 seeml_add_test(seeml_kernels_test         test/runtime/executor/kernels_test.cc)
+seeml_add_test(seeml_metal_gemm_test      test/runtime/executor/metal_gemm_test.cc)
 seeml_add_test(seeml_validator_test       test/runtime/validator/validator_test.cc)
 seeml_add_test(seeml_custodian_test       test/runtime/custodian/custodian_test.cc)
 seeml_add_test(seeml_engine_test          test/runtime/engine/engine_test.cc)

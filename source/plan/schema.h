@@ -22,7 +22,48 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // v3: source_model_hash is computed with ContentHash64 (the parallel model
 // identity hash, source/identity/hash.h) instead of plain Fnv1a64. Older
 // plans are rejected by the version gate; recompile the plan.
-inline constexpr uint32_t kSeeuVersion = 3;
+// v4: plan_hash is computed with PlanSelfHash (the chunked parallel form of
+// the same fold, hash field zeroed) instead of a serial Fnv1a64 pass over
+// the whole blob. Older plans are rejected by the version gate; recompile.
+// v5: UpdateInstruction::flags carries fused GEMM epilogues (instruction.h).
+// A pre-v5 runtime ignores flags entirely and would silently skip the fused
+// bias/activation — exactly the misread the version gate exists to reject —
+// so plans that may set flags must declare v5. From v5 on the validator
+// rejects unknown flag bits, keeping every future flag loud.
+// v6: the transformer opcode family (RMSNorm, RoPE, causal attention and
+// its backward primitives — instruction.h). Additive: no existing field
+// changes meaning, so the readable floor stays. The validator rejects the
+// new opcodes in any pre-v6 plan — no pre-v6 compiler emits them, so their
+// appearance there is corruption, not a feature.
+inline constexpr uint32_t kSeeuVersion = 6;
+
+// The version that introduced the transformer opcodes: plans below it must
+// not carry them, and are validated to.
+inline constexpr uint32_t kSeeuTransformerVersion = 6;
+
+// The version that introduced instruction flags: plans below it must carry
+// flags == 0 on every instruction, and are validated to.
+inline constexpr uint32_t kSeeuFlagsVersion = 5;
+
+// Version negotiation policy. The runtime accepts every version in
+// [kSeeuOldestReadable, kSeeuVersion], not just the version it was built
+// at — a fleet's deployed runtimes must not be stranded by every format
+// bump. The two constants move under different rules:
+//   - An ADDITIVE change — new fields carved out of `reserved`, with zero
+//     meaning "feature absent" — bumps kSeeuVersion only. Older plans keep
+//     loading; their zeroed fields select the pre-change behavior.
+//   - A SEMANTIC break — a field changes meaning or layout, as v3 did to
+//     source_model_hash — raises kSeeuOldestReadable to the breaking
+//     version, because misreading an old plan is worse than rejecting it.
+// v1..v3 are below the floor: v1 lacks the integrity contract entirely, a
+// v2 source_model_hash would mis-verify under v3's hash, and a v3 plan_hash
+// (serial Fnv1a64) can never match the v4 PlanSelfHash the loader verifies
+// unconditionally — admitting v3 would misreport every genuine v3 plan as
+// corrupt instead of unsupported. Newer plans than the runtime are always
+// rejected — forward compatibility cannot be proven from an unknown format.
+inline constexpr uint32_t kSeeuOldestReadable = 4;
+static_assert(kSeeuOldestReadable <= kSeeuVersion,
+              "the readable floor cannot exceed the current version");
 
 // The plan is serialized by memcpy of host integers/structs; the documented
 // on-disk contract is little-endian. Big-endian hosts need byte-swapping I/O.

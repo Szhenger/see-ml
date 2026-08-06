@@ -36,6 +36,19 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
     // activation), and is part of the student graph.
     if (!def || def->mnemonic() != "sc_mem.weight") return;
     if (IsTeacherValue(w) || IsTeacherValue(op->result(0))) return;
+    // Every use of W must itself be an eligible RHS-matmul site: commit
+    // rewrites the file's W to W + Δ, so a site reading W any other way
+    // (matmul LHS, Mul operand, W@W) would compute with pristine W during
+    // training and the gate, then silently change meaning after commit.
+    for (const sir::Operation* user : w->users())
+      if (user->mnemonic() != "sc_high.matmul" || user->numOperands() != 2 ||
+          user->operand(1) != w || user->operand(0) == w) {
+        seeml::diag::Note(updating::kLoraGrafter,
+                          "skipping '" + std::string(w->id()) +
+                              "': consumed outside a MatMul weight slot — "
+                              "committing W+delta would change that site");
+        return;
+      }
     if (!spec_.target_filters.empty()) {
       bool matched = false;
       for (const auto& f : spec_.target_filters)
@@ -52,6 +65,13 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
   std::vector<GraftedAdapter> adapters;
   adapters.reserve(targets.size());
   std::unordered_map<std::string, size_t> graft_sites;
+  // One adapter pair per *unique* frozen weight. A tied weight consumed by
+  // several MatMuls must share its A/B: per-site pairs would train fine but
+  // commit W + ΣΔ_i to the single file weight, polluting every site with
+  // every other site's delta. With a shared pair, each site computes
+  // x_i @ (W + Δ) during training and the committed weight is exactly that.
+  // Autodiff sums the pair's gradients across sites (Accumulate on fan-out).
+  std::unordered_map<sir::Value*, size_t> adapter_for_weight;
   const float scale = spec_.alpha / static_cast<float>(spec_.rank);
 
   size_t adapter_index = 0;
@@ -70,30 +90,42 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
     std::vector<sir::Operation*> consumers(c->users().begin(),
                                            c->users().end());
 
-    // A tied weight is grafted once per consuming MatMul; suffix the later
-    // sites so every adapter's value ids stay unique — Block::verify
-    // enforces id uniqueness, and ambiguous ids would make ParamDebugInfo
-    // and the SIR dump lie about which adapter is which.
+    // Later graft sites of a tied weight get suffixed ids for their compute
+    // subgraph — Block::verify enforces id uniqueness, and ambiguous ids
+    // would make ParamDebugInfo and the SIR dump lie about which site is
+    // which.
     std::string base = std::string(w->id());
     if (const size_t site = graft_sites[base]++; site > 0)
       base += "@" + std::to_string(site);
 
-    // A ~ N(0, 1/sqrt(K)), B = 0  =>  delta starts at zero: the grafted model
-    // is bit-identical to the source model until training moves B.
-    auto a_op = std::make_unique<sir::Operation>("sc_mem.param");
-    a_op->setAttribute("trainable", int64_t{1});
-    a_op->setAttribute("init", std::string("randn"));
-    a_op->setAttribute("std", 1.0f / std::sqrt(static_cast<float>(k)));
-    a_op->setAttribute("seed",
-                       static_cast<int64_t>(spec_.seed + adapter_index));
-    sir::Value* a = a_op->addResult(base + ".lora_A", sir::DataType::F32,
-                                    sir::Shape{k, r});
+    std::vector<std::unique_ptr<sir::Operation>> new_ops;
+    sir::Value* a = nullptr;
+    sir::Value* b = nullptr;
+    const auto existing = adapter_for_weight.find(w);
+    const bool is_new_adapter = existing == adapter_for_weight.end();
+    if (is_new_adapter) {
+      // A ~ N(0, 1/sqrt(K)), B = 0  =>  delta starts at zero: the grafted
+      // model is bit-identical to the source model until training moves B.
+      auto a_op = std::make_unique<sir::Operation>("sc_mem.param");
+      a_op->setAttribute("trainable", int64_t{1});
+      a_op->setAttribute("init", std::string("randn"));
+      a_op->setAttribute("std", 1.0f / std::sqrt(static_cast<float>(k)));
+      a_op->setAttribute("seed",
+                         static_cast<int64_t>(spec_.seed + adapter_index));
+      a = a_op->addResult(base + ".lora_A", sir::DataType::F32,
+                          sir::Shape{k, r});
 
-    auto b_op = std::make_unique<sir::Operation>("sc_mem.param");
-    b_op->setAttribute("trainable", int64_t{1});
-    b_op->setAttribute("init", std::string("zeros"));
-    sir::Value* b = b_op->addResult(base + ".lora_B", sir::DataType::F32,
-                                    sir::Shape{r, m});
+      auto b_op = std::make_unique<sir::Operation>("sc_mem.param");
+      b_op->setAttribute("trainable", int64_t{1});
+      b_op->setAttribute("init", std::string("zeros"));
+      b = b_op->addResult(base + ".lora_B", sir::DataType::F32,
+                          sir::Shape{r, m});
+      new_ops.push_back(std::move(a_op));
+      new_ops.push_back(std::move(b_op));
+    } else {
+      a = adapters[existing->second].A;
+      b = adapters[existing->second].B;
+    }
 
     auto t_op = std::make_unique<sir::Operation>("sc_high.matmul");
     t_op->addOperand(x);
@@ -120,9 +152,6 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
                                             sir::DataType::F32,
                                             sir::Shape{n, m});
 
-    std::vector<std::unique_ptr<sir::Operation>> new_ops;
-    new_ops.push_back(std::move(a_op));
-    new_ops.push_back(std::move(b_op));
     new_ops.push_back(std::move(t_op));
     new_ops.push_back(std::move(u_op));
     new_ops.push_back(std::move(s_op));
@@ -134,9 +163,12 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
       for (size_t i = 0; i < consumer->numOperands(); ++i)
         if (consumer->operand(i) == c) consumer->setOperand(i, c_prime);
 
-    adapters.push_back({.frozen_weight = w, .A = a, .B = b, .scale = scale,
-                        .id_base = base});
-    ++adapter_index;
+    if (is_new_adapter) {
+      adapter_for_weight[w] = adapters.size();
+      adapters.push_back({.frozen_weight = w, .A = a, .B = b, .scale = scale,
+                          .id_base = base});
+      ++adapter_index;
+    }
   }
 
   seeml::diag::Note(updating::kLoraGrafter,

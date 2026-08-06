@@ -69,8 +69,11 @@ extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
       if (plan.size() >= sizeof(seeml::update::PlanHeader)) {
         constexpr size_t kHashAt =
             offsetof(seeml::update::PlanHeader, plan_hash);
-        std::memset(plan.data() + kHashAt, 0, sizeof(uint64_t));
-        const uint64_t h = seeml::update::Fnv1a64(plan.data(), plan.size());
+        // PlanSelfHash treats the field as zero itself — the runtime's exact
+        // seal (v4+); a serial Fnv1a64 here would fail the load-time hash
+        // gate on every input and starve the deeper validators of coverage.
+        const uint64_t h =
+            seeml::update::PlanSelfHash(plan.data(), plan.size(), kHashAt);
         std::memcpy(plan.data() + kHashAt, &h, sizeof(h));
       }
       seeml::update_rt::UpdateEngine engine;

@@ -197,6 +197,84 @@ const std::unordered_map<std::string_view, VjpRule>& VjpRegistry() {
          return true;
        }},
 
+      // (Y, rstd) = rms_norm(X, gamma). Only dX is synthesized: gamma is a
+      // frozen base weight (LoRA adapts MatMuls only), so an adjoint can
+      // never be demanded for it by construction.
+      {"sc_high.rms_norm",
+       [](sir::Operation* op, AdContext& ctx) {
+         sir::Value* x = op->operand(0);
+         sir::Value* gamma = op->operand(1);
+         if (ctx.Needs(gamma))
+           return false;  // trainable gamma is unsupported — refuse
+         sir::Value* dy = ctx.GradOf(op->result(0));
+         if (!ctx.Needs(x)) return true;
+         sir::Value* dx = Emit1(
+             ctx, "sc_low.rms_norm_grad", {dy, x, gamma, op->result(1)},
+             std::string(x->id()) + ".d" + std::to_string(ctx.fresh_counter++),
+             x->shape());
+         ctx.Accumulate(x, dx);
+         return true;
+       }},
+
+      // Y = rope(X): a per-pair orthogonal rotation; dX rotates dY by the
+      // negated angle. Geometry attrs (heads/seq/base) are copied so
+      // lowering can reconstruct the position layout.
+      {"sc_high.rope",
+       [](sir::Operation* op, AdContext& ctx) {
+         sir::Value* x = op->operand(0);
+         sir::Value* dy = ctx.GradOf(op->result(0));
+         if (!ctx.Needs(x)) return true;
+         sir::Operation* g = ctx.block->appendOp("sc_low.rope_grad");
+         g->setAttribute("heads", op->getAttrAs<int64_t>("heads").value_or(1));
+         g->setAttribute("seq", op->getAttrAs<int64_t>("seq").value_or(1));
+         if (auto base = op->getAttrAs<float>("base"))
+           g->setAttribute("base", *base);
+         g->addOperand(dy);
+         sir::Value* dx = g->addResult(
+             std::string(x->id()) + ".d" + std::to_string(ctx.fresh_counter++),
+             sir::DataType::F32, x->shape());
+         ctx.Accumulate(x, dx);
+         return true;
+       }},
+
+      // (O, P) = attention(Q, K, V) with P = softmax(mask(QK^T/sqrt(d))).
+      // Decomposed VJP over the cached P:
+      //   dP = dO V^T;  dS = P*(dP - rowsum(dP*P));
+      //   dV = P^T dO;  dQ = (dS K)/sqrt(d);  dK = (dS^T Q)/sqrt(d)
+      {"sc_high.attention",
+       [](sir::Operation* op, AdContext& ctx) {
+         sir::Value* q = op->operand(0);
+         sir::Value* k = op->operand(1);
+         sir::Value* v = op->operand(2);
+         sir::Value* probs = op->result(1);
+         sir::Value* dout = ctx.GradOf(op->result(0));
+         const int64_t heads = op->getAttrAs<int64_t>("heads").value_or(1);
+         const int64_t seq = op->getAttrAs<int64_t>("seq").value_or(1);
+         auto emit = [&](const char* mnemonic,
+                         std::initializer_list<sir::Value*> operands,
+                         sir::Value* like) {
+           sir::Operation* g = ctx.block->appendOp(mnemonic);
+           g->setAttribute("heads", heads);
+           g->setAttribute("seq", seq);
+           for (sir::Value* o : operands) g->addOperand(o);
+           return g->addResult(std::string(like->id()) + ".d" +
+                                   std::to_string(ctx.fresh_counter++),
+                               sir::DataType::F32, like->shape());
+         };
+         if (ctx.Needs(v)) ctx.Accumulate(v, emit("sc_low.attn_dv",
+                                                  {probs, dout}, v));
+         if (ctx.Needs(q) || ctx.Needs(k)) {
+           sir::Value* dp = emit("sc_low.attn_dp", {dout, v}, probs);
+           sir::Value* ds = emit("sc_low.softmax_rows_grad", {probs, dp},
+                                 probs);
+           if (ctx.Needs(q))
+             ctx.Accumulate(q, emit("sc_low.attn_dq", {ds, k}, q));
+           if (ctx.Needs(k))
+             ctx.Accumulate(k, emit("sc_low.attn_dk", {ds, q}, k));
+         }
+         return true;
+       }},
+
       // Y = alpha * X: dX = alpha * dY.
       {"sc_high.scale",
        [](sir::Operation* op, AdContext& ctx) {
@@ -235,6 +313,8 @@ const std::unordered_map<std::string_view, VjpRule>& VjpRegistry() {
        [](sir::Operation* op, AdContext& ctx) {
          sir::Value* pred = op->operand(0);
          sir::Value* target = op->operand(1);
+         if (ctx.Needs(target))
+           return false;  // d/dtarget unsupported — refuse, don't drop
          sir::Value* seed = ctx.GradOf(op->result(0));
          if (!ctx.Needs(pred)) return true;
          sir::Value* dp =
@@ -252,6 +332,8 @@ const std::unordered_map<std::string_view, VjpRule>& VjpRegistry() {
       {"sc_high.kl_distill",
        [](sir::Operation* op, AdContext& ctx) {
          sir::Value* s_logits = op->operand(0);
+         if (ctx.Needs(op->operand(1)))
+           return false;  // d/dteacher unsupported — refuse, don't drop
          sir::Value* p_s = op->result(1);
          sir::Value* p_t = op->result(2);
          sir::Value* seed = ctx.GradOf(op->result(0));

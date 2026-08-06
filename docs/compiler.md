@@ -313,7 +313,7 @@ Every compiler diagnostic is one line, `"<unit>: <message>"`, and errors travel 
 | `tokenizing/` | SMF byte-stream decode/encode | `SMF`, `Ingressor` |
 | `parsing/` | SMF graph → forward SIR | `Parser` |
 | `passing/` | pass orchestration + lowering legality | `PassManager`, `ConvLowering` |
-| `updating/` | the analytic methods | `TrainableAutodiff`, `LoraGrafter`, `MergeBuilder`, `OptimizerSynthesizer` |
+| `updating/` | the analytic methods | `TrainableAutodiff`, `LoraGrafter`, `MergeBuilder`, `OptimizerSynthesizer`, `GemmEpilogueFuser` |
 | `architecting/` | local device analysis | `HostArch`, `Autotuner` |
 | `generating/` | code generation + the driver | `UpdateCompiler`, `ArenaBinder`, `InstructionLowering`, `NativeEmitter` |
 
@@ -336,6 +336,20 @@ Why bother, when the subsystems have their own tests? Because contracts catch *i
 - The **analysis** phase is compile-time mathematics: LoRA grafts rank-r adapters (`r(K+M)` parameters instead of `K·M`), autodiff synthesizes the backward pass by reverse-mode VJP rewriting pruned to the trainable set, the optimizer becomes instructions, the merge program materializes `Δ = (α/r)·A@B`, and the frozen base is reviewed for symmetric int8 storage.
 - The **backend** binds every value to a byte offset (liveness + first-fit, like register allocation for tensors), lowers to a 31-opcode, 64-byte-instruction ISA with a two-address-space memory model, derives cache-respecting GEMM tilings analytically, refines them with a deterministic UCB1 bandit, and emits a package that builds anywhere.
 - The **driver** sequences it all and verifies a contract at every seam.
+
+## tool/ — the command-line surface
+
+Not under `compiler/` for the same reason as `source/`: the tools are
+consumers of the compiler and the formats, not stages of compilation.
+
+- **`seeml_update_compile.cc`** — the compiler CLI; every flag is
+  documented in [usage.md](usage.md). Argument parsing is strict: an
+  unknown flag, a flag missing its value, or a numeric with trailing
+  garbage is a hard error, never a silent default.
+- **`seeml_seeu_dump.cc`** — the plan disassembler: header fields, arena
+  segments, and (with `--instrs`) the decoded instruction streams.
+- **`export_model.py`** — the PyTorch exporter producing SMF models and
+  SDS corpora; the accepted module set is listed in [usage.md](usage.md).
 
 ## Testing
 

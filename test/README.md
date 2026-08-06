@@ -12,7 +12,7 @@ test/
     assert.h            the TEST / EXPECT_* / ASSERT_* macro surface
     seetest_main.cc     the runner main linked into every suite
   support/              shared fixtures (façade: builders.h)
-    models.cc           deterministic SMF model builders + BaseConfig
+    models.cc           deterministic SMF (SeeML Model Format) model builders + BaseConfig
     corpora.cc          synthetic datasets (classification/regression/unlabeled)
     probes.cc           engine-arena introspection + the test-run environment
     scoped_temp_dir     filesystem sandbox for I/O suites
