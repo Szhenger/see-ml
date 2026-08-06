@@ -169,6 +169,12 @@ std::expected<void, std::string> CheckSeqGeometry(const char* unit,
   if (seq_len == 0)
     return parsing::OpError(unit, op.name,
                             "model declares no seq_len, which this op needs");
+  // seq_len is untrusted u64 from the file; a value past INT64_MAX would
+  // wrap negative through the int64 casts below (rows % -1 == 0 accepts
+  // everything) and reach the parser as a negative shape dim.
+  if (seq_len > static_cast<uint64_t>(INT64_MAX))
+    return parsing::OpError(unit, op.name,
+                            "seq_len does not fit a signed 64-bit dimension");
   const int64_t rows = x.shape().dims.at(0);
   const int64_t width = x.shape().dims.at(1);
   if (rows % static_cast<int64_t>(seq_len) != 0)

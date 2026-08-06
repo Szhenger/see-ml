@@ -45,9 +45,9 @@ TEST(PlanValidator, AcceptsInBoundsOperands) {
 }
 
 TEST(PlanValidator, TransformerOpcodesAreVersionGated) {
-  // A valid attention instruction: q/k/v/o at disjoint arena offsets,
-  // probs cache beyond them. B=1, S=4, H=2, d=4 -> T*D = 64 floats each,
-  // probs 32 floats.
+  // A valid attention instruction: q/k/v/o at disjoint arena offsets
+  // (spaced 64 floats apart), probs cache beyond them. B=1, S=4, H=2,
+  // d=4 -> T*D = 32 floats each, probs 32 floats.
   up::UpdateInstruction attn;
   attn.opcode = static_cast<uint16_t>(up::OpCode::kAttnFwd);
   attn.in[0] = up::MakeArenaRef(0);

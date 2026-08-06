@@ -176,7 +176,9 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     // an out-of-range enum that a downstream switch silently skips. The
     // ceiling is per-version — a v3 kind inside a pre-v3 file is corruption,
     // not forward compatibility.
-    const uint8_t kind_max = version >= 3 ? kSmfOpKindMax : kSmfOpKindMaxV2;
+    const uint8_t kind_max = version >= 3   ? kSmfOpKindMax
+                             : version == 2 ? kSmfOpKindMaxV2
+                                            : kSmfOpKindMaxV1;
     if (kind > kind_max)
       return tokenizing::Error("unknown op kind " + std::to_string(kind) +
                                " in '" + path + "'");
