@@ -43,6 +43,8 @@ std::expected<std::unique_ptr<MetalGemmRunner>, std::string>
 MetalGemmRunner::Create(const std::string& msl_source, size_t tile_m,
                         size_t tile_n) {
   @autoreleasepool {
+    if (tile_m == 0 || tile_n == 0)
+      return std::unexpected("tile dimensions must be positive");
     auto impl = std::make_unique<Impl>();
     impl->tile_m = tile_m;
     impl->tile_n = tile_n;
@@ -94,6 +96,16 @@ std::expected<void, std::string> MetalGemmRunner::Run(Kind kind,
                                                       size_t m, size_t n,
                                                       size_t k, float alpha) {
   @autoreleasepool {
+    // Degenerate sizes never reach the device (a zero-length MTLBuffer is
+    // nil, which would misreport as an allocation failure): no output for
+    // empty M/N; K == 0 is an empty sum, so the pure variants write zeros
+    // and the accumulate variant leaves C untouched — matching the CPU
+    // kernels.
+    if (m == 0 || n == 0) return {};
+    if (k == 0) {
+      if (kind != Kind::kAccNN) std::memset(c, 0, m * n * sizeof(float));
+      return {};
+    }
     // Element counts per variant: A always carries M*K values, B always
     // K*N, C M*N — the transposes only change the index expressions.
     const size_t a_bytes = m * k * sizeof(float);
@@ -120,6 +132,9 @@ std::expected<void, std::string> MetalGemmRunner::Run(Kind kind,
 
     id<MTLCommandBuffer> cmd = [impl_->queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    // A nil buffer/encoder (device loss) would no-op every message below
+    // and read back the unmodified upload as "success".
+    if (!cmd || !enc) return std::unexpected("cannot encode GPU command");
     [enc setComputePipelineState:impl_->pipeline[static_cast<int>(kind)]];
     [enc setBuffer:ab offset:0 atIndex:0];
     [enc setBuffer:bb offset:0 atIndex:1];
@@ -135,7 +150,9 @@ std::expected<void, std::string> MetalGemmRunner::Run(Kind kind,
     [enc endEncoding];
     [cmd commit];
     [cmd waitUntilCompleted];
-    if (cmd.status == MTLCommandBufferStatusError)
+    // Anything short of Completed means C was not produced; Error is not
+    // the only such terminal state.
+    if (cmd.status != MTLCommandBufferStatusCompleted)
       return std::unexpected(NsError(cmd.error, "GPU dispatch failed"));
 
     std::memcpy(c, cb.contents, c_bytes);

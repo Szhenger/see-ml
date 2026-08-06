@@ -618,11 +618,14 @@ TEST(Attention, ForwardMatchesNaiveReferenceAndIsCausal) {
           e[j] = std::exp(dot * inv_sqrt_d);
           denom += e[j];
         }
-        for (size_t j = 0; j < S; ++j) {
-          const float want =
-              j <= i ? static_cast<float>(e[j] / denom) : 0.0f;
-          EXPECT_NEAR(p[((b * H + h) * S + i) * S + j], want, 1e-5);
-        }
+        for (size_t j = 0; j <= i; ++j)
+          EXPECT_NEAR(p[((b * H + h) * S + i) * S + j],
+                      static_cast<float>(e[j] / denom), 1e-5);
+        // Masked entries must be EXACTLY 0.0f — the backward primitives'
+        // causal early-exits (AttnDV from i=j, AttnDQ/DK to j<=i) are only
+        // mathematically valid on that bit, not on "small".
+        for (size_t j = i + 1; j < S; ++j)
+          EXPECT_EQ(p[((b * H + h) * S + i) * S + j], 0.0f);
         for (size_t c = 0; c < d; ++c) {
           double acc = 0.0;
           for (size_t j = 0; j <= i; ++j)
@@ -682,23 +685,85 @@ TEST(Attention, BackwardPrimitivesMatchFiniteDifferences) {
   check(v, dv, 2);
 }
 
+TEST(Rope, GoldenValuesPinTheConvention) {
+  // The adjoint-identity and finite-difference tests are blind to a
+  // convention bug implemented consistently in both kernels (flipped
+  // rotation sign, off-by-one frequency, position offset). Pin the exact
+  // definition — theta(s, pair p) = s * base^(-2p/d), rotation
+  // [[cos,-sin],[sin,cos]] — with independently computed values.
+  const size_t B = 1, S = 2, H = 1, d = 4;
+  const std::vector<float> x = RandnVector(B * S * H * d, 72);
+  std::vector<float> y(x.size());
+  const float base = 10000.0f;
+  k::RopeFwd(x.data(), y.data(), B, S, H, d, base);
+  // Position s = 1, pair 0: theta = 1.
+  const size_t r1 = H * d;  // row offset of position 1
+  EXPECT_NEAR(y[r1 + 0],
+              static_cast<float>(x[r1 + 0] * std::cos(1.0) -
+                                 x[r1 + 1] * std::sin(1.0)),
+              1e-5);
+  EXPECT_NEAR(y[r1 + 1],
+              static_cast<float>(x[r1 + 0] * std::sin(1.0) +
+                                 x[r1 + 1] * std::cos(1.0)),
+              1e-5);
+  // Position s = 1, pair 1: theta = base^(-2/d) = 10000^(-1/2) = 0.01.
+  const double t1 = 0.01;
+  EXPECT_NEAR(y[r1 + 2],
+              static_cast<float>(x[r1 + 2] * std::cos(t1) -
+                                 x[r1 + 3] * std::sin(t1)),
+              1e-5);
+  EXPECT_NEAR(y[r1 + 3],
+              static_cast<float>(x[r1 + 2] * std::sin(t1) +
+                                 x[r1 + 3] * std::cos(t1)),
+              1e-5);
+}
+
 TEST(Attention, KernelsAreThreadCountInvariant) {
-  const size_t B = 2, S = 4, H = 2, d = 4, n = B * S * H * d;
+  // Shapes sized so every kernel decomposes into MANY chunks (units >>
+  // grain) — with tiny shapes both widths run one chunk and the comparison
+  // is vacuous. B*H*S = 256 units at grain ~5 gives ~52 chunks for the
+  // attention family; the whole forward+backward chain and both RoPE
+  // directions run under each width.
+  const size_t B = 2, S = 64, H = 2, d = 8, n = B * S * H * d;
   const size_t pn = B * H * S * S;
   const std::vector<float> q = RandnVector(n, 95);
   const std::vector<float> k2 = RandnVector(n, 96);
   const std::vector<float> v = RandnVector(n, 97);
-  auto attn = [&](float* out) {
-    k::AttnFwd(q.data(), k2.data(), v.data(), out, out + n, B, S, H, d);
+  const std::vector<float> w = RandnVector(n, 98);  // dL/dO
+  auto attn_chain = [&](float* out) {
+    // Layout: o[n], p[pn], dp[pn], ds[pn], dq[n], dk[n], dv[n].
+    float* o = out;
+    float* p = o + n;
+    float* dp = p + pn;
+    float* ds = dp + pn;
+    float* dq = ds + pn;
+    float* dk = dq + n;
+    float* dv = dk + n;
+    k::AttnFwd(q.data(), k2.data(), v.data(), o, p, B, S, H, d);
+    k::AttnDP(w.data(), v.data(), dp, B, S, H, d);
+    k::AttnDV(p, w.data(), dv, B, S, H, d);
+    k::SoftmaxRowsBwd(p, dp, ds, B * H * S, S);
+    k::AttnDQ(ds, k2.data(), dq, B, S, H, d);
+    k::AttnDK(ds, q.data(), dk, B, S, H, d);
+  };
+  auto rope = [&](float* out) {
+    k::RopeFwd(q.data(), out, B, S, H, d, 10000.0f);
+    k::RopeBwd(w.data(), out + n, B, S, H, d, 10000.0f);
   };
   auto rms = [&](float* out) {
     std::vector<float> gamma(H * d, 1.0f);
-    k::RmsNormFwd(q.data(), gamma.data(), out, out + n, B * S, H * d);
+    float* y = out;
+    float* rstd = y + n;
+    float* dx = rstd + B * S;
+    k::RmsNormFwd(q.data(), gamma.data(), y, rstd, B * S, H * d);
+    k::RmsNormBwd(w.data(), q.data(), gamma.data(), rstd, dx, B * S, H * d);
   };
-  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, n + pn, attn),
-                        RunAtWidth(8, n + pn, attn));
-  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, n + B * S, rms),
-                        RunAtWidth(8, n + B * S, rms));
+  const size_t chain = 4 * n + 3 * pn;
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, chain, attn_chain),
+                        RunAtWidth(8, chain, attn_chain));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, 2 * n, rope), RunAtWidth(8, 2 * n, rope));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, 2 * n + B * S, rms),
+                        RunAtWidth(8, 2 * n + B * S, rms));
 }
 
 }  // namespace

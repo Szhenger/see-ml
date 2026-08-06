@@ -52,7 +52,9 @@ compile runtime/executor/optimizer.cc         rt_optimizer.o
 compile runtime/executor/attention.cc         rt_attention.o
 
 # Metal GEMM dispatch (G1a) exists only on Apple hosts; elsewhere the
-# hardware-gated suite compiles to zero tests and nothing links the runner.
+# hardware-gated suite reduces to one vacuous test and nothing links the
+# runner. Note: -fobjc-arc requires a clang-family CXX on Darwin (GCC's
+# ObjC++ front end rejects it) — the rest of the tree is standard C++23.
 METAL_OBJS=""
 METAL_LDFLAGS=""
 if [ "$(uname)" = "Darwin" ]; then
