@@ -33,6 +33,18 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
   auto vol = [](const sir::Value* v) {
     return static_cast<uint64_t>(v->shape().volume());
   };
+  // Packed dim words carry two dims in 32-bit halves. Shapes are int64:
+  // a half that does not fit must be a refusal, never a silent truncation —
+  // the validator cannot tell a truncated word from an honest small one.
+  auto pack32 = [&](int64_t hi, int64_t lo) -> uint64_t {
+    if (hi < 0 || lo < 0 || hi > 0xFFFFFFFFll || lo > 0xFFFFFFFFll) {
+      if (error.empty())
+        error = "dimension pair (" + std::to_string(hi) + ", " +
+                std::to_string(lo) + ") exceeds the 32-bit ISA dim fields";
+      return 0;
+    }
+    return (static_cast<uint64_t>(hi) << 32) | static_cast<uint64_t>(lo);
+  };
 
   for (sir::Operation* op : ops) {
     if (!error.empty()) break;
@@ -143,8 +155,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[1] = ref(op->operand(1));   // gamma
       ins.in[2] = ref(op->operand(2));   // beta
       ins.in[3] = ref(y);
-      ins.out[0] = (static_cast<uint64_t>(y->shape().dims.at(0)) << 32) |
-                   static_cast<uint64_t>(y->shape().dims.at(1));
+      ins.out[0] = pack32(y->shape().dims.at(0), y->shape().dims.at(1));
       ins.out[1] = ref(op->result(1));   // mean cache
       ins.out[2] = ref(op->result(2));   // rstd cache
     } else if (m == "sc_low.layer_norm_grad") {
@@ -156,8 +167,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[3] = ref(dx);
       ins.out[0] = ref(op->operand(3));  // mean cache
       ins.out[1] = ref(op->operand(4));  // rstd cache
-      ins.out[2] = (static_cast<uint64_t>(dx->shape().dims.at(0)) << 32) |
-                   static_cast<uint64_t>(dx->shape().dims.at(1));
+      ins.out[2] = pack32(dx->shape().dims.at(0), dx->shape().dims.at(1));
     } else if (m == "sc_high.rms_norm") {
       const sir::Value* y = op->result(0);
       set(OpCode::kRmsNormFwd);
@@ -165,8 +175,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[1] = ref(op->operand(1));   // gamma
       ins.in[2] = ref(y);
       ins.in[3] = ref(op->result(1));    // rstd cache
-      ins.out[0] = (static_cast<uint64_t>(y->shape().dims.at(0)) << 32) |
-                   static_cast<uint64_t>(y->shape().dims.at(1));
+      ins.out[0] = pack32(y->shape().dims.at(0), y->shape().dims.at(1));
     } else if (m == "sc_low.rms_norm_grad") {
       const sir::Value* dx = op->result(0);
       set(OpCode::kRmsNormBwd);
@@ -175,8 +184,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[2] = ref(op->operand(2));   // gamma
       ins.in[3] = ref(dx);
       ins.out[0] = ref(op->operand(3));  // rstd cache
-      ins.out[1] = (static_cast<uint64_t>(dx->shape().dims.at(0)) << 32) |
-                   static_cast<uint64_t>(dx->shape().dims.at(1));
+      ins.out[1] = pack32(dx->shape().dims.at(0), dx->shape().dims.at(1));
     } else if (m == "sc_high.rope" || m == "sc_low.rope_grad" ||
                m == "sc_high.attention" || m == "sc_low.attn_dp" ||
                m == "sc_low.attn_dv" || m == "sc_low.attn_dq" ||
@@ -195,10 +203,8 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
         error = "malformed sequence geometry on '" + std::string(m) + "'";
         break;
       }
-      const uint64_t bs = (static_cast<uint64_t>(rows / seq) << 32) |
-                          static_cast<uint64_t>(seq);
-      const uint64_t hd = (static_cast<uint64_t>(heads) << 32) |
-                          static_cast<uint64_t>(width / heads);
+      const uint64_t bs = pack32(rows / seq, seq);
+      const uint64_t hd = pack32(heads, width / heads);
       if (m == "sc_high.rope" || m == "sc_low.rope_grad") {
         set(m == "sc_high.rope" ? OpCode::kRopeFwd : OpCode::kRopeBwd);
         ins.in[0] = ref(op->operand(0));
@@ -232,8 +238,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[0] = ref(op->operand(0));   // probs
       ins.in[1] = ref(op->operand(1));   // dp
       ins.in[2] = ref(ds);
-      ins.out[0] = (static_cast<uint64_t>(ds->shape().dims.at(0)) << 32) |
-                   static_cast<uint64_t>(ds->shape().dims.at(1));
+      ins.out[0] = pack32(ds->shape().dims.at(0), ds->shape().dims.at(1));
     } else if (m == "sc_low.clip_norm") {
       set(OpCode::kClipNorm);
       ins.in[0] = ref(op->operand(0));
@@ -288,8 +293,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[2] = ref(op->result(0));    // loss
       ins.in[3] = ref(op->result(1));    // p_s
       ins.out[0] = ref(op->result(2));   // p_t
-      ins.out[1] = (static_cast<uint64_t>(s->shape().dims.at(0)) << 32) |
-                   static_cast<uint64_t>(s->shape().dims.at(1));
+      ins.out[1] = pack32(s->shape().dims.at(0), s->shape().dims.at(1));
       ins.out[2] = F32Bits(op->getAttrAs<float>("temperature").value_or(1.0f));
     } else if (m == "sc_low.kl_grad") {
       const sir::Value* d = op->result(0);
@@ -298,8 +302,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[1] = ref(op->operand(1));   // p_t
       ins.in[2] = ref(op->operand(2));   // seed
       ins.in[3] = ref(d);                // dlogits
-      ins.out[0] = (static_cast<uint64_t>(d->shape().dims.at(0)) << 32) |
-                   static_cast<uint64_t>(d->shape().dims.at(1));
+      ins.out[0] = pack32(d->shape().dims.at(0), d->shape().dims.at(1));
       ins.out[1] = F32Bits(op->getAttrAs<float>("temperature").value_or(1.0f));
     } else if (m == "sc_low.sgd_step") {
       set(OpCode::kSgdStep);

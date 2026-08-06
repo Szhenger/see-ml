@@ -73,7 +73,9 @@ enum class SmfOpKind : uint8_t {
   kAttention = 10, // inputs: {q, k, v}; causal SDPA; attr0 = num_heads
 };
 inline constexpr uint8_t kSmfOpKindMax = 10;
-// A pre-v3 file carrying a v3 kind is corrupt, not forward-compatible.
+// A file carrying a kind newer than its own version is corrupt, not
+// forward-compatible: v1 ended at kRelu, v2 at kLayerNorm.
+inline constexpr uint8_t kSmfOpKindMaxV1 = 2;
 inline constexpr uint8_t kSmfOpKindMaxV2 = 6;
 
 struct SmfTensor {

@@ -155,6 +155,45 @@ void Disassemble(const char* title, const UpdateInstruction* instrs,
                     ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
                     ImmBitsToF32(ins.out[1]));
         break;
+      case OpCode::kRmsNormFwd:
+        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
+        break;
+      case OpCode::kRmsNormBwd:
+        std::printf("   rstd:");
+        PrintRef(ins.out[0]);
+        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
+                    ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
+        break;
+      case OpCode::kRopeFwd:
+      case OpCode::kRopeBwd:
+        std::printf("   B/S: %" PRIu64 " %" PRIu64 "  H/d: %" PRIu64
+                    " %" PRIu64 "  base %g\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                    ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu,
+                    ImmBitsToF32(ins.out[2]));
+        break;
+      case OpCode::kAttnFwd:
+        std::printf("   probs:");
+        PrintRef(ins.out[0]);
+        std::printf("   B/S: %" PRIu64 " %" PRIu64 "  H/d: %" PRIu64
+                    " %" PRIu64 "\n",
+                    ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu,
+                    ins.out[2] >> 32, ins.out[2] & 0xFFFFFFFFu);
+        break;
+      case OpCode::kAttnDP:
+      case OpCode::kAttnDV:
+      case OpCode::kAttnDQ:
+      case OpCode::kAttnDK:
+        std::printf("   B/S: %" PRIu64 " %" PRIu64 "  H/d: %" PRIu64
+                    " %" PRIu64 "\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                    ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
+        break;
+      case OpCode::kSoftmaxRowsBwd:
+        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
+        break;
       default:
         std::printf("   dims/aux: %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
                     ins.out[0], ins.out[1], ins.out[2]);

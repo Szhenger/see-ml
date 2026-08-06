@@ -385,6 +385,19 @@ TEST(ForwardBuilder, RejectsSequenceOpsWithoutSeqLen) {
                         "declares no seq_len");
 }
 
+TEST(ForwardBuilder, RejectsSeqLenPastInt64) {
+  // Hostile u64 seq_len past INT64_MAX would wrap negative through the
+  // int64 casts (rows % -1 == 0 accepts every batch) and reach the parser
+  // as a negative probs dim; sema must refuse it in unsigned arithmetic.
+  SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 7);
+  model.seq_len = ~0ULL;
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::F32, sir::Shape{8, 8});
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, 8, build),
+                        "does not fit a signed 64-bit");
+}
+
 TEST(ForwardBuilder, RejectsBatchNotWholeSequences) {
   SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 7);
   sir::Block block;

@@ -13,8 +13,11 @@
 // P[B,H,S,S] is flattened [B*H*S, S]. Every kernel decomposes over B*H*S
 // (b, h, row) units — a pure function of the problem shape — and each unit
 // writes only its own d-segment or its own P row, so any thread count
-// computes identical bits (kernel_policy.h). Row reductions accumulate in
-// double, matching the normalization and loss families.
+// computes identical bits (kernel_policy.h). The dot-product reductions
+// (scores, softmax denominator, dP, the softmax-backward rowsum)
+// accumulate in double, matching the normalization and loss families; the
+// O/dV/dQ/dK accumulations are f32 like the GEMM family — O is a convex
+// combination and well-conditioned.
 // =============================================================================
 
 namespace seeml::update_rt::kernels {
@@ -36,21 +39,27 @@ inline Unit UnitOf(size_t u, size_t H, size_t S) {
 void RopeFwd(const float* x, float* y, size_t B, size_t S, size_t H, size_t d,
              float base) {
   const size_t D = H * d;
+  // angle(s, c) = s * base^(-c/d) over the interleaved pair (c, c+1). The
+  // per-pair frequency base^(-c/d) is a geometric sequence in c, so one pow
+  // per call plus a multiplicative recurrence replaces d/2 pow calls per
+  // unit. The recurrence is a pure function of (c, d) — never of chunk or
+  // thread — so thread-count invariance holds by construction, and RopeBwd
+  // evaluates the identical expression, keeping the adjoint exact.
+  const float step = std::pow(base, -2.0f / static_cast<float>(d));
   up::ParallelFor(B * S * H, RowGrain(d, kGrainMath),
                   [&](size_t u0, size_t u1, size_t) {
     for (size_t u = u0; u < u1; ++u) {
       const size_t s = (u / H) % S;
       const float* xr = x + (u / H) * D + (u % H) * d;
       float* yr = y + (u / H) * D + (u % H) * d;
+      float freq = 1.0f;
       for (size_t c = 0; c + 1 < d; c += 2) {
-        // angle(s, c) = s * base^(-c/d) over the interleaved pair (c, c+1).
-        const float theta =
-            static_cast<float>(s) *
-            std::pow(base, -static_cast<float>(c) / static_cast<float>(d));
+        const float theta = static_cast<float>(s) * freq;
         const float cs = std::cos(theta), sn = std::sin(theta);
         const float a = xr[c], b2 = xr[c + 1];
         yr[c] = a * cs - b2 * sn;
         yr[c + 1] = a * sn + b2 * cs;
+        freq *= step;
       }
     }
   });
@@ -59,22 +68,24 @@ void RopeFwd(const float* x, float* y, size_t B, size_t S, size_t H, size_t d,
 void RopeBwd(const float* dy, float* dx, size_t B, size_t S, size_t H,
              size_t d, float base) {
   // The forward is an orthogonal per-pair rotation; its VJP is the rotation
-  // by the negated angle (the transpose).
+  // by the negated angle (the transpose). theta is computed with exactly
+  // RopeFwd's expression (same recurrence, same floats).
   const size_t D = H * d;
+  const float step = std::pow(base, -2.0f / static_cast<float>(d));
   up::ParallelFor(B * S * H, RowGrain(d, kGrainMath),
                   [&](size_t u0, size_t u1, size_t) {
     for (size_t u = u0; u < u1; ++u) {
       const size_t s = (u / H) % S;
       const float* gr = dy + (u / H) * D + (u % H) * d;
       float* dr = dx + (u / H) * D + (u % H) * d;
+      float freq = 1.0f;
       for (size_t c = 0; c + 1 < d; c += 2) {
-        const float theta =
-            static_cast<float>(s) *
-            std::pow(base, -static_cast<float>(c) / static_cast<float>(d));
+        const float theta = static_cast<float>(s) * freq;
         const float cs = std::cos(theta), sn = std::sin(theta);
         const float a = gr[c], b2 = gr[c + 1];
         dr[c] = a * cs + b2 * sn;
         dr[c + 1] = -a * sn + b2 * cs;
+        freq *= step;
       }
     }
   });
@@ -133,13 +144,20 @@ void AttnDP(const float* dout, const float* v, float* dp, size_t B, size_t S,
       const auto [b, h, i] = UnitOf(u, H, S);
       const float* doi = dout + (b * S + i) * D + h * d;
       float* dprow = dp + u * S;
-      for (size_t j = 0; j < S; ++j) {
+      for (size_t j = 0; j <= i; ++j) {
         const float* vj = v + (b * S + j) * D + h * d;
         double dot = 0.0;
         for (size_t c = 0; c < d; ++c)
           dot += static_cast<double>(doi[c]) * vj[c];
         dprow[j] = static_cast<float>(dot);
       }
+      // Masked positions: SoftmaxRowsBwd multiplies these by P == 0, so any
+      // FINITE value gives dS == 0 — a zero store skips half the S^2 d work
+      // bitwise-neutrally (adding +/-0 to the double rowsum never changes
+      // its bits, and dQ/dK never read the masked dS entries). The store
+      // itself must remain: stale arena bytes could be NaN, and 0 * NaN
+      // would poison the rowsum.
+      for (size_t j = i + 1; j < S; ++j) dprow[j] = 0.0f;
     }
   });
 }

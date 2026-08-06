@@ -117,7 +117,12 @@ TEST(MetalGemm, DispatchIsReproducibleRunToRun) {
 
 #else  // !__APPLE__
 
-// Metal does not exist off Apple platforms; the suite passes vacuously so
-// the test list stays uniform across hosts.
+// Metal does not exist off Apple platforms. The runner treats an empty
+// test selection as an error (exit 2), so one trivially-green test keeps
+// the uniform cross-host suite list from failing where the platform simply
+// has nothing to check.
+namespace {
+TEST(MetalGemm, UnsupportedPlatformIsVacuouslyGreen) { EXPECT_TRUE(true); }
+}  // namespace
 
 #endif
