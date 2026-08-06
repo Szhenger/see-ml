@@ -1,4 +1,4 @@
-# SeeML: An ML Update Compiler (How to Train Your Local Model)
+# SeeML: An ML Update Compiler (How to Train A Model)
 
 ## This is SeeML
 
