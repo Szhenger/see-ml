@@ -1,0 +1,74 @@
+# =============================================================================
+# Nightly — the invariant checks too slow (or too statistical) to gate every
+# pull request, run daily against main and on demand:
+#
+#   ThreadSanitizer   the whole suite set under TSan — the concurrency
+#                     integration tests (racing durable writers, concurrent
+#                     engines on the shared pool, pipeline teardown, chunk
+#                     exceptions) execute with the race detector watching,
+#                     turning "bounded behavior" from assertion into proof
+#   extended fuzz     15 minutes over the four untrusted-input arms, with
+#                     the corpus carried between runs via the actions cache
+#
+# A nightly failure is a regression on main itself, not on a diff — treat
+# it with the same severity as a red PR.
+# =============================================================================
+
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 7 * * *"
+  workflow_dispatch:
+
+jobs:
+  tsan:
+    name: ThreadSanitizer (full suites)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      CXX: clang++
+      TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build-tsan
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DSEEML_SANITIZE=thread
+      - name: Build
+        run: cmake --build build-tsan -j "$(nproc)"
+      - name: Test under TSan
+        run: ctest --test-dir build-tsan --output-on-failure
+
+  fuzz-extended:
+    name: fuzz (15 min, cached corpus)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CXX: clang++
+      CC: clang
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore corpus
+        uses: actions/cache@v4
+        with:
+          path: corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: Configure
+        run: cmake -S . -B build-fuzz -DSEEML_FUZZ=ON
+      - name: Build harness
+        run: cmake --build build-fuzz -j "$(nproc)" --target seeml_fuzz_formats
+      - name: Fuzz
+        run: |
+          mkdir -p corpus
+          ./build-fuzz/seeml_fuzz_formats -max_total_time=900 \
+            -print_final_stats=1 corpus
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-fuzz-crashes
+          path: crash-*
+          if-no-files-found: ignore
