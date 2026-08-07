@@ -30,6 +30,7 @@
 #include <limits>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "compiler/driver/update_compiler.h"
@@ -612,6 +613,92 @@ TEST(UpdateSystem, QuantizedBaseTrainsAndCommitsWithoutBakingError) {
 // =============================================================================
 // 9. Poisoned corpus aborts the update
 // =============================================================================
+
+TEST(UpdateSystem, AdapterInitializationIsWellDistributed) {
+  // Bounds on the counter-based randn's output space: correct scale (std
+  // 1/sqrt(K)), near-zero mean, and no serial correlation between adjacent
+  // elements — the regression surface of the overlapping-counter defect,
+  // which coupled every sample's magnitude to its neighbor's angle while
+  // keeping the marginals exact. Deterministic (seeded), so exact-bound
+  // assertions cannot flake.
+  const int64_t in_dim = 64, hidden = 96, out_dim = 4, batch = 4;
+  SmfModel model = MakeMlp(in_dim, hidden, out_dim, 21);
+  UpdateConfig config = BaseConfig(batch);
+  config.lora.rank = 16;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+
+  // w1's adapter A is [in_dim, rank] randn at std 1/sqrt(in_dim).
+  const ParamDebugInfo* a_param = nullptr;
+  for (const auto& p : compiled.params)
+    if (p.id == "w1.lora_A") a_param = &p;
+  ASSERT_NE(a_param, nullptr);
+  const size_t n = a_param->count;
+  ASSERT_EQ(n, static_cast<size_t>(in_dim * 16));
+
+  std::vector<double> v(n);
+  for (size_t i = 0; i < n; ++i)
+    v[i] = ReadArenaF32(engine, a_param->param_ref, i);
+  double sum = 0.0, sq = 0.0, lag = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    sum += v[i];
+    sq += v[i] * v[i];
+  }
+  const double mean = sum / static_cast<double>(n);
+  const double var = sq / static_cast<double>(n) - mean * mean;
+  const double expect_std = 1.0 / std::sqrt(static_cast<double>(in_dim));
+  for (size_t i = 0; i + 1 < n; ++i)
+    lag += (v[i] - mean) * (v[i + 1] - mean);
+  const double lag1 = lag / (static_cast<double>(n) * var);
+
+  // 5-sigma-style bounds at n = 1024: mean within 5*std/sqrt(n), std
+  // within 15%, |lag-1 autocorrelation| under 5/sqrt(n).
+  EXPECT_TRUE(std::fabs(mean) < 5.0 * expect_std / std::sqrt(1.0 * n));
+  EXPECT_TRUE(std::fabs(std::sqrt(var) / expect_std - 1.0) < 0.15);
+  EXPECT_TRUE(std::fabs(lag1) < 5.0 / std::sqrt(1.0 * n));
+}
+
+TEST(UpdateSystem, ConcurrentEnginesShareThePoolDeterministically) {
+  // Bounded nondeterminism at the process level: two engines training in
+  // parallel threads share the global worker pool and each runs its own
+  // feeder thread, yet every engine's result must be bitwise identical to
+  // its serial run — chunk geometry depends on problem shape, never on
+  // who else is submitting.
+  const int64_t batch = 8;
+  auto run = [&](uint64_t model_seed, uint64_t data_seed,
+                 std::vector<uint8_t>* persist_out) {
+    SmfModel model = MakeMlp(6, 12, 2, model_seed);
+    UpdateConfig config = BaseConfig(batch);
+    config.optimizer.lr = 5e-3f;
+    auto compiled = UpdateCompiler(config).Compile(model);
+    if (!compiled) return false;
+    UpdateEngine engine;
+    if (!engine.LoadFromMemory(compiled->plan.data(), compiled->plan.size()))
+      return false;
+    auto data = MakeClassificationData(128, 6, data_seed);
+    if (!data) return false;
+    if (!engine.Train(*data, 30, Quiet())) return false;
+    persist_out->assign(engine.arena(),
+                        engine.arena() + engine.header().persistent_size);
+    return true;
+  };
+
+  std::vector<uint8_t> serial_a, serial_b, threaded_a, threaded_b;
+  ASSERT_TRUE(run(31, 41, &serial_a));
+  ASSERT_TRUE(run(32, 42, &serial_b));
+
+  bool ok_a = false, ok_b = false;
+  std::thread ta([&] { ok_a = run(31, 41, &threaded_a); });
+  std::thread tb([&] { ok_b = run(32, 42, &threaded_b); });
+  ta.join();
+  tb.join();
+  ASSERT_TRUE(ok_a);
+  ASSERT_TRUE(ok_b);
+  EXPECT_TRUE(threaded_a == serial_a);
+  EXPECT_TRUE(threaded_b == serial_b);
+}
 
 TEST(UpdateSystem, NonFiniteLossAbortsTheUpdate) {
   const int64_t in_dim = 5, hidden = 8, out_dim = 3, batch = 8;

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <fstream>
 #include <numeric>
+#include <thread>
 #include <vector>
 
 #include "runtime/custodian/checkpoint.h"
@@ -94,6 +95,32 @@ TEST(DurableIo, StreamingFileHashMatchesContentHash64) {
   ASSERT_OK(WriteFileDurable(empty, nullptr, 0));
   ASSERT_OK_AND_ASSIGN(uint64_t empty_hash, HashFileContent(empty));
   EXPECT_EQ(empty_hash, seeml::update::ContentHash64(nullptr, 0));
+}
+
+TEST(DurableIo, ConcurrentWritersToOnePathYieldOneCompleteFile) {
+  // Bounded nondeterminism: two writers racing on the same destination may
+  // land in either order, but the surviving file must be ONE writer's
+  // complete payload — never an interleaving. (Per-writer-unique sidecar
+  // names are what rule out the shared-inode mix.)
+  ScopedTempDir dir;
+  const std::string path = dir.File("contended.bin");
+  const std::vector<uint8_t> a(256 * 1024, 0xAA);
+  const std::vector<uint8_t> b(256 * 1024, 0xBB);
+
+  for (int round = 0; round < 8; ++round) {
+    std::thread ta([&] {
+      auto r = WriteFileDurable(path, {{a.data(), a.size()}});
+      (void)r;
+    });
+    std::thread tb([&] {
+      auto r = WriteFileDurable(path, {{b.data(), b.size()}});
+      (void)r;
+    });
+    ta.join();
+    tb.join();
+    ASSERT_OK_AND_ASSIGN(std::vector<uint8_t> got, ReadFileBytes(path));
+    EXPECT_TRUE(got == a || got == b);
+  }
 }
 
 TEST(DurableIo, CommitLockIsExclusivePerTarget) {

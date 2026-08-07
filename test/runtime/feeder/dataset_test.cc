@@ -272,6 +272,36 @@ TEST(DatasetShuffle, IsSeededDeterministicAndCoversEachEpoch) {
   EXPECT_TRUE(xa == xb);
 }
 
+TEST(DatasetShuffle, RestoreReplaysAcrossMultipleEpochs) {
+  // RestoreServingPos promises an EXACT rewind even after the permutation
+  // has been redrawn several times: the replay reconstructs the snapshot's
+  // epoch from the shuffle origin. The single-epoch case is exercised by
+  // the batch pipeline's teardown; this pins the deep-replay path.
+  ASSERT_OK_AND_ASSIGN(Dataset data, MarkerDataset());
+  data.EnableShuffle(17);
+  const int64_t in_dim = 4;
+  std::vector<float> x(8 * in_dim);
+  std::vector<int32_t> l(8);
+  auto* lbytes = reinterpret_cast<uint8_t*>(l.data());
+
+  data.FillBatch(8, x.data(), lbytes);  // land mid-epoch-0
+  const Dataset::ServingPos snap = data.SaveServingPos();
+
+  // Consume 24 more batches: 64 samples at 8/batch = 8 batches per epoch,
+  // so this crosses two reshuffle boundaries past the snapshot's epoch.
+  std::vector<std::vector<float>> want;
+  for (int i = 0; i < 24; ++i) {
+    data.FillBatch(8, x.data(), lbytes);
+    want.push_back(x);
+  }
+
+  data.RestoreServingPos(snap);
+  for (int i = 0; i < 24; ++i) {
+    data.FillBatch(8, x.data(), lbytes);
+    EXPECT_TRUE(x == want[static_cast<size_t>(i)]);
+  }
+}
+
 TEST(DatasetSplit, HoldsOutTheTailDeterministically) {
   ASSERT_OK_AND_ASSIGN(Dataset data, MarkerDataset());
   ASSERT_OK_AND_ASSIGN(Dataset val, data.SplitValidation(0.25));

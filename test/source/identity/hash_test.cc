@@ -86,6 +86,41 @@ TEST(ContentHash, SmallAndUnalignedSizes) {
   }
 }
 
+TEST(PlanSelfHash, EqualsContentHashOfTheZeroedBlobAtEveryOffsetClass) {
+  // The defining identity: PlanSelfHash(blob, at) must equal ContentHash64
+  // of a copy with the 8-byte field at `at` zeroed — including when the
+  // field STRADDLES a chunk boundary, the one code path where the patched
+  // copy must be split across two chunks' hashes. A multi-chunk blob makes
+  // that path real (single-chunk blobs never split the field).
+  const size_t size = 3 * seeml::update::kContentHashChunk + 123;
+  std::vector<uint8_t> blob(size);
+  for (size_t i = 0; i < size; ++i)
+    blob[i] = static_cast<uint8_t>(i * 2654435761u >> 13);
+  const size_t grain =
+      seeml::update::ParallelChunkGrain(size, seeml::update::kContentHashChunk);
+  ASSERT_TRUE(grain < size);  // genuinely multi-chunk
+
+  const size_t offsets[] = {0,
+                            5,
+                            grain - 7,  // straddles the first boundary
+                            grain - 1,  // straddles by a single byte
+                            grain,      // exactly at the boundary
+                            2 * grain - 3,
+                            size - sizeof(uint64_t)};
+  for (const size_t at : offsets) {
+    std::vector<uint8_t> zeroed = blob;
+    std::memset(zeroed.data() + at, 0, sizeof(uint64_t));
+    EXPECT_EQ(seeml::update::PlanSelfHash(blob.data(), size, at),
+              seeml::update::ContentHash64(zeroed.data(), size));
+  }
+  // And the seal is insensitive to what the field currently holds — the
+  // property Initialize relies on when verifying a sealed plan.
+  std::vector<uint8_t> resealed = blob;
+  std::memset(resealed.data() + grain - 4, 0xAB, sizeof(uint64_t));
+  EXPECT_EQ(seeml::update::PlanSelfHash(blob.data(), size, grain - 4),
+            seeml::update::PlanSelfHash(resealed.data(), size, grain - 4));
+}
+
 TEST(ContentHash, DistinctContentDistinctDigest) {
   auto a = DeterministicBytes(4096, /*seed=*/1);
   auto b = DeterministicBytes(4096, /*seed=*/2);
