@@ -134,6 +134,24 @@ std::expected<void, std::string> VerifyExecutorContract(
           return diag::executing::Error(
               "softmax row count disagrees with the plan batch");
       }
+      // Embedding gather is the SECOND data-dependent-offset dereference:
+      // it indexes table rows with raw i32 tokens (table[tokens[t]]). The
+      // feeder contract proves only the STAGED ids < vocab, so — exactly as
+      // for the softmax labels — its token operand must be the staged input
+      // slot, its row count the staged batch, and the plan must declare
+      // token input. Any other range would gather with unvalidated arena
+      // bytes read as indices: an out-of-bounds read from a range-valid plan.
+      if (op == up::OpCode::kEmbedFwd) {
+        if (header.input_kind != 1)
+          return diag::executing::Error(
+              "embedding gather in a plan without token input");
+        if (ins.in[0] != header.input_ref)
+          return diag::executing::Error(
+              "embedding tokens are not the plan's staged input slot");
+        if (ins.out[0] != header.batch)
+          return diag::executing::Error(
+              "embedding row count disagrees with the plan batch");
+      }
     }
 
   // The emit table's arena side is fixed at compile time; its file side is
@@ -167,11 +185,22 @@ std::expected<void, std::string> VerifyFeederContract(
     if (header.input_floats != header.batch)
       return diag::executing::Error(
           "token plan input slot does not hold one id per batch row");
-    uint64_t batch_label_bytes = 0;
-    if (!MulOk(header.batch, sizeof(int32_t), &batch_label_bytes) ||
-        batch_label_bytes != header.label_bytes)
+    // A token plan takes class labels (next-token ids) or none at all
+    // (distillation). Only the class-label case stages a label slot to
+    // check; a dense-label token plan is a nonsense configuration.
+    if (header.label_kind == 1) {
+      uint64_t batch_label_bytes = 0;
+      if (!MulOk(header.batch, sizeof(int32_t), &batch_label_bytes) ||
+          batch_label_bytes != header.label_bytes)
+        return diag::executing::Error(
+            "token plan label slot does not hold one id per batch row");
+    } else if (header.label_kind != 0) {
       return diag::executing::Error(
-          "token plan label slot does not hold one id per batch row");
+          "token plans take class labels or none, not dense labels");
+    }
+    // Token ids index embedding rows regardless of the loss, so they are
+    // always bounded — by the narrowest table, and (when there is a class
+    // loss) the narrowest softmax width too.
     uint64_t bound = vocab_bound;
     if (num_classes != 0 && (bound == 0 || num_classes < bound))
       bound = num_classes;

@@ -101,6 +101,39 @@ TEST(EngineContract, ExecutorContractSpeaksAsThePlanValidator) {
 // The feeder boundary
 // =============================================================================
 
+TEST(EngineContract, ExecutorContractBindsEmbeddingTokensToTheStagedSlot) {
+  // Regression: kEmbedFwd gathers table[tokens[t]] — a data-dependent
+  // offset. Its token operand MUST be the staged input slot (like the
+  // softmax labels), or a range-valid hostile plan gathers with arena
+  // bytes read as indices.
+  namespace up = seeml::update;
+  up::PlanHeader header{};
+  header.version = up::kSeeuVersion;
+  header.input_kind = 1;
+  header.batch = 4;
+  header.arena_size = 4096;
+  header.rodata_size = 1024;
+  header.input_ref = up::MakeArenaRef(0);
+  up::UpdateInstruction emb{};
+  emb.opcode = static_cast<uint16_t>(up::OpCode::kEmbedFwd);
+  emb.in[0] = up::MakeArenaRef(0);   // the staged input slot
+  emb.in[1] = up::MakeRodataRef(0);  // table [8, 4]
+  emb.in[2] = up::MakeArenaRef(256);
+  emb.out[0] = 4;
+  emb.out[1] = (uint64_t{8} << 32) | 4;
+  std::vector<up::UpdateInstruction> train = {emb};
+  EXPECT_OK(VerifyExecutorContract(train, {}, {}, {}, header));
+  // Tokens read from anywhere but the staged slot: rejected.
+  train[0].in[0] = up::MakeArenaRef(512);
+  EXPECT_ERROR_CONTAINS(VerifyExecutorContract(train, {}, {}, {}, header),
+                        "staged input slot");
+  // Embedding in a plan that does not declare token input: rejected.
+  train[0].in[0] = up::MakeArenaRef(0);
+  header.input_kind = 0;
+  EXPECT_ERROR_CONTAINS(VerifyExecutorContract(train, {}, {}, {}, header),
+                        "without token input");
+}
+
 TEST(EngineContract, FeederContractMatchesCorpusToPlanGeometry) {
   up::SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 2);
   ASSERT_OK_AND_ASSIGN(

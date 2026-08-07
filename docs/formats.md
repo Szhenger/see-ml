@@ -38,7 +38,7 @@ The dependency-free model container consumed by `seeml-update-compile` (source a
 
 ```
 u32 magic  "SMF1" (0x31464D53)
-u32 version         1..3 accepted; writer emits 3
+u32 version         1..4 accepted; writer emits 4
 u32 num_tensors
 u32 num_ops
 str input_name      (str = u16 length + bytes, no terminator)
@@ -56,6 +56,7 @@ ops[num_ops] (topologically ordered):
   u8   kind         0 MatMul  1 AddBias  2 Relu
                     3 Gelu    4 Silu     5 Mul    6 LayerNorm    (v2)
                     7 Add     8 RmsNorm  9 Rope   10 Attention   (v3)
+                    11 Embedding                                  (v4)
   str  name
   u8   num_inputs
   str  inputs[num_inputs]
@@ -63,7 +64,7 @@ ops[num_ops] (topologically ordered):
   u32  attr0        (v3 only) num_heads for Rope/Attention, else 0
 ```
 
-Op signatures: `MatMul(x, W)`, `AddBias(x, b)`, unary activations `(x)`, `Mul(x, y)` (same shape), `LayerNorm(x, gamma, beta)` over the last dim.
+Op signatures: `MatMul(x, W)`, `AddBias(x, b)`, unary activations `(x)`, `Mul(x, y)` / `Add(x, y)` (same shape), `LayerNorm(x, gamma, beta)` and `RmsNorm(x, gamma)` over the last dim, `Rope(x)` (rotary position embedding), and causal `Attention(q, k, v)` (v3, with model-level `seq_len`), plus `Embedding(tokens, table)` (v4). For a token-native model, the graph input is a rank-1 dynamic (`{-1}`) non-const tensor meaning i32 token ids, consumed *only* by embedding ops that gather rows of a constant `[vocab, dim]` table.
 
 A few design choices worth noticing:
 
@@ -73,29 +74,36 @@ A few design choices worth noticing:
 
 `LoadSmf` records the whole file's `ContentHash64` as the model's identity; the compiled plan carries it, and commit refuses any file that doesn't match.
 
-## SDS — SeeML Dataset (`.sds`, v1)
+## SDS — SeeML Dataset (`.sds`, v2)
 
 The corpus container — deliberately the simplest format in the family, because a dataset is just samples:
 
 ```
-u32 magic "SDS1"; u32 version = 1
+u32 magic "SDS1"; u32 version (1 or 2)
 u64 num_samples; u64 input_dim
 u32 label_kind    0 none | 1 class index (i32) | 2 dense (f32[label_dim])
-u32 pad; u64 label_dim
-records[num_samples]: f32 input[input_dim], then the label
+u32 input_kind    v2: 0 = f32 feature rows | 1 = i32 token records
+                  (this word was padding in v1, always 0)
+u64 label_dim
+records[num_samples]:
+  input_kind 0: f32 input[input_dim], then the label
+  input_kind 1: i32 tokens[input_dim + 1] and NO stored label — one
+                sequence per record; inputs are tokens[0..S) and the
+                next-token class labels are the shifted view tokens[1..S],
+                derived at serving time (label_kind must be 1)
 ```
 
-A 40-byte header, then fixed-size records — which means sample k lives at a *computable* offset, no index needed. `label_kind` covers the three training modes: `1` (a class index) for cross-entropy, `2` (a dense vector) for regression/MSE — predicting continuous values rather than classes, `0` (no label at all) for distillation, where the teacher model provides the target. That explicit `u32 pad` keeps the following u64 naturally aligned and makes the header layout self-evident rather than compiler-dependent.
+A 40-byte header, then fixed-size records — which means sample k lives at a *computable* offset, no index needed. `label_kind` covers the three training modes: `1` (a class index) for cross-entropy, `2` (a dense vector) for regression/MSE — predicting continuous values rather than classes, `0` (no label at all) for distillation, where the teacher model provides the target. The `u32` after `label_kind` was header padding in v1; v2 gives it meaning as `input_kind`, so old files (always zero there) still read correctly. Token corpora (input_kind 1) shuffle, split, and replay at record (sequence) granularity, so no sequence is ever cut or mixed.
 
-## SEEU — Update Plan (`.seeu`, v3)
+## SEEU — Update Plan (`.seeu`, v7)
 
-The star of the show: the fully AOT-compiled update. One file containing three instruction streams (train / eval / merge), the frozen weights, the persistent segment's initial image, and the emit table — every section addressed by a single `PlanHeader` at offset 0 (authoritative definition: `source/plan/schema.h`; every section 64-byte aligned). Versioning: v2 added the eval program, LR schedule, and integrity fields; v3 switched the source-model identity to `ContentHash64`.
+The star of the show: the fully AOT-compiled update. One file containing three instruction streams (train / eval / merge), the frozen weights, the persistent segment's initial image, and the emit table — every section addressed by a single `PlanHeader` at offset 0 (authoritative definition: `source/plan/schema.h`; every section 64-byte aligned). Versioning is additive: see the version history below (currently v7).
 
 Key header fields:
 
 | field | meaning |
 |---|---|
-| `plan_hash` | FNV-1a of the whole blob with this field zeroed; verified on load |
+| `plan_hash` | `PlanSelfHash` (chunked-parallel FNV-1a) of the whole blob with this field zeroed; verified on load |
 | `source_model_hash` | `ContentHash64` of the source `.smf`; commit refuses other files (0 = unbound) |
 | `arena_size`, `persistent_size` | the single device allocation, and its checkpointable prefix |
 | `input_ref/floats`, `label_ref/bytes/kind`, `loss_ref` | the I/O slots — where the feeder writes and the engine reads |
@@ -107,6 +115,8 @@ Key header fields:
 | `clip_norm` | informational; clip instructions are baked into the stream |
 
 Notice the "zeroed field" trick in `plan_hash`: you can't hash a file that contains its own hash (the act of writing the digest would change it), so the digest is computed with that one field held at zero, then patched in. The verifier replays the same convention.
+
+Version history: v2 added the eval program, integrity hashes, and LR schedule; v3 moved `source_model_hash` to `ContentHash64`; v4 moved `plan_hash` to the chunked-parallel `PlanSelfHash`; v5 gave the instruction `flags` word meaning (fused GEMM epilogues); v6 added the transformer opcode family (RMSNorm, RoPE, causal attention and its backward primitives); v7 added token-native input — `input_kind` and `seq_len` carved from `reserved`, plus the `kEmbedFwd` gather over a rodata-only table. Each new opcode is version-gated: a plan carrying one below its introducing version is corruption, not forward compatibility. The gather's *index* bound is the feeder contract's runtime job — every token id is proven inside both the narrowest embedding table and the narrowest softmax width before anything executes, exactly how class labels are bounded.
 
 Why do hyperparameters live in the *header* while clip lives in the *stream*? Because a learning rate is a number the runtime consults, but clipping changes which instructions exist — structure belongs to the program, parameters to the header, and each fact has exactly one home ([compiler.md](compiler.md)).
 

@@ -98,6 +98,16 @@ std::expected<void, std::string> CheckGraph(const SmfModel& model) {
         return parsing::OpError(
             "Embedding", op.name,
             "must read the graph input's token ids directly");
+      // The table must be a frozen weight: lowering emits it as a rodata
+      // ref, so a computed-activation table (rank-2 F32, which autodiff's
+      // needs-grad sweep skips) would compile clean and then fail every
+      // load at the validator's rodata check — a model bug blamed on the
+      // plan. Reject it here.
+      const SmfTensor* table =
+          op.inputs.size() >= 2 ? model.FindTensor(op.inputs[1]) : nullptr;
+      if (!table || !table->is_const)
+        return parsing::OpError("Embedding", op.name,
+                                "table must be a frozen weight tensor");
     } else if (token_input) {
       for (const std::string& in : op.inputs)
         if (in == model.input_name)
