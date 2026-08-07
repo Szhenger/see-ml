@@ -10,7 +10,7 @@ So, a question: **how might we make training a model as safe, as small, and as b
 
 It turns out the answer is a compiler.
 
-## Scope and limitations
+## Scope and Limitations
 
 What SeeML can train today, stated up front:
 
@@ -45,7 +45,7 @@ What SeeML can train today, stated up front:
   mismatch detector, not a signature. Authenticate plans in your update
   transport.
 
-## Prerequisites
+## Prerequisites of Machine Learning
 
 - **Build and run:** a C++23 compiler (clang or gcc). CMake is supported but
   optional — `build/build.sh` drives a full build with `sh` alone.
@@ -76,7 +76,7 @@ python3 tool/export_model.py --demo out/
 
 Exit code `0` means the model improved and was committed. Exit code `3` means it didn't — and the device was left untouched. That, in miniature, is the entire philosophy.
 
-## How to read these docs
+## How to Read these Documents
 
 These documents aim to be educational as well as descriptive. SeeML happens to be a small, complete instance of several of computer science's greatest hits — compilers, virtual machines, calculus done by a program, cache-aware algorithms, crash-safe storage — and the docs teach each idea from first principles before showing you SeeML's implementation of it. That includes the machine learning: if you've completed CS50x (or equivalent), you have every prerequisite; the ML itself is taught here, with the compiler as the textbook.
 
@@ -90,7 +90,7 @@ Read them in this order:
 | [docs/formats.md](docs/formats.md) | The four binary formats on disk — bytes, offsets, magic numbers, and hashes — and why each field is there. |
 | [test/README.md](test/README.md) | How the test tree mirrors the code, and how you test calculus with arithmetic. |
 
-## Design principles, in one breath
+## Design Principles
 
 If you remember nothing else, remember these five, because every file in this repository is an application of one of them:
 
