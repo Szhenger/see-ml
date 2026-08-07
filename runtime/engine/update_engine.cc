@@ -194,6 +194,33 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
         num_classes = classes;
     }
 
+  // Token-native plans (v7): the vocab bound plays the role class labels'
+  // softmax width plays — every staged token indexes embedding rows, so the
+  // narrowest table anywhere is the runtime bound the feeder contract will
+  // enforce, and a token plan with NO embedding would leave the ids
+  // entirely unvalidated (and meaningless), so it is rejected. Sequence
+  // geometry must divide the batch: staging serves whole records.
+  uint64_t vocab_bound = 0;
+  for (const auto* program : {&train, &merge, &eval})
+    for (const up::UpdateInstruction& ins : *program)
+      if (static_cast<up::OpCode>(ins.opcode) == up::OpCode::kEmbedFwd) {
+        const uint64_t vocab = ins.out[1] >> 32;
+        if (vocab != 0 && (vocab_bound == 0 || vocab < vocab_bound))
+          vocab_bound = vocab;
+      }
+  if (header.input_kind > 1)
+    return diag::executing::Error("unknown plan input kind " +
+                                  std::to_string(header.input_kind));
+  if (header.input_kind == 1) {
+    if (vocab_bound == 0)
+      return diag::executing::Error(
+          "token plan carries no embedding — its token ids could never be "
+          "validated");
+    if (header.seq_len == 0 || header.batch % header.seq_len != 0)
+      return diag::executing::Error(
+          "token plan sequence length must be nonzero and divide the batch");
+  }
+
   // The single allocation of the update: the pre-planned arena. Its size was
   // known at compile time — the device's resource contract.
   const size_t arena_bytes = (header.arena_size + 63) & ~size_t{63};
@@ -212,6 +239,7 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   eval_program_ = std::move(eval);
   emit_table_ = std::move(emit);
   num_classes_ = num_classes;
+  vocab_bound_ = vocab_bound;
   eval_probs_ref_ = eval_probs_ref;
   eval_softmax_rows_ = eval_softmax_rows;
   eval_softmax_cols_ = eval_softmax_cols;
@@ -416,6 +444,11 @@ void UpdateEngine::Execute(const std::vector<up::UpdateInstruction>& program) {
                   ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
                   ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
         break;
+      case up::OpCode::kEmbedFwd:
+        k::EmbedFwd(reinterpret_cast<const int32_t*>(ReadPtr(ins.in[0])),
+                    ReadPtr(ins.in[1]), WritePtr(ins.in[2]), ins.out[0],
+                    ins.out[1] & 0xFFFFFFFFu);
+        break;
     }
   }
 }
@@ -457,7 +490,7 @@ void UpdateEngine::ExecuteTrainOnce() {
 std::expected<void, std::string> UpdateEngine::ValidateDataset(
     Dataset& data) const {
   // Feeder boundary: the corpus must match the compiled plan's geometry.
-  return VerifyFeederContract(header_, data, num_classes_);
+  return VerifyFeederContract(header_, data, num_classes_, vocab_bound_);
 }
 
 std::expected<float, std::string> UpdateEngine::Evaluate(Dataset& data) {
@@ -504,9 +537,14 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
   // pipelines; the batch sequence is identical to the serial one, and the
   // eval program never mutates the dataset. Scoped so the feeder joins
   // before the caller sees the dataset single-threaded again.
+  // A token corpus's sample unit is one RECORD of seq_len rows; a feature
+  // corpus's is one row. All serving arithmetic below counts samples.
+  const uint64_t rows_per_sample =
+      header_.input_kind == 1 ? header_.seq_len : 1;
+  const uint64_t samples_per_step = header_.batch / rows_per_sample;
   const uint64_t batches =
-      std::max<uint64_t>(1, (data.num_samples() + header_.batch - 1) /
-                                header_.batch);
+      std::max<uint64_t>(1, (data.num_samples() + samples_per_step - 1) /
+                                samples_per_step);
   double total = 0.0;
   uint64_t correct = 0, counted = 0;
   {
@@ -523,11 +561,14 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
         // NextBatch copied the staged batch into the slots before Execute,
         // so label_slot still holds THIS batch while the feeder stages the
         // next one internally.
-        const uint64_t served = b * header_.batch;
-        const uint64_t real = std::min<uint64_t>(
-            header_.batch, data.num_samples() > served
-                               ? data.num_samples() - served
-                               : 0);
+        const uint64_t served = b * samples_per_step;
+        const uint64_t real_samples = std::min<uint64_t>(
+            samples_per_step, data.num_samples() > served
+                                  ? data.num_samples() - served
+                                  : 0);
+        // Every ROW of a real sample is judged (token records carry
+        // seq_len positions each); wrapped duplicate samples are excluded.
+        const uint64_t real = real_samples * rows_per_sample;
         const float* probs = ReadPtr(eval_probs_ref_);
         const auto* labels = reinterpret_cast<const int32_t*>(label_slot);
         for (uint64_t r = 0; r < real; ++r) {

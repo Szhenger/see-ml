@@ -385,6 +385,40 @@ TEST(ForwardBuilder, RejectsSequenceOpsWithoutSeqLen) {
                         "declares no seq_len");
 }
 
+TEST(ForwardBuilder, BuildsTokenDecoderThroughEmbedding) {
+  SmfModel model = seeml::testing::MakeTinyTokenDecoder(16, 8, 2, 4, 12, 7);
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::I32, sir::Shape{8});
+  ASSERT_OK_AND_ASSIGN(sir::Value * out,
+                       BuildForward(block, model, "", build.input, 8, build));
+  EXPECT_TRUE(out->shape() == sir::Shape({8, 16}));  // [rows, vocab]
+  EXPECT_TRUE(block.validate());
+  EXPECT_EQ(CountOps(block, "sc_high.embedding"), 1u);
+}
+
+TEST(ForwardBuilder, RejectsFloatConsumerOfTokenInput) {
+  SmfModel model = seeml::testing::MakeTinyTokenDecoder(16, 8, 2, 4, 12, 7);
+  // A residual add reading the raw token input would treat ids as floats.
+  for (auto& op : model.ops)
+    if (op.name == "res1") op.inputs[0] = "x";
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::I32, sir::Shape{8});
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, 8, build),
+                        "only Embedding may read");
+}
+
+TEST(ForwardBuilder, RejectsEmbeddingWithoutTokenInput) {
+  SmfModel model = seeml::testing::MakeTinyTokenDecoder(16, 8, 2, 4, 12, 7);
+  model.tensors[0].dims = {-1, 8};  // input demoted back to feature rows
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::F32, sir::Shape{8, 8});
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, 8, build),
+                        "rank-1 dynamic");
+}
+
 TEST(ForwardBuilder, RejectsSeqLenPastInt64) {
   // Hostile u64 seq_len past INT64_MAX would wrap negative through the
   // int64 casts (rows % -1 == 0 accepts every batch) and reach the parser

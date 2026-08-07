@@ -41,6 +41,17 @@ void Scale(const float* x, float* out, float alpha, size_t n) {
   });
 }
 
+void EmbedFwd(const int32_t* tokens, const float* table, float* out,
+              size_t rows, size_t dim) {
+  up::ParallelFor(rows, RowGrain(dim, kGrainCheap),
+                  [&](size_t r0, size_t r1, size_t) {
+    for (size_t r = r0; r < r1; ++r)
+      std::memcpy(out + r * dim,
+                  table + static_cast<size_t>(tokens[r]) * dim,
+                  dim * sizeof(float));
+  });
+}
+
 void ReduceRows(const float* dy, float* db, size_t rows, size_t cols) {
   // Partitioned over db's columns: each chunk owns a column slice and walks
   // the rows in order, so per-column accumulation order — and therefore the

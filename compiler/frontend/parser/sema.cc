@@ -77,6 +77,43 @@ std::expected<void, std::string> CheckGraph(const SmfModel& model) {
   if (!all_outputs.contains(model.output_name))
     return parsing::Error("model output '" + model.output_name +
                           "' was never produced by an operation");
+
+  // Token-input discipline (SMF v4): a rank-1 dynamic ({-1}) non-const
+  // input declares i32 token ids. That declaration and kEmbedding must
+  // appear together; every consumer of the input must be an embedding (any
+  // other op would read the ids as f32 features); and every embedding must
+  // read the graph input directly (a lookup over computed activations has
+  // no meaning here).
+  const SmfTensor* input_tensor = nullptr;
+  for (const SmfTensor& t : model.tensors)
+    if (t.name == model.input_name) input_tensor = &t;
+  const bool token_input = input_tensor && !input_tensor->is_const &&
+                           input_tensor->dims.size() == 1 &&
+                           input_tensor->dims[0] == -1;
+  bool any_embedding = false;
+  for (const SmfOp& op : model.ops) {
+    if (op.kind == SmfOpKind::kEmbedding) {
+      any_embedding = true;
+      if (op.inputs.empty() || op.inputs[0] != model.input_name)
+        return parsing::OpError(
+            "Embedding", op.name,
+            "must read the graph input's token ids directly");
+    } else if (token_input) {
+      for (const std::string& in : op.inputs)
+        if (in == model.input_name)
+          return parsing::OpError(
+              "op", op.name,
+              "consumes the token input as floats; only Embedding may read "
+              "it");
+    }
+  }
+  if (any_embedding && !token_input)
+    return parsing::Error(
+        "Embedding requires the model input to be a rank-1 dynamic ({-1}) "
+        "token tensor");
+  if (token_input && !any_embedding)
+    return parsing::Error(
+        "a token input requires at least one Embedding consumer");
   return {};
 }
 
@@ -199,6 +236,19 @@ std::expected<void, std::string> CheckSeqGeometry(const char* unit,
 std::expected<void, std::string> CheckRope(const SmfOp& op, const sir::Value& x,
                                            uint32_t heads, uint64_t seq_len) {
   return CheckSeqGeometry("Rope", op, x, heads, seq_len, /*even_head=*/true);
+}
+
+std::expected<void, std::string> CheckEmbedding(const SmfOp& op,
+                                                const sir::Value& tokens,
+                                                const sir::Value& table) {
+  if (tokens.dtype() != sir::DataType::I32 ||
+      tokens.shape().dims.size() != 1)
+    return parsing::OpError("Embedding", op.name,
+                            "tokens must be the rank-1 i32 graph input");
+  if (table.shape().dims.size() != 2)
+    return parsing::OpError("Embedding", op.name,
+                            "table must be a rank-2 [vocab, dim] weight");
+  return {};
 }
 
 std::expected<void, std::string> CheckAttention(const SmfOp& op,

@@ -150,7 +150,37 @@ std::expected<void, std::string> VerifyExecutorContract(
 }
 
 std::expected<void, std::string> VerifyFeederContract(
-    const up::PlanHeader& header, Dataset& data, uint64_t num_classes) {
+    const up::PlanHeader& header, Dataset& data, uint64_t num_classes,
+    uint64_t vocab_bound) {
+  if (header.input_kind == 1) {
+    // Token plan: the corpus must be token records of exactly seq_len ids
+    // (staging serves batch / seq_len whole records into batch i32 rows),
+    // and every id must index inside both the narrowest embedding table
+    // and — as a derived next-token label — the narrowest softmax width.
+    if (data.input_kind() != 1)
+      return diag::executing::Error(
+          "the compiled plan takes token ids, but the dataset carries "
+          "feature rows");
+    if (data.input_dim() != header.seq_len)
+      return diag::executing::Error(
+          "dataset sequence length does not match the compiled plan");
+    if (header.input_floats != header.batch)
+      return diag::executing::Error(
+          "token plan input slot does not hold one id per batch row");
+    uint64_t batch_label_bytes = 0;
+    if (!MulOk(header.batch, sizeof(int32_t), &batch_label_bytes) ||
+        batch_label_bytes != header.label_bytes)
+      return diag::executing::Error(
+          "token plan label slot does not hold one id per batch row");
+    uint64_t bound = vocab_bound;
+    if (num_classes != 0 && (bound == 0 || num_classes < bound))
+      bound = num_classes;
+    return data.ValidateClassLabels(bound);
+  }
+  if (data.input_kind() != 0)
+    return diag::executing::Error(
+        "the compiled plan takes feature rows, but the dataset carries "
+        "token ids");
   uint64_t expected_floats = 0;
   if (!MulOk(header.batch, data.input_dim(), &expected_floats) ||
       expected_floats != header.input_floats)

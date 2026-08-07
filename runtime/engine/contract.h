@@ -61,10 +61,14 @@ namespace seeml::update_rt {
 
 /// The dataset can feed this plan: batch x input_dim matches the input
 /// slot, the label kind and per-batch width match the label slot, and
-/// class labels (when used) all index inside the softmax width.
+/// class labels (when used) all index inside the softmax width. For token
+/// plans (header.input_kind == 1) the corpus must be a token corpus whose
+/// record length equals the plan's seq_len, and every token id must index
+/// inside BOTH the narrowest embedding table (`vocab_bound`) and — via the
+/// derived next-token labels — the narrowest softmax width.
 [[nodiscard]] std::expected<void, std::string> VerifyFeederContract(
     const seeml::update::PlanHeader& header, Dataset& data,
-    uint64_t num_classes);
+    uint64_t num_classes, uint64_t vocab_bound);
 
 }  // namespace seeml::update_rt
 

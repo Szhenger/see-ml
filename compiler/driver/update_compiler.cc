@@ -53,16 +53,28 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
     return generating::Error(generating::kDriver,
                              "source model lacks input metadata");
   const int64_t in_dim = in_tensor->dims.back();
-  // The reader restricts the dynamic (-1) marker to the leading dim, but
-  // this is the driver's own contract too: a non-positive width here would
-  // flow into the SIR as a dynamic dim, bind zero-byte slots, and produce
-  // a sealed plan the runtime rejects — a compiler bug surfaced as a
-  // validator error.
-  if (in_dim <= 0)
+  // A rank-1 dynamic ({-1}) input declares i32 token ids (SMF v4); sema
+  // enforces that only Embedding consumes it. Otherwise the reader
+  // restricts the dynamic marker to the leading dim, and this is the
+  // driver's own contract too: a non-positive width would flow into the
+  // SIR as a dynamic dim, bind zero-byte slots, and produce a sealed plan
+  // the runtime rejects — a compiler bug surfaced as a validator error.
+  const bool token_input = in_tensor->dims.size() == 1 && in_dim == -1;
+  if (!token_input && in_dim <= 0)
     return generating::Error(generating::kDriver,
                              "source model input width must be static and "
                              "positive");
   const int64_t batch = config_.batch;
+  if (token_input) {
+    if (source.seq_len == 0)
+      return generating::Error(generating::kDriver,
+                               "token models must declare a seq_len");
+    if (source.seq_len > static_cast<uint64_t>(batch) ||
+        batch % static_cast<int64_t>(source.seq_len) != 0)
+      return generating::Error(
+          generating::kDriver,
+          "the compiled batch must be a whole number of sequences");
+  }
 
   // --- 0. Fail fast: prove the training footprint fits local memory. -------
   // The teacher is a frozen forward — no backward caches its activations —
@@ -81,8 +93,10 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   // --- 1. Forward SIR: student (+ frozen teacher sharing the input). -------
   sir::Block block;
   GraphBuild build;
-  build.input =
-      block.addArgument(sir::DataType::F32, sir::Shape{batch, in_dim});
+  build.input = token_input
+                    ? block.addArgument(sir::DataType::I32, sir::Shape{batch})
+                    : block.addArgument(sir::DataType::F32,
+                                        sir::Shape{batch, in_dim});
 
   auto student_out = BuildForward(block, source, "", build.input, batch, build);
   if (!student_out) return std::unexpected(student_out.error());
@@ -95,7 +109,10 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   sir::Value* teacher_out = nullptr;
   if (wants_teacher) {
     const SmfTensor* t_in = teacher->FindTensor(teacher->input_name);
-    if (!t_in || t_in->dims.empty() || t_in->dims.back() != in_dim)
+    const bool t_token = t_in && t_in->dims.size() == 1 &&
+                         t_in->dims.back() == -1;
+    if (!t_in || t_in->dims.empty() ||
+        (token_input ? !t_token : t_in->dims.back() != in_dim))
       return generating::Error(generating::kDriver,
                                "teacher input dimensionality mismatch");
     auto t_out = BuildForward(block, *teacher, "t::", build.input, batch, build);
@@ -442,8 +459,14 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   header.arena_size = AlignUp(binding->arena_size);
   header.persistent_size = binding->persistent_size;
   header.input_ref = binding->refs.at(build.input);
-  header.input_floats = static_cast<uint64_t>(batch) *
-                        static_cast<uint64_t>(in_dim);
+  // Token plans stage one i32 id per batch row; feature plans stage
+  // batch x in_dim f32 elements. Both are 4-byte elements, so the slot's
+  // byte size is input_floats * 4 either way.
+  header.input_floats = token_input ? static_cast<uint64_t>(batch)
+                                    : static_cast<uint64_t>(batch) *
+                                          static_cast<uint64_t>(in_dim);
+  header.input_kind = token_input ? 1 : 0;
+  header.seq_len = source.seq_len;
   header.label_ref = labels ? binding->refs.at(labels) : kNullRef;
   header.label_bytes = label_bytes;
   header.label_kind = label_kind;

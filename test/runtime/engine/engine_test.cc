@@ -110,11 +110,11 @@ TEST(EngineContract, FeederContractMatchesCorpusToPlanGeometry) {
 
   ASSERT_OK_AND_ASSIGN(Dataset fits,
                        MakeClassificationData(32, kInDim, 3));
-  EXPECT_TRUE(VerifyFeederContract(header, fits, kOutDim).has_value());
+  EXPECT_TRUE(VerifyFeederContract(header, fits, kOutDim, 0).has_value());
 
   ASSERT_OK_AND_ASSIGN(Dataset wrong_width,
                        MakeClassificationData(32, kInDim + 1, 3));
-  const auto r = VerifyFeederContract(header, wrong_width, kOutDim);
+  const auto r = VerifyFeederContract(header, wrong_width, kOutDim, 0);
   ASSERT_FALSE(r.has_value());
   EXPECT_TRUE(WellFormedDiagnostic(r.error()));
   EXPECT_NE(r.error().find("input width does not match"), std::string::npos);

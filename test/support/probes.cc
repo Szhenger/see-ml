@@ -31,6 +31,19 @@ void WriteArenaF32(UpdateEngine& e, uint64_t ref, uint64_t index, float v) {
   reinterpret_cast<float*>(e.arena() + update::RefOffset(ref))[index] = v;
 }
 
+void FillTokenSlots(UpdateEngine& e, const std::vector<int32_t>& tokens,
+                    const std::vector<int32_t>& labels) {
+  if (tokens.size() != e.header().input_floats ||
+      labels.size() * sizeof(int32_t) != e.header().label_bytes) {
+    std::fprintf(stderr, "FillTokenSlots: batch does not match the header\n");
+    std::abort();
+  }
+  std::memcpy(e.arena() + update::RefOffset(e.header().input_ref),
+              tokens.data(), tokens.size() * sizeof(int32_t));
+  std::memcpy(e.arena() + update::RefOffset(e.header().label_ref),
+              labels.data(), labels.size() * sizeof(int32_t));
+}
+
 void FillSlots(UpdateEngine& e, const std::vector<float>& x,
                const std::vector<int32_t>& labels) {
   if (x.size() != e.header().input_floats ||

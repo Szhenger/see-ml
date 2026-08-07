@@ -614,6 +614,74 @@ TEST(UpdateSystem, QuantizedBaseTrainsAndCommitsWithoutBakingError) {
 // 9. Poisoned corpus aborts the update
 // =============================================================================
 
+// =============================================================================
+// 7c. Token-native input (plan v7): embedding gather end to end
+// =============================================================================
+
+TEST(UpdateSystem, TokenDecoderGradientsMatchFiniteDifferences) {
+  const int64_t vocab = 11, dim = 8, heads = 2, seq = 4, ffn = 10;
+  const int64_t batch = 8;  // 2 sequences of 4 token rows
+  SmfModel model =
+      seeml::testing::MakeTinyTokenDecoder(vocab, dim, heads, seq, ffn, 37);
+  UpdateConfig config = BaseConfig(batch);
+  config.lora.rank = 2;
+  config.emit_optimizer = false;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+
+  // Tokens follow the corpus's successor rule so labels are the true next
+  // ids — the exact staging a token Dataset would produce.
+  std::vector<int32_t> tokens(batch), labels(batch);
+  int32_t t = 3;
+  for (int64_t i = 0; i < batch; ++i) {
+    tokens[i] = t;
+    t = static_cast<int32_t>((3 * t + 1) % vocab);
+    labels[i] = t;
+  }
+  seeml::testing::FillTokenSlots(engine, tokens, labels);
+  GradientCheck(compiled, engine, 3737, /*tol=*/3e-2);
+}
+
+TEST(UpdateSystem, TokenDecoderTrainsMergesAndCommits) {
+  const int64_t vocab = 16, dim = 8, heads = 2, seq = 4, ffn = 16;
+  const int64_t batch = 16;  // 4 sequences per step
+  SmfModel model =
+      seeml::testing::MakeTinyTokenDecoder(vocab, dim, heads, seq, ffn, 41);
+  UpdateConfig config = BaseConfig(batch);
+  config.optimizer.lr = 5e-3f;
+  config.optimizer.kind = OptimizerKind::kAdamW;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+
+  ASSERT_OK_AND_ASSIGN(Dataset data,
+                       seeml::testing::MakeTokenCorpus(256, 4, vocab, 43));
+  ASSERT_OK_AND_ASSIGN(auto report, engine.Train(data, 300, Quiet()));
+  // The successor rule is deterministic, so next-token loss is learnable.
+  EXPECT_LT(report.final_avg_loss, report.initial_avg_loss * 0.7f);
+
+  ASSERT_OK(engine.RunMerge());
+  ScopedTempDir dir;
+  const std::string src = dir.File("token_decoder.smf");
+  ASSERT_OK(SaveSmf(src, model));
+  ASSERT_OK_AND_ASSIGN(SmfModel disk_model, LoadSmf(src));
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate bound,
+                       UpdateCompiler(config).Compile(disk_model));
+  UpdateEngine bound_engine;
+  ASSERT_OK(bound_engine.LoadFromMemory(bound.plan.data(), bound.plan.size()));
+  ASSERT_OK_AND_ASSIGN(auto bound_report,
+                       bound_engine.Train(data, 200, Quiet()));
+  EXPECT_LT(bound_report.final_avg_loss, bound_report.initial_avg_loss);
+  ASSERT_OK(bound_engine.RunMerge());
+  const std::string out = dir.File("token_decoder_updated.smf");
+  ASSERT_OK(bound_engine.CommitToModel(src, out));
+  ASSERT_OK_AND_ASSIGN(SmfModel committed, LoadSmf(out));
+  EXPECT_NE(committed.content_hash, disk_model.content_hash);
+}
+
 TEST(UpdateSystem, AdapterInitializationIsWellDistributed) {
   // Bounds on the counter-based randn's output space: correct scale (std
   // 1/sqrt(K)), near-zero mean, and no serial correlation between adjacent

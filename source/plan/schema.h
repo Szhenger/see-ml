@@ -35,11 +35,19 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // changes meaning, so the readable floor stays. The validator rejects the
 // new opcodes in any pre-v6 plan — no pre-v6 compiler emits them, so their
 // appearance there is corruption, not a feature.
-inline constexpr uint32_t kSeeuVersion = 6;
+// v7: token-native input. Two fields carved from reserved (zero = the
+// pre-v7 behavior, so the floor stays): input_kind (0 = f32 feature rows,
+// 1 = i32 token ids) and seq_len (rows per sequence; the feeder serves
+// batch/seq_len token records per step). One new opcode, kEmbedFwd, gated
+// exactly like the v6 family.
+inline constexpr uint32_t kSeeuVersion = 7;
 
 // The version that introduced the transformer opcodes: plans below it must
 // not carry them, and are validated to.
 inline constexpr uint32_t kSeeuTransformerVersion = 6;
+
+// The version that introduced token-native input and kEmbedFwd.
+inline constexpr uint32_t kSeeuTokenVersion = 7;
 
 // The version that introduced instruction flags: plans below it must carry
 // flags == 0 on every instruction, and are validated to.
@@ -138,7 +146,15 @@ struct PlanHeader {
   // recorded here for introspection (seeu-dump). 0 = no clipping.
   float clip_norm = 0.0f;
 
-  uint64_t reserved[4] = {0, 0, 0, 0};
+  // --- v7: token-native input (both zero = pre-v7 f32-feature behavior).
+  // input_kind 1 means the input slot holds i32 token ids; seq_len is the
+  // rows-per-sequence the feeder contract and the attention geometry agree
+  // on (nonzero exactly when input_kind == 1 or the model is sequential).
+  uint32_t input_kind = 0;
+  uint32_t pad4 = 0;
+  uint64_t seq_len = 0;
+
+  uint64_t reserved[2] = {0, 0};
 };
 
 /// Maps a trained weight delta in the arena to the byte range it updates

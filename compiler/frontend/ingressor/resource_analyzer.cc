@@ -99,7 +99,10 @@ TrainingFootprint EstimateFootprintImpl(const SmfModel& model, int64_t batch,
       if (auto it = row_count.find(op.inputs[0]); it != row_count.end())
         r = it->second;
     switch (op.kind) {
-      case SmfOpKind::kMatMul: {
+      case SmfOpKind::kMatMul:
+      case SmfOpKind::kEmbedding: {
+        // Both produce [rows, dims[1] of the second operand]: the matmul's
+        // B width, or the embedding table's dim.
         if (op.inputs.size() != 2) break;
         auto it = tensors.find(op.inputs[1]);
         if (it != tensors.end() && it->second->dims.size() == 2 &&

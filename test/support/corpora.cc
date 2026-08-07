@@ -67,4 +67,21 @@ std::expected<Dataset, std::string> MakeUnlabeledData(uint64_t n,
                              /*label_kind=*/0, /*label_dim=*/0);
 }
 
+std::expected<Dataset, std::string> MakeTokenCorpus(uint64_t records,
+                                                    uint64_t seq,
+                                                    int64_t vocab,
+                                                    uint64_t seed) {
+  std::mt19937_64 rng(seed);
+  std::vector<int32_t> tokens;
+  tokens.reserve(records * (seq + 1));
+  for (uint64_t r = 0; r < records; ++r) {
+    int32_t t = static_cast<int32_t>(rng() % static_cast<uint64_t>(vocab));
+    for (uint64_t i = 0; i <= seq; ++i) {
+      tokens.push_back(t);
+      t = static_cast<int32_t>((3 * t + 1) % vocab);
+    }
+  }
+  return Dataset::FromTokens(std::move(tokens), records, seq);
+}
+
 }  // namespace seeml::testing

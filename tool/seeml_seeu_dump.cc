@@ -65,6 +65,7 @@ const char* OpName(uint16_t opcode) {
     case OpCode::kSoftmaxRowsBwd: return "softmax_rows.bwd";
     case OpCode::kAttnDQ:         return "attn.dq";
     case OpCode::kAttnDK:         return "attn.dk";
+    case OpCode::kEmbedFwd:       return "embed.fwd";
   }
   return "<unknown>";
 }
@@ -193,6 +194,10 @@ void Disassemble(const char* title, const UpdateInstruction* instrs,
       case OpCode::kSoftmaxRowsBwd:
         std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
                     ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
+        break;
+      case OpCode::kEmbedFwd:
+        std::printf("   rows: %" PRIu64 "  V/D: %" PRIu64 " %" PRIu64 "\n",
+                    ins.out[0], ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
         break;
       default:
         std::printf("   dims/aux: %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",

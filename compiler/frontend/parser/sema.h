@@ -65,6 +65,11 @@ namespace seeml::update::sema {
     const SmfOp& op, const seeml::sir::Value& x, uint32_t heads,
     uint64_t seq_len);
 
+/// Embedding: tokens are the rank-1 i32 graph input; table is rank-2.
+[[nodiscard]] std::expected<void, std::string> CheckEmbedding(
+    const SmfOp& op, const seeml::sir::Value& tokens,
+    const seeml::sir::Value& table);
+
 /// Attention: q/k/v rank-2 with identical shapes; heads (attr0) divides the
 /// width; the model declares a seq_len that divides the row count.
 [[nodiscard]] std::expected<void, std::string> CheckAttention(

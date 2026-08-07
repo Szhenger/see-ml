@@ -272,6 +272,52 @@ TEST(DatasetShuffle, IsSeededDeterministicAndCoversEachEpoch) {
   EXPECT_TRUE(xa == xb);
 }
 
+TEST(DatasetTokens, DerivedLabelsAreTheShiftedView) {
+  // Two records of seq 3 over ids 0..7: inputs are tokens[0..3), labels
+  // are tokens[1..4) — derived at serving time, never stored.
+  ASSERT_OK_AND_ASSIGN(
+      Dataset d, Dataset::FromTokens({0, 1, 2, 3, 4, 5, 6, 7}, 2, 3));
+  EXPECT_EQ(d.input_kind(), 1u);
+  EXPECT_EQ(d.label_kind(), 1u);
+  std::vector<int32_t> in(6), lab(6);
+  d.FillBatch(6, reinterpret_cast<float*>(in.data()),
+              reinterpret_cast<uint8_t*>(lab.data()));
+  EXPECT_TRUE(in == (std::vector<int32_t>{0, 1, 2, 4, 5, 6}));
+  EXPECT_TRUE(lab == (std::vector<int32_t>{1, 2, 3, 5, 6, 7}));
+  // Every token doubles as an embedding index and a label: the bound
+  // covers the whole stream.
+  EXPECT_OK(d.ValidateClassLabels(8));
+  EXPECT_ERROR_CONTAINS(d.ValidateClassLabels(7), "outside");
+}
+
+TEST(DatasetTokens, RoundTripsSplitsAndShufflesWholeRecords) {
+  ASSERT_OK_AND_ASSIGN(Dataset d,
+                       seeml::testing::MakeTokenCorpus(8, 4, 16, 77));
+  ScopedTempDir dir;
+  const std::string path = dir.File("tokens.sds");
+  ASSERT_OK(d.SaveToFile(path));
+  ASSERT_OK_AND_ASSIGN(Dataset loaded, Dataset::LoadFromFile(path));
+  EXPECT_EQ(loaded.input_kind(), 1u);
+  EXPECT_EQ(loaded.num_samples(), 8u);
+  EXPECT_EQ(loaded.input_dim(), 4u);
+
+  // Split holds out whole tail records.
+  ASSERT_OK_AND_ASSIGN(Dataset val, loaded.SplitValidation(0.25));
+  EXPECT_EQ(val.num_samples(), 2u);
+  EXPECT_EQ(loaded.num_samples(), 6u);
+
+  // Shuffled serving still emits contiguous records: each 4-row group's
+  // labels must be that group's shifted inputs (the successor property of
+  // the corpus makes any cross-record mixing visible immediately).
+  loaded.EnableShuffle(5);
+  std::vector<int32_t> in(24), lab(24);
+  loaded.FillBatch(24, reinterpret_cast<float*>(in.data()),
+                   reinterpret_cast<uint8_t*>(lab.data()));
+  for (int r = 0; r < 6; ++r)
+    for (int i = 0; i < 3; ++i)
+      EXPECT_EQ(lab[r * 4 + i], in[r * 4 + i + 1]);
+}
+
 TEST(DatasetShuffle, RestoreReplaysAcrossMultipleEpochs) {
   // RestoreServingPos promises an EXACT rewind even after the permutation
   // has been redrawn several times: the replay reconstructs the snapshot's
