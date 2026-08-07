@@ -63,6 +63,7 @@ Read in this order:
 | [docs/runtime.md](docs/runtime.md) | on-device runtime architecture: engine, feeder, executor, validator, custodian |
 | [docs/formats.md](docs/formats.md) | the binary formats: SMF models, SDS datasets, SEEU plans, SEKP checkpoints |
 | [test/README.md](test/README.md) | the test tree, the in-repo SeeTest harness, and how suites mirror the code |
+| [docs/workflows.md](docs/workflows.md) | continuous integration from first principles: what a workflow is, and what each of SeeML's asserts |
 | [docs/roadmap.md](docs/roadmap.md) | the remaining architecture-review projects, scoped and sequenced |
 | [docs/journey.md](docs/journey.md) | how the project got here: from a C compiler to an ML update compiler |
 
