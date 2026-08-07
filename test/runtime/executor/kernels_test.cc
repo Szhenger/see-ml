@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "runtime/executor/update_kernels.h"
@@ -683,6 +684,77 @@ TEST(Attention, BackwardPrimitivesMatchFiniteDifferences) {
   check(q, dq, 0);
   check(k2, dk, 1);
   check(v, dv, 2);
+}
+
+TEST(Loss, SingleClassSoftmaxIsExactlyCertain) {
+  // C = 1: every row's softmax is exactly 1 and the loss exactly 0 — the
+  // denominator always contains the max element's exp(0).
+  const size_t N = 3;
+  const std::vector<float> logits = {2.0f, -5.0f, 100.0f};
+  const std::vector<int32_t> labels = {0, 0, 0};
+  float loss = -1.0f;
+  std::vector<float> probs(N, 0.0f);
+  k::SoftmaxXEntFwd(logits.data(), labels.data(), &loss, probs.data(), N, 1);
+  EXPECT_EQ(loss, 0.0f);
+  for (float p : probs) EXPECT_EQ(p, 1.0f);
+}
+
+TEST(Loss, NanLogitPropagatesToTheLossSlot) {
+  // The engine's finite-loss guard depends on this: a NaN anywhere in the
+  // logits must surface in the loss, not be scrubbed by the max reduction.
+  const size_t N = 2, C = 3;
+  std::vector<float> logits(N * C, 0.5f);
+  logits[4] = std::numeric_limits<float>::quiet_NaN();
+  const std::vector<int32_t> labels = {0, 2};
+  float loss = 0.0f;
+  std::vector<float> probs(N * C);
+  k::SoftmaxXEntFwd(logits.data(), labels.data(), &loss, probs.data(), N, C);
+  EXPECT_TRUE(std::isnan(loss));
+}
+
+TEST(ClipNorm, ZeroGradientAndZeroCapAreExact) {
+  std::vector<float> g = {0.0f, 0.0f, 0.0f};
+  k::ClipNorm(g.data(), g.size(), 1.0f);  // ||g|| = 0: no 0/0, unchanged
+  for (float v : g) EXPECT_EQ(v, 0.0f);
+
+  std::vector<float> h = {3.0f, -4.0f};
+  k::ClipNorm(h.data(), h.size(), 0.0f);  // cap 0: scaled by exactly 0
+  for (float v : h) EXPECT_EQ(v, 0.0f);
+}
+
+TEST(LayerNorm, ZeroVarianceRowNormalizesToBeta) {
+  const size_t rows = 1, cols = 4;
+  const std::vector<float> x(cols, 7.25f);  // constant row: variance 0
+  const std::vector<float> gamma(cols, 2.0f);
+  const std::vector<float> beta = {0.5f, -1.0f, 3.0f, 0.0f};
+  std::vector<float> y(cols), mean(rows), rstd(rows);
+  k::LayerNormFwd(x.data(), gamma.data(), beta.data(), y.data(), mean.data(),
+                  rstd.data(), rows, cols);
+  // (x - mu) is exactly 0 per element, so y == beta bit-for-bit.
+  for (size_t c = 0; c < cols; ++c) EXPECT_EQ(y[c], beta[c]);
+}
+
+TEST(Gelu, BackwardStaysFiniteAtExtremeInputs) {
+  // In the saturated-tanh regime the sech^2 factor is a true zero while u'
+  // overflows; the dead term must be dropped, not evaluated as 0 * Inf.
+  const std::vector<float> x = {1e30f, -1e30f};
+  const std::vector<float> dy = {2.0f, 2.0f};
+  std::vector<float> dx(2);
+  k::GeluBwd(dy.data(), x.data(), dx.data(), 2);
+  EXPECT_EQ(dx[0], 2.0f);  // derivative saturates to 1
+  EXPECT_EQ(dx[1], 0.0f);  // derivative saturates to 0
+}
+
+TEST(Attention, SingleTokenSequenceIsIdentityOverV) {
+  // S = 1: the causal prefix is one element, P is exactly 1, and O copies V.
+  const size_t B = 2, S = 1, H = 2, d = 3, n = B * S * H * d;
+  const std::vector<float> q = RandnVector(n, 130);
+  const std::vector<float> k2 = RandnVector(n, 131);
+  const std::vector<float> v = RandnVector(n, 132);
+  std::vector<float> o(n), p(B * H * S * S);
+  k::AttnFwd(q.data(), k2.data(), v.data(), o.data(), p.data(), B, S, H, d);
+  for (float pv : p) EXPECT_EQ(pv, 1.0f);
+  for (size_t i = 0; i < n; ++i) EXPECT_EQ(o[i], v[i]);
 }
 
 TEST(Rope, GoldenValuesPinTheConvention) {

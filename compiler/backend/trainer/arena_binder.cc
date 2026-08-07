@@ -146,10 +146,15 @@ std::expected<ArenaBinding, std::string> BindArena(
       const size_t count = src->second->byte_size / sizeof(float);
       binding.rodata.resize(offset + count, 0);
       auto* dst = reinterpret_cast<int8_t*>(binding.rodata.data() + offset);
-      const float inv_scale = 1.0f / q->second;
+      // Divide, don't multiply by a hoisted reciprocal: for a denormal
+      // scale 1/scale is +Inf, which clamps every nonzero element to ±127
+      // and turns zeros into clamp(NaN) — UB on the int8 cast. The
+      // quantizer refuses denormal scales, but the pack must not rely on
+      // that upstream discipline for memory safety.
+      const float scale = q->second;
       ParallelFor(count, kWeightSweepGrain, [&](size_t b, size_t e, size_t) {
         for (size_t i = b; i < e; ++i) {
-          const float r = std::round(data[i] * inv_scale);
+          const float r = std::round(data[i] / scale);
           dst[i] = static_cast<int8_t>(std::clamp(r, -127.0f, 127.0f));
         }
       });

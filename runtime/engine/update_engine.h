@@ -151,6 +151,11 @@ class UpdateEngine {
   uint8_t* arena() { return arena_; }
   uint64_t step() const { return step_; }
   void SetStep(uint64_t s) { step_ = s; }
+  /// The scheduled learning rate at the current step — a pure function of
+  /// (header_, step_). Public so the schedule's boundary behavior (warmup
+  /// edges, horizon clamp, floor) is directly testable; it scales every
+  /// optimizer step.
+  float EffectiveLr() const;
 
   /// Executes the training instruction stream once against whatever is in the
   /// I/O slots right now (no data feeding). Used for gradient verification.
@@ -168,7 +173,6 @@ class UpdateEngine {
   [[nodiscard]] std::expected<void, std::string> ValidateDataset(
       Dataset& data) const;
   void Execute(const std::vector<seeml::update::UpdateInstruction>& program);
-  float EffectiveLr() const;  // schedule(step_) applied to header_.lr
 
   const float* ReadPtr(uint64_t ref) const;
   const int8_t* ReadPtrQ8(uint64_t ref) const;

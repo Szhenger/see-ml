@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -716,6 +717,61 @@ TEST(UpdateEngineTrain, TrainingIsBitwiseInvariantAcrossThreadCounts) {
             0);
   ASSERT_FALSE(persist_serial.empty());
   EXPECT_TRUE(persist_serial == persist_wide);
+}
+
+TEST(UpdateEngineMerge, RejectsNonFiniteMergeDeltas) {
+  // The training loop's loss guard reads the loss written BEFORE each
+  // step's backward + optimizer, so a gradient that overflows on the final
+  // executed step can poison the adapters unseen; RunMerge is the last
+  // line between a NaN delta and the committed model file.
+  UpdateConfig config = BaseConfig(kBatch);
+  SmfModel model = MakeMlp(kInDim, 10, 3, 1);
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+
+  // Sanity: clean adapters merge fine.
+  ASSERT_OK(engine.RunMerge());
+
+  // Poison one element of the first adapter's A. B is zeros at step 0, and
+  // NaN * 0 is NaN, so the materialized delta carries the poison.
+  ASSERT_FALSE(compiled.adapters.empty());
+  seeml::testing::WriteArenaF32(engine, compiled.adapters[0].a_ref, 0,
+                                std::numeric_limits<float>::quiet_NaN());
+  EXPECT_ERROR_CONTAINS(engine.RunMerge(), "non-finite");
+}
+
+TEST(UpdateEngineLr, CosineWithWarmupBoundaryBehavior) {
+  // EffectiveLr scales every optimizer step and previously had no test at
+  // all: pin the warmup ramp, the warmup boundary, the cosine floor at the
+  // horizon, and the clamp past it.
+  UpdateConfig config = BaseConfig(kBatch);
+  config.optimizer.lr = 0.1f;
+  config.optimizer.lr_schedule = LrSchedule::kCosineWithWarmup;
+  config.optimizer.warmup_steps = 10;
+  config.optimizer.min_lr_factor = 0.1f;
+  config.default_steps = 100;
+  const std::vector<uint8_t> plan = CompilePlan(config);
+  ASSERT_FALSE(plan.empty());
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
+
+  engine.SetStep(1);  // linear warmup: base * step / warmup
+  EXPECT_NEAR(engine.EffectiveLr(), 0.1f * 1.0f / 10.0f, 1e-7);
+  engine.SetStep(10);  // warmup boundary: exactly base
+  EXPECT_NEAR(engine.EffectiveLr(), 0.1f, 1e-7);
+  engine.SetStep(30);  // cosine decays monotonically between base and floor
+  const float mid_early = engine.EffectiveLr();
+  engine.SetStep(80);
+  const float mid_late = engine.EffectiveLr();
+  EXPECT_TRUE(mid_early > mid_late);
+  EXPECT_TRUE(mid_early < 0.1f);
+  EXPECT_TRUE(mid_late > 0.1f * 0.1f);
+  engine.SetStep(100);  // horizon: the floor
+  EXPECT_NEAR(engine.EffectiveLr(), 0.1f * 0.1f, 1e-6);
+  engine.SetStep(1000);  // past the horizon: clamped at the floor
+  EXPECT_NEAR(engine.EffectiveLr(), 0.1f * 0.1f, 1e-6);
 }
 
 }  // namespace

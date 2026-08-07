@@ -12,45 +12,59 @@ It turns out the answer is a compiler.
 
 ## First, what does it even mean to train a model?
 
-If you've taken CS50x but no machine-learning course, here is the entire idea, no mystery required. A neural network is just a function: input goes in (say, a few numbers describing a sensor reading), a prediction comes out. What makes it interesting is that the function's behavior is controlled by a large array of numbers called **weights** (or *parameters*) — and nobody sets them by hand. Instead, **training** is a loop:
+| document | what it covers |
+|---|---|
+| [docs/usage.md](docs/usage.md) | the workflow: export, compile, run on-device; every CLI flag; threading and determinism |
+| [docs/compiler.md](docs/compiler.md) | build-host compiler architecture: frontend, analysis passes, backend, driver contracts |
+| [docs/runtime.md](docs/runtime.md) | on-device runtime architecture: engine, feeder, executor, validator, custodian |
+| [docs/formats.md](docs/formats.md) | the binary formats: SMF models, SDS datasets, SEEU plans, SEKP checkpoints |
+| [test/README.md](test/README.md) | the test tree, the in-repo SeeTest harness, and how suites mirror the code |
+| [docs/roadmap.md](docs/roadmap.md) | the remaining architecture-review projects, scoped and sequenced |
+| [docs/journey.md](docs/journey.md) | how the project got here: from a C compiler to an ML update compiler |
 
-1. Run the function on a few examples and measure *how wrong* the predictions were, as a single number called the **loss**. Smaller is better.
-2. Using calculus, compute for every weight which direction of adjustment would reduce the loss. That per-weight list of directions is the **gradient**.
-3. Nudge every weight a small step in its direction. The rule that decides exactly how big a step is called the **optimizer**.
-4. Repeat, a few hundred or thousand times, until the loss stops improving.
+## Scope and limitations
 
-That's it — measure, differentiate, nudge, repeat. Everything else in machine learning is refinement of that loop, and every piece of it (the loss, the calculus, the optimizer, the data handling) is something SeeML's documentation will teach you properly, using the code itself as the textbook.
+What SeeML can train today, stated up front:
 
-## The big idea
+- **Models.** Feed-forward and decoder-transformer graphs over eleven
+  operator kinds: `MatMul`, `AddBias`, `Relu`, `Gelu`, `Silu`, `Mul`,
+  `LayerNorm` (SMF v2), plus `Add`, `RmsNorm`, `Rope`, and causal
+  `Attention` (SMF v3, with model-level sequence geometry) — enough for
+  pre-norm decoder blocks with SwiGLU MLPs. The PyTorch exporter accepts an
+  `nn.Sequential` of `Linear`/activation/`LayerNorm` modules, and
+  `export_decoder_smf` emits decoder stacks from plain weight arrays
+  (embedding lookup stays outside the update: corpora carry pre-embedded
+  rows). The compiler's intermediate representation additionally models 2-D
+  convolution (lowered to matrix multiplication via im2col), but
+  grouped/dilated forms are rejected and the SMF container does not yet
+  carry convolutions.
+- **Training method.** LoRA adapters on frozen `MatMul` weights only — the
+  base model is never trained directly. Optimizers: SGD or AdamW, one
+  parameter group. Losses: cross-entropy, MSE, KL distillation from a
+  teacher model, or a weighted cross-entropy + KL composite.
+- **Numerics.** Training is f32 throughout. `--quantize-base` stores the
+  *frozen* weights as int8 in read-only data; because commit applies deltas
+  to the pristine f32 source file, quantization error is never baked into
+  the committed model.
+- **Shapes.** The batch size is fixed at compile time and baked into the
+  plan; the dataset must match the compiled geometry.
+- **Target machine.** The compiler derives its cache tilings from the
+  machine it runs on (host = target). The emitted package cross-compiles
+  (set `CXX`), but tilings remain build-host-derived hints. Execution is
+  CPU; on Apple hosts a hardware-validated Metal GEMM dispatch harness
+  exists (roadmap Project 5), but the engine does not yet dispatch to it.
+- **Integrity, not authenticity.** All hashing is FNV-1a — a corruption and
+  mismatch detector, not a signature. Authenticate plans in your update
+  transport.
 
-SeeML treats one complete training job — that entire loop, plus evaluation and the final weight patch — as a *program to be compiled ahead of time*. On a build machine, the compiler:
+## Prerequisites
 
-1. reads a **frozen** model — one whose existing weights it will never modify,
-2. grafts small trainable side-matrices called **LoRA adapters** onto it, so the update learns thousands of new numbers instead of retraining millions of old ones (the linear algebra that makes this work is taught in [docs/compiler.md](docs/compiler.md)),
-3. *derives the calculus itself* — the compiler works out step 2 of the training loop from the model's structure, a technique called automatic differentiation, and appends the optimizer's nudge as ordinary instructions,
-4. plans every byte of memory the job will ever touch, and
-5. emits a single artifact: a `.seeu` **update plan** — three fixed instruction streams (train, evaluate, merge) plus data, every offset already decided.
-
-On the device, a **runtime** of about a dozen C++ files — no framework, no dependencies — validates that plan, executes it with one memory allocation, checks whether the model actually improved, and only then patches the model file, atomically. If the loss didn't improve, or the power failed mid-write, the original model remains untouched, byte for byte.
-
-And because every parallel computation in SeeML is **bitwise-deterministic** — the same plan, data, and seed produce the *same bits* on one core or eight — a training run on your laptop reproduces exactly on the device. Thread count is a throughput knob, not a numerics knob.
-
-That's the whole product: `model.smf + corpus.sds → seeml-update-compile → update_plan.seeu → model_update → updated model, or no change at all`.
-
-## What's in the box
-
-```
-source/     the source language: model format, plan ABI, parallel substrate, hashing
-compiler/   the ahead-of-time compiler: frontend → analysis → backend, with a
-            driver that verifies every subsystem boundary
-runtime/    the zero-dependency on-device half: a little VM, its kernels, a
-            corpus feeder, a load-time validator, and durable storage
-tool/       export_model.py (PyTorch → SMF), the compiler CLI, a plan disassembler
-test/       SeeTest, an in-tree harness, with one suite per module
-docs/       what you're about to read
-```
-
-## Quick start
+- **Build and run:** a C++23 compiler (clang or gcc). CMake is supported but
+  optional — `build/build.sh` drives a full build with `sh` alone.
+- **Model export only:** Python 3 with PyTorch (`tool/export_model.py`).
+- **On-device:** nothing. The runtime is zero-dependency and vendored into
+  every emitted package; the package builds with no access to this
+  repository.
 
 ```bash
 # 0. Build the tools (any C++23 compiler)

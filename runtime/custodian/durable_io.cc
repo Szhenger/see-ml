@@ -5,6 +5,7 @@
 #include "source/parallel/parallel_for.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <fstream>
 #include <utility>
@@ -15,6 +16,7 @@
 #include <sys/file.h>
 #include <unistd.h>
 #else
+#include <io.h>
 #include <windows.h>
 #endif
 
@@ -22,9 +24,30 @@ namespace seeml::update_rt {
 
 namespace up = seeml::update;
 
+namespace {
+
+/// Per-writer-unique sidecar name in the destination's directory (rename
+/// atomicity requires same-filesystem). A fixed ".tmp" would let two
+/// concurrent writers to one path interleave on a shared inode and rename
+/// a mixed-content file into place; pid + a process-local counter keeps
+/// every writer on its own sidecar. Crash leftovers are inert — nothing
+/// ever reads a sidecar it did not just create.
+std::string UniqueTmpPath(const std::string& path) {
+  static std::atomic<uint64_t> counter{0};
+#ifndef _WIN32
+  const unsigned long pid = static_cast<unsigned long>(::getpid());
+#else
+  const unsigned long pid = static_cast<unsigned long>(::GetCurrentProcessId());
+#endif
+  return path + ".tmp." + std::to_string(pid) + "." +
+         std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+}
+
+}  // namespace
+
 std::expected<void, std::string> WriteFileDurable(
     const std::string& path, std::initializer_list<ByteSpan> parts) {
-  const std::string tmp = path + ".tmp";
+  const std::string tmp = UniqueTmpPath(path);
 #ifndef _WIN32
   const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0)
@@ -165,11 +188,24 @@ std::expected<uint64_t, std::string> HashFileContent(const std::string& path) {
 
 // --- CommitLock --------------------------------------------------------------
 
+namespace {
+
+/// Releases whichever handle kind this platform stores in CommitLock.
+void ReleaseLockHandle(intptr_t handle) {
+#ifndef _WIN32
+  if (handle >= 0) ::close(static_cast<int>(handle));  // drops the flock
+#else
+  if (handle != -1) ::CloseHandle(reinterpret_cast<HANDLE>(handle));
+#endif
+}
+
+}  // namespace
+
 std::expected<CommitLock, std::string> CommitLock::Acquire(
     const std::string& target_path) {
   CommitLock lock;
-#ifndef _WIN32
   const std::string lock_path = target_path + ".lock";
+#ifndef _WIN32
   const int fd = ::open(lock_path.c_str(), O_RDWR | O_CREAT, 0644);
   if (fd < 0)
     return diag::persisting::Error(diag::persisting::kDurableIo,
@@ -181,31 +217,42 @@ std::expected<CommitLock, std::string> CommitLock::Acquire(
         "another update is committing to '" + target_path +
             "' — refusing to race it");
   }
-  lock.fd_ = fd;
+  lock.handle_ = fd;
 #else
-  (void)target_path;  // no advisory locking on the degraded Windows path
+  // dwShareMode = 0 is the exclusion: a second CreateFile on the live
+  // handle fails with a sharing violation, and process death releases it —
+  // the same crash-safe, no-stale-lock contract as flock.
+  HANDLE h = ::CreateFileA(lock_path.c_str(), GENERIC_WRITE, /*share=*/0,
+                           nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL,
+                           nullptr);
+  if (h == INVALID_HANDLE_VALUE) {
+    if (::GetLastError() == ERROR_SHARING_VIOLATION)
+      return diag::persisting::Error(
+          diag::persisting::kDurableIo,
+          "another update is committing to '" + target_path +
+              "' — refusing to race it");
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "cannot open lock '" + lock_path + "'");
+  }
+  lock.handle_ = reinterpret_cast<intptr_t>(h);
 #endif
   return lock;
 }
 
-CommitLock::CommitLock(CommitLock&& o) noexcept : fd_(o.fd_) { o.fd_ = -1; }
+CommitLock::CommitLock(CommitLock&& o) noexcept : handle_(o.handle_) {
+  o.handle_ = -1;
+}
 
 CommitLock& CommitLock::operator=(CommitLock&& o) noexcept {
   if (this != &o) {
-#ifndef _WIN32
-    if (fd_ >= 0) ::close(fd_);
-#endif
-    fd_ = o.fd_;
-    o.fd_ = -1;
+    ReleaseLockHandle(handle_);
+    handle_ = o.handle_;
+    o.handle_ = -1;
   }
   return *this;
 }
 
-CommitLock::~CommitLock() {
-#ifndef _WIN32
-  if (fd_ >= 0) ::close(fd_);  // closing drops the flock
-#endif
-}
+CommitLock::~CommitLock() { ReleaseLockHandle(handle_); }
 
 // --- DurableFileEdit ---------------------------------------------------------
 
@@ -238,6 +285,16 @@ std::expected<DurableFileEdit, std::string> DurableFileEdit::Begin(
     if (in.bad())
       return diag::persisting::Error(diag::persisting::kDurableIo,
                                      "cannot read '" + source + "'");
+    // The final sub-buffer chunk may still sit in the filebuf; the
+    // destructor's flush swallows failure, which would leave a silently
+    // truncated sidecar that passes every size_-based bounds check (size_
+    // was counted from the SOURCE reads). Flush and close explicitly —
+    // close sets failbit when the flush fails.
+    out.flush();
+    out.close();
+    if (!out)
+      return diag::persisting::Error(diag::persisting::kDurableIo,
+                                     "cannot flush '" + edit.tmp_ + "'");
   }
 
   edit.f_ = std::fopen(edit.tmp_.c_str(), "r+b");
@@ -325,18 +382,32 @@ std::expected<void, std::string> DurableFileEdit::Commit() {
   if (std::fflush(f_) != 0)
     return diag::persisting::Error(diag::persisting::kDurableIo,
                                    "cannot flush '" + tmp_ + "'");
+  // Same durability discipline as WriteFileDurable on both platforms: data
+  // fsync (FlushFileBuffers) before the rename, and a rename that can
+  // replace an existing destination — CRT rename cannot on Windows, which
+  // would fail every repeat commit (the exact defect WriteFileDurable's
+  // Win32 branch documents).
 #ifndef _WIN32
-  // Same durability discipline as WriteFileDurable: data fsync before the
-  // rename, best-effort directory fsync after it.
   if (::fsync(::fileno(f_)) != 0)
     return diag::persisting::Error(diag::persisting::kDurableIo,
                                    "fsync of '" + tmp_ + "' failed");
-#endif
   std::fclose(f_);
   f_ = nullptr;
   if (std::rename(tmp_.c_str(), dest_.c_str()) != 0)
     return diag::persisting::Error(diag::persisting::kDurableIo,
                                    "atomic rename to '" + dest_ + "' failed");
+#else
+  if (!::FlushFileBuffers(
+          reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(f_)))))
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "fsync of '" + tmp_ + "' failed");
+  std::fclose(f_);
+  f_ = nullptr;
+  if (!::MoveFileExA(tmp_.c_str(), dest_.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    return diag::persisting::Error(diag::persisting::kDurableIo,
+                                   "atomic rename to '" + dest_ + "' failed");
+#endif
   committed_ = true;
 #ifndef _WIN32
   const size_t slash = dest_.find_last_of('/');

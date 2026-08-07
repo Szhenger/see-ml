@@ -119,7 +119,13 @@ class WorkerPool {
     // workers) and the first submitter's cleanup would null out the second's
     // freshly published job.
     std::lock_guard<std::mutex> submit(submit_mutex_);
-    tls_job_owner = true;
+    // RAII: an exception escaping anything below (worker spawn is the
+    // fallible step) must not leave the flag set, or this thread would run
+    // the inline path forever after one transient failure.
+    struct OwnerFlag {
+      OwnerFlag() { tls_job_owner = true; }
+      ~OwnerFlag() { tls_job_owner = false; }
+    } owner_flag;
     {
       std::lock_guard<std::mutex> lock(mutex_);
       SpawnWorkersLocked();
@@ -139,17 +145,25 @@ class WorkerPool {
       });
       job_ = nullptr;
     }
-    tls_job_owner = false;
     if (job.error) std::rethrow_exception(job.error);
   }
 
  private:
   void SpawnWorkersLocked() {
-    if (!workers_.empty()) return;
     if (thread_count_ == 0) thread_count_ = ResolveAutoThreadCount();
     // The caller participates, so the pool holds thread_count_ - 1 workers.
-    for (size_t i = 1; i < thread_count_; ++i)
-      workers_.emplace_back([this] { WorkerLoop(); });
+    // Top-up, not spawn-once, and degrade instead of aborting: a
+    // std::thread constructor throwing (thread/resource exhaustion) runs
+    // this job at whatever width exists — chunk geometry is shape-based,
+    // so results are identical — and the next Run retries the missing
+    // workers instead of freezing the narrowed pool forever.
+    while (workers_.size() + 1 < thread_count_) {
+      try {
+        workers_.emplace_back([this] { WorkerLoop(); });
+      } catch (const std::system_error&) {
+        break;
+      }
+    }
   }
 
   void JoinWorkers() {

@@ -53,12 +53,27 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
     return generating::Error(generating::kDriver,
                              "source model lacks input metadata");
   const int64_t in_dim = in_tensor->dims.back();
+  // The reader restricts the dynamic (-1) marker to the leading dim, but
+  // this is the driver's own contract too: a non-positive width here would
+  // flow into the SIR as a dynamic dim, bind zero-byte slots, and produce
+  // a sealed plan the runtime rejects — a compiler bug surfaced as a
+  // validator error.
+  if (in_dim <= 0)
+    return generating::Error(generating::kDriver,
+                             "source model input width must be static and "
+                             "positive");
   const int64_t batch = config_.batch;
 
   // --- 0. Fail fast: prove the training footprint fits local memory. -------
+  // The teacher is a frozen forward — no backward caches its activations —
+  // so it is estimated at its peak, not its sum; and --quantize-base stores
+  // frozen weights as int8 rodata at 1/4 size (under-counting the
+  // unselected remainder keeps the bound a lower bound). Both matter:
+  // an over-count here refuses compiles the exact final gate would pass.
   TrainingFootprint footprint = EstimateTrainingFootprint(source, batch);
   if (wants_teacher)
-    footprint += EstimateTrainingFootprint(*teacher, batch);
+    footprint += EstimateFrozenForwardFootprint(*teacher, batch);
+  if (config_.quantize_base) footprint.weight_bytes /= 4;
   if (auto fits = CheckTrainableLocally(footprint, config_.memory_budget_bytes);
       !fits)
     return std::unexpected(fits.error());
@@ -73,6 +88,9 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   if (!student_out) return std::unexpected(student_out.error());
   build.output = *student_out;
   const int64_t out_dim = build.output->shape().dims.at(1);
+  if (out_dim <= 0)
+    return generating::Error(generating::kDriver,
+                             "model output width must be static and positive");
 
   sir::Value* teacher_out = nullptr;
   if (wants_teacher) {

@@ -76,6 +76,19 @@ TEST(Smf, SaveLoadRoundTrip) {
   }
 }
 
+TEST(Smf, LoadRejectsDynamicDimBeyondLeading) {
+  // The dynamic (-1) marker binds to the compiled batch and is only
+  // meaningful as the LEADING dim; anywhere else it would flow into the
+  // SIR as a dynamic width, bind zero-byte slots, and seal a plan the
+  // runtime always rejects.
+  ScopedTempDir dir;
+  SmfModel model = MakeMlp(4, 8, 2, 1);
+  model.tensors[0].dims = {4, -1};  // x: dynamic width instead of batch
+  const std::string path = dir.File("dynwidth.smf");
+  ASSERT_OK(SaveSmf(path, model));
+  EXPECT_ERROR_CONTAINS(LoadSmf(path), "invalid dims");
+}
+
 TEST(Smf, SaveLoadRoundTripsV3TransformerFields) {
   // The v3 additions — model seq_len, per-op attr0, and the transformer op
   // kinds — must survive the byte round trip.

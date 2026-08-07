@@ -94,4 +94,19 @@ TEST(ResourceAnalyzer, CompilerAcceptsModelWithinBudget) {
   ASSERT_OK(UpdateCompiler(config).Compile(model));
 }
 
+TEST(ResourceAnalyzer, FrozenForwardEstimateChargesPeakNotSum) {
+  // A teacher under distillation has no backward: its transients die at
+  // their single reader and the binder reuses their slots, so the honest
+  // lower bound is the single widest live activation — summing them (the
+  // training model) over-counts and can refuse a feasible compile.
+  SmfModel model = MakeMlp(4, 8, 2, /*seed=*/1);
+  const TrainingFootprint train = EstimateTrainingFootprint(model, kBatch);
+  const TrainingFootprint frozen =
+      EstimateFrozenForwardFootprint(model, kBatch);
+  EXPECT_EQ(frozen.weight_bytes, train.weight_bytes);
+  // Peak term: the widest activation is [16 x 8] f32.
+  EXPECT_EQ(frozen.activation_bytes, kBatch * 8 * sizeof(float));
+  EXPECT_TRUE(frozen.activation_bytes < train.activation_bytes);
+}
+
 }  // namespace
