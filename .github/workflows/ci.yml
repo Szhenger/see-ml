@@ -145,6 +145,73 @@ jobs:
             corpus
           if-no-files-found: ignore
 
+  # --- Correctness: the product contract, end to end -------------------------
+  # The strongest claim in the docs — "the emitted package builds and runs
+  # with no access to this repository" — exercised for real: PyTorch export
+  # -> compile -> the package's own generated build.sh -> model_update
+  # training, gating, and committing on-device style. Then the determinism
+  # invariant at the artifact level: a fully serial re-run must commit a
+  # BITWISE-identical model. Outcome-robust: if the seeded demo's gate
+  # rejects (exit 3), the run is retried with --force — the invariants
+  # under test are build/run/commit/determinism, not the demo's luck.
+  e2e-package:
+    name: e2e (export -> compile -> package -> update)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install CPU torch for the exporter
+        run: pip install --index-url https://download.pytorch.org/whl/cpu torch numpy
+      - name: Export the demo model + corpus
+        run: python3 tool/export_model.py --demo out/
+      - name: Build the compiler
+        run: sh build/build.sh
+      - name: Compile the plan and build the emitted package
+        run: |
+          ./build/seeml-update-compile --source out/model.smf --out out/pkg \
+            --data-batch 16 --loss xent --lora-rank 8 --lr 5e-3 --steps 300 \
+            --report out/pkg/report.json --build
+          test -x out/pkg/model_update
+      - name: Verify the plan seal with the disassembler
+        run: ./build/seeml-seeu-dump out/pkg/update_plan.seeu | grep -q "(verified)"
+      - name: Run the update (parallel), tolerating a gate rejection
+        run: |
+          set +e
+          out/pkg/model_update --model out/model.smf --data out/corpus.sds \
+            --out out/updated.smf --seed 7 --val-frac 0.1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "gate: improved and committed"
+            echo "E2E_FORCE=" >> "$GITHUB_ENV"
+          elif [ "$rc" -eq 3 ]; then
+            echo "gate: rejected — exercising the commit path with --force"
+            out/pkg/model_update --model out/model.smf --data out/corpus.sds \
+              --out out/updated.smf --seed 7 --val-frac 0.1 --force
+            echo "E2E_FORCE=--force" >> "$GITHUB_ENV"
+          else
+            echo "model_update failed with a real error ($rc)"
+            exit "$rc"
+          fi
+          test -s out/updated.smf
+      - name: Serial re-run commits a bitwise-identical model
+        run: |
+          # The gate's verdict is deterministic (same data, seed, and plan;
+          # thread count never changes bits), so the parallel run's verdict
+          # carries over — a divergence would itself be a determinism bug
+          # and correctly fails this step.
+          SEEML_THREADS=1 out/pkg/model_update --model out/model.smf \
+            --data out/corpus.sds --out out/updated_serial.smf \
+            --seed 7 --val-frac 0.1 ${E2E_FORCE}
+          cmp out/updated.smf out/updated_serial.smf
+          echo "serial and parallel commits are bitwise identical"
+
   # --- Correctness: the Python exporter at least parses ----------------------
   # Torch is deliberately not installed (heavy; the exporter's torch imports
   # are function-local): this gates syntax and top-level import errors.
