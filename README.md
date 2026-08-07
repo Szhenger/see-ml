@@ -10,19 +10,6 @@ So, a question: **how might we make training a model as safe, as small, and as b
 
 It turns out the answer is a compiler.
 
-## First, what does it even mean to train a model?
-
-| document | what it covers |
-|---|---|
-| [docs/usage.md](docs/usage.md) | the workflow: export, compile, run on-device; every CLI flag; threading and determinism |
-| [docs/compiler.md](docs/compiler.md) | build-host compiler architecture: frontend, analysis passes, backend, driver contracts |
-| [docs/runtime.md](docs/runtime.md) | on-device runtime architecture: engine, feeder, executor, validator, custodian |
-| [docs/formats.md](docs/formats.md) | the binary formats: SMF models, SDS datasets, SEEU plans, SEKP checkpoints |
-| [test/README.md](test/README.md) | the test tree, the in-repo SeeTest harness, and how suites mirror the code |
-| [docs/workflows.md](docs/workflows.md) | continuous integration from first principles: what a workflow is, and what each of SeeML's asserts |
-| [docs/roadmap.md](docs/roadmap.md) | the remaining architecture-review projects, scoped and sequenced |
-| [docs/journey.md](docs/journey.md) | how the project got here: from a C compiler to an ML update compiler |
-
 ## Scope and limitations
 
 What SeeML can train today, stated up front:
