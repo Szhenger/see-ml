@@ -68,7 +68,10 @@ class CommitLock {
 
  private:
   CommitLock() = default;
-  int fd_ = -1;
+  // POSIX: the lock file's fd (flock dies with it). Windows: the HANDLE of
+  // a CreateFile open with dwShareMode = 0 — the share-mode refusal is the
+  // exclusion, and CloseHandle (or process death) releases it.
+  intptr_t handle_ = -1;
 };
 
 /// Copy-on-write durable editor for ranged patches. Begin() streams

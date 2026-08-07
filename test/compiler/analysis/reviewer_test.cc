@@ -64,6 +64,22 @@ TEST(Reviewer, SelectsMatmulOnlyWeightsAtMaxAbsScale) {
   EXPECT_NEAR(scales.at(w), 3.0f / 127.0f, 1e-7);
 }
 
+TEST(Reviewer, SkipsSubnormalRangeTensors) {
+  // A subnormal max_abs yields a denormal (or underflowed-to-zero) scale:
+  // the pack's rounding and the runtime's dequant multiply both degenerate,
+  // so such a tensor must stay f32 rodata rather than be selected.
+  sir::Block block;
+  GraphBuild build;
+  sir::Value* x = block.addArgument(sir::DataType::F32, sir::Shape{4, 2});
+  SmfTensor tensor;
+  sir::Value* w = AddWeight(block, build, tensor, "w", {2, 2},
+                            std::vector<float>(4, 1e-40f));
+  AddMatmul(block, "y", x, w);
+
+  const auto scales = SelectQuantizedWeights(block, build);
+  EXPECT_EQ(scales.size(), 0u);
+}
+
 TEST(Reviewer, RejectsWeightsConsumedAsActivations) {
   sir::Block block;
   GraphBuild build;

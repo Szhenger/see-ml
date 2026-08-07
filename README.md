@@ -70,13 +70,18 @@ Read in this order:
 
 What SeeML can train today, stated up front:
 
-- **Models.** Feed-forward graphs over seven operator kinds: `MatMul`,
-  `AddBias`, `Relu`, `Gelu`, `Silu`, `Mul`, `LayerNorm` (the SMF v2
-  vocabulary). The PyTorch exporter accepts an `nn.Sequential` of `Linear`,
-  `ReLU`, `GELU`, `SiLU`, and `LayerNorm` modules. The compiler's
-  intermediate representation additionally models 2-D convolution (lowered
-  to matrix multiplication via im2col), but grouped/dilated forms are
-  rejected and the SMF container does not yet carry convolutions.
+- **Models.** Feed-forward and decoder-transformer graphs over eleven
+  operator kinds: `MatMul`, `AddBias`, `Relu`, `Gelu`, `Silu`, `Mul`,
+  `LayerNorm` (SMF v2), plus `Add`, `RmsNorm`, `Rope`, and causal
+  `Attention` (SMF v3, with model-level sequence geometry) — enough for
+  pre-norm decoder blocks with SwiGLU MLPs. The PyTorch exporter accepts an
+  `nn.Sequential` of `Linear`/activation/`LayerNorm` modules, and
+  `export_decoder_smf` emits decoder stacks from plain weight arrays
+  (embedding lookup stays outside the update: corpora carry pre-embedded
+  rows). The compiler's intermediate representation additionally models 2-D
+  convolution (lowered to matrix multiplication via im2col), but
+  grouped/dilated forms are rejected and the SMF container does not yet
+  carry convolutions.
 - **Training method.** LoRA adapters on frozen `MatMul` weights only — the
   base model is never trained directly. Optimizers: SGD or AdamW, one
   parameter group. Losses: cross-entropy, MSE, KL distillation from a
@@ -89,7 +94,9 @@ What SeeML can train today, stated up front:
   plan; the dataset must match the compiled geometry.
 - **Target machine.** The compiler derives its cache tilings from the
   machine it runs on (host = target). The emitted package cross-compiles
-  (set `CXX`), but tilings remain build-host-derived hints.
+  (set `CXX`), but tilings remain build-host-derived hints. Execution is
+  CPU; on Apple hosts a hardware-validated Metal GEMM dispatch harness
+  exists (roadmap Project 5), but the engine does not yet dispatch to it.
 - **Integrity, not authenticity.** All hashing is FNV-1a — a corruption and
   mismatch detector, not a signature. Authenticate plans in your update
   transport.

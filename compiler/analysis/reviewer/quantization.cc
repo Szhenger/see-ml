@@ -42,8 +42,14 @@ std::unordered_map<const sir::Value*, float> SelectQuantizedWeights(
     const size_t chunks = ParallelChunkCount(count, kWeightSweepGrain);
     for (size_t c = 0; c < chunks; ++c) max_abs = std::max(max_abs, partials[c]);
     // An all-zero weight quantizes to zeros under any scale; 1.0 keeps the
-    // reciprocal finite.
-    scales[v] = max_abs > 0.0f ? max_abs / 127.0f : 1.0f;
+    // dequant multiply finite. A subnormal-range tensor is NOT selected at
+    // all: its scale would be denormal (or underflow to exactly 0), so the
+    // pack's rounding and the runtime's dequant multiply both degenerate —
+    // quantizing to garbage or to all zeros. Such a tensor stays f32
+    // rodata; skipping a selection is always sound.
+    const float scale = max_abs > 0.0f ? max_abs / 127.0f : 1.0f;
+    if (!std::isnormal(scale)) return;
+    scales[v] = scale;
   });
   return scales;
 }

@@ -677,6 +677,23 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
 std::expected<void, std::string> UpdateEngine::RunMerge() {
   if (!arena_) return diag::executing::Error("no plan loaded");
   Execute(merge_program_);
+  // Finiteness gate on the materialized deltas. The training loop's loss
+  // guard reads the loss written BEFORE each step's backward + optimizer,
+  // so a gradient that overflows on the final executed step can poison the
+  // adapters with no later loss read — and the clamped xent/KL losses can
+  // never go infinite themselves. With a validation split the regression
+  // gate rejects the NaN; without one, this scan is the last line between
+  // a poisoned delta and the committed model file.
+  for (const up::EmitEntry& e : emit_table_) {
+    const auto* delta =
+        reinterpret_cast<const float*>(arena_ + e.arena_offset);
+    const size_t count = e.byte_size / sizeof(float);
+    for (size_t i = 0; i < count; ++i)
+      if (!std::isfinite(delta[i]))
+        return diag::executing::Error(
+            "merged delta contains a non-finite value — the adapters are "
+            "numerically poisoned; refusing to stage a commit");
+  }
   merged_ = true;
   return {};
 }

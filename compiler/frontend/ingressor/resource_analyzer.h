@@ -44,6 +44,15 @@ struct TrainingFootprint {
 TrainingFootprint EstimateTrainingFootprint(const SmfModel& model,
                                             int64_t batch);
 
+/// The frozen-forward variant, for teacher models under distillation: no
+/// backward pass consumes the activations, so they die at their single
+/// reader and the arena binder reuses their slots — the honest lower bound
+/// charges the single widest live term instead of the sum (which over-counts
+/// a deep teacher by more than an order of magnitude and could refuse a
+/// provably feasible compile).
+TrainingFootprint EstimateFrozenForwardFootprint(const SmfModel& model,
+                                                 int64_t batch);
+
 /// Physical memory of this host in bytes; 0 when undetectable.
 uint64_t DetectLocalMemoryBytes();
 

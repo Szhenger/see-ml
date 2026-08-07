@@ -45,9 +45,23 @@ TrainingFootprint& TrainingFootprint::operator+=(const TrainingFootprint& o) {
   return *this;
 }
 
-TrainingFootprint EstimateTrainingFootprint(const SmfModel& model,
-                                            int64_t batch) {
+namespace {
+
+/// Shared walk behind both estimators. `sum_activations` selects the
+/// training model (every activation is cached for the backward pass — sum
+/// them) or the frozen-forward model (no backward consumes anything, so
+/// transients die at their single reader and the arena binder reuses their
+/// slots — the honest lower bound is the single widest live term).
+TrainingFootprint EstimateFootprintImpl(const SmfModel& model, int64_t batch,
+                                        bool sum_activations) {
   TrainingFootprint fp;
+  uint64_t peak_activation = 0;
+  auto charge = [&](uint64_t term) {
+    if (sum_activations)
+      fp.activation_bytes = SatAdd(fp.activation_bytes, term);
+    else
+      peak_activation = std::max(peak_activation, term);
+  };
   const uint64_t rows = batch > 0 ? static_cast<uint64_t>(batch) : 0;
 
   // Frozen weights: one resident copy each (they at least fill rodata).
@@ -109,11 +123,8 @@ TrainingFootprint EstimateTrainingFootprint(const SmfModel& model,
         // LayerNorm additionally caches per-row mean/rstd for the backward
         // kernel (two f32 per row); RMSNorm caches rstd (one).
         if (op.kind == SmfOpKind::kLayerNorm)
-          fp.activation_bytes =
-              SatAdd(fp.activation_bytes, SatMul(2 * sizeof(float), r));
-        if (op.kind == SmfOpKind::kRmsNorm)
-          fp.activation_bytes =
-              SatAdd(fp.activation_bytes, SatMul(sizeof(float), r));
+          charge(SatMul(2 * sizeof(float), r));
+        if (op.kind == SmfOpKind::kRmsNorm) charge(SatMul(sizeof(float), r));
         // Attention caches the probability matrix P[B,H,S,S] — flattened
         // [rows * heads, seq_len] — for the backward primitives; usually
         // the dominant transformer activation. heads/seq_len of zero mean
@@ -121,20 +132,30 @@ TrainingFootprint EstimateTrainingFootprint(const SmfModel& model,
         // so the estimate stays a lower bound.
         if (op.kind == SmfOpKind::kAttention && op.attr0 > 0 &&
             model.seq_len > 0)
-          fp.activation_bytes = SatAdd(
-              fp.activation_bytes,
-              SatMul(SatMul(SatMul(r, op.attr0), model.seq_len),
-                     sizeof(float)));
+          charge(SatMul(SatMul(SatMul(r, op.attr0), model.seq_len),
+                        sizeof(float)));
         break;
       }
     }
     if (w == 0) continue;
     width[op.output] = w;
     row_count[op.output] = r;
-    fp.activation_bytes =
-        SatAdd(fp.activation_bytes, SatMul(SatMul(r, w), sizeof(float)));
+    charge(SatMul(SatMul(r, w), sizeof(float)));
   }
+  if (!sum_activations) fp.activation_bytes = peak_activation;
   return fp;
+}
+
+}  // namespace
+
+TrainingFootprint EstimateTrainingFootprint(const SmfModel& model,
+                                            int64_t batch) {
+  return EstimateFootprintImpl(model, batch, /*sum_activations=*/true);
+}
+
+TrainingFootprint EstimateFrozenForwardFootprint(const SmfModel& model,
+                                                 int64_t batch) {
+  return EstimateFootprintImpl(model, batch, /*sum_activations=*/false);
 }
 
 uint64_t DetectLocalMemoryBytes() {

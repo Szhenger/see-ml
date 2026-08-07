@@ -131,14 +131,18 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     // the tensor ("invalid dims") for what is really a cut-off file.
     if (!r.ok) return tokenizing::FileError("truncated file", path);
 
-    // Dims must be strictly positive — except a dynamic (-1) dim on non-const
-    // tensors, which the compiler binds to the compiled batch size — with a
-    // volume that cannot overflow the signed shape math downstream
-    // (sir::Shape::volume / byteSize).
+    // Dims must be strictly positive — except a dynamic (-1) LEADING dim on
+    // non-const tensors, which the compiler binds to the compiled batch
+    // size — with a volume that cannot overflow the signed shape math
+    // downstream (sir::Shape::volume / byteSize). A -1 anywhere else has no
+    // binding rule: the driver reads dims.back() as the static input width,
+    // and a dynamic width would flow into the SIR, bind zero-byte slots,
+    // and seal a plan the runtime always rejects.
     uint64_t volume = 1;
     bool dims_ok = !t.dims.empty();
-    for (int64_t dim : t.dims) {
-      if (dim == -1 && !t.is_const) continue;
+    for (size_t d = 0; d < t.dims.size(); ++d) {
+      const int64_t dim = t.dims[d];
+      if (dim == -1 && !t.is_const && d == 0) continue;
       if (dim <= 0 || !MulU64(volume, static_cast<uint64_t>(dim), &volume) ||
           volume > static_cast<uint64_t>(INT64_MAX) / sizeof(float)) {
         dims_ok = false;
