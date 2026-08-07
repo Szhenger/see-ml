@@ -72,6 +72,52 @@ TEST(PlanValidator, TransformerOpcodesAreVersionGated) {
   EXPECT_ERROR(ValidateInstruction(attn, 2048, kRodata, up::kSeeuVersion));
 }
 
+TEST(PlanValidator, RmsNormBackwardProvesTheStatsRef) {
+  // kRmsNormBwd carries the rstd cache as a REF in out[0]; its extent
+  // (rows floats) must be proven like any operand, not trusted.
+  up::UpdateInstruction bwd;
+  bwd.opcode = static_cast<uint16_t>(up::OpCode::kRmsNormBwd);
+  bwd.in[0] = up::MakeArenaRef(0);    // dy [4 x 8]
+  bwd.in[1] = up::MakeArenaRef(128);  // x
+  bwd.in[2] = up::MakeArenaRef(256);  // gamma [8]
+  bwd.in[3] = up::MakeArenaRef(512);  // dx (write)
+  bwd.out[0] = up::MakeArenaRef(768); // rstd [4]
+  bwd.out[1] = (uint64_t{4} << 32) | 8;
+  EXPECT_OK(ValidateInstruction(bwd, kArena, kRodata, up::kSeeuVersion));
+  bwd.out[0] = up::MakeArenaRef(kArena - 4);  // one float short of 4
+  EXPECT_ERROR(ValidateInstruction(bwd, kArena, kRodata, up::kSeeuVersion));
+}
+
+TEST(PlanValidator, AttentionBackwardExtentsAreProven) {
+  // kAttnDP writes the [B*H*S, S] probability-shaped dP; the write extent
+  // derives from the packed geometry and must stay inside the arena, and
+  // it must not alias the reads.
+  up::UpdateInstruction dp;
+  dp.opcode = static_cast<uint16_t>(up::OpCode::kAttnDP);
+  dp.in[0] = up::MakeArenaRef(0);    // dO [4 x 8] = 128 B
+  dp.in[1] = up::MakeArenaRef(128);  // v
+  dp.in[2] = up::MakeArenaRef(256);  // dP: B*H*S*S = 32 floats = 128 B
+  dp.out[0] = (uint64_t{1} << 32) | 4;  // B=1, S=4
+  dp.out[1] = (uint64_t{2} << 32) | 4;  // H=2, d=4
+  EXPECT_OK(ValidateInstruction(dp, kArena, kRodata, up::kSeeuVersion));
+  dp.in[2] = up::MakeArenaRef(kArena - 64);  // write range spills out
+  EXPECT_ERROR(ValidateInstruction(dp, kArena, kRodata, up::kSeeuVersion));
+  dp.in[2] = up::MakeArenaRef(64);  // write overlaps the dO read
+  EXPECT_ERROR(ValidateInstruction(dp, kArena, kRodata, up::kSeeuVersion));
+}
+
+TEST(PlanValidator, SoftmaxRowsBackwardOverflowIsRejected) {
+  // rows and cols each fill their 32-bit half; their product must go
+  // through MulOk — 2^32 * 2^32 wraps u64 to zero-ish garbage.
+  up::UpdateInstruction sm;
+  sm.opcode = static_cast<uint16_t>(up::OpCode::kSoftmaxRowsBwd);
+  sm.in[0] = up::MakeArenaRef(0);
+  sm.in[1] = up::MakeArenaRef(256);
+  sm.in[2] = up::MakeArenaRef(512);
+  sm.out[0] = (uint64_t{0xFFFFFFFFu} << 32) | 0xFFFFFFFFu;
+  EXPECT_ERROR(ValidateInstruction(sm, kArena, kRodata, up::kSeeuVersion));
+}
+
 TEST(PlanValidator, RopeRequiresEvenHeadWidth) {
   up::UpdateInstruction rope;
   rope.opcode = static_cast<uint16_t>(up::OpCode::kRopeFwd);

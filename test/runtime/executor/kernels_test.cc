@@ -734,6 +734,41 @@ TEST(LayerNorm, ZeroVarianceRowNormalizesToBeta) {
   for (size_t c = 0; c < cols; ++c) EXPECT_EQ(y[c], beta[c]);
 }
 
+TEST(Activation, GeluAndSiluBackwardsMatchFiniteDifferences) {
+  // The smooth activations' backward kernels were pinned only through the
+  // compiled-plan system check; a direct central-difference unit test
+  // covers the input space (both signs, near zero, the |x| ~ 1-5 shoulder)
+  // without a compiler in the loop.
+  const size_t n = 9;
+  const std::vector<float> x = {-5.0f, -2.0f, -0.5f, -1e-3f, 0.0f,
+                                1e-3f, 0.5f,  2.0f,  5.0f};
+  const std::vector<float> dy(n, 1.0f);
+  const double eps = 1e-3;
+  std::vector<float> dx(n), fwd_p(n), fwd_m(n), xp(n), xm(n);
+
+  k::GeluBwd(dy.data(), x.data(), dx.data(), n);
+  for (size_t i = 0; i < n; ++i) {
+    xp = x; xm = x;
+    xp[i] += static_cast<float>(eps);
+    xm[i] -= static_cast<float>(eps);
+    k::GeluFwd(xp.data(), fwd_p.data(), n);
+    k::GeluFwd(xm.data(), fwd_m.data(), n);
+    EXPECT_NEAR(dx[i], static_cast<float>((fwd_p[i] - fwd_m[i]) / (2 * eps)),
+                2e-3);
+  }
+
+  k::SiluBwd(dy.data(), x.data(), dx.data(), n);
+  for (size_t i = 0; i < n; ++i) {
+    xp = x; xm = x;
+    xp[i] += static_cast<float>(eps);
+    xm[i] -= static_cast<float>(eps);
+    k::SiluFwd(xp.data(), fwd_p.data(), n);
+    k::SiluFwd(xm.data(), fwd_m.data(), n);
+    EXPECT_NEAR(dx[i], static_cast<float>((fwd_p[i] - fwd_m[i]) / (2 * eps)),
+                2e-3);
+  }
+}
+
 TEST(Gelu, BackwardStaysFiniteAtExtremeInputs) {
   // In the saturated-tanh regime the sech^2 factor is a true zero while u'
   // overflows; the dead term must be dropped, not evaluated as 0 * Inf.

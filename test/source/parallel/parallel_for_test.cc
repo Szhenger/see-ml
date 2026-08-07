@@ -155,6 +155,32 @@ TEST(ParallelFor, NestedCallsNeitherDeadlockNorDoubleExecute) {
     EXPECT_EQ(totals[o], inner * (inner - 1) / 2 + o * inner);
 }
 
+TEST(ParallelFor, ChunkExceptionIsRethrownAndThePoolSurvives) {
+  // The exception contract: a throwing chunk body stops new chunks, the
+  // loop retires fully, and the FIRST exception is rethrown on the calling
+  // thread — after which the pool must be fully usable. Untested until
+  // now, despite being the loop's only error path.
+  bool caught = false;
+  try {
+    seeml::update::ParallelFor(1 << 12, 1,
+                               [&](size_t, size_t, size_t chunk) {
+                                 if (chunk == 0)
+                                   throw std::runtime_error("chunk boom");
+                               });
+  } catch (const std::runtime_error& e) {
+    caught = std::string(e.what()) == "chunk boom";
+  }
+  EXPECT_TRUE(caught);
+
+  // The pool took no damage: full coverage on the very next call.
+  std::vector<int> hits(1 << 12, 0);
+  seeml::update::ParallelFor(hits.size(), 1,
+                             [&](size_t b, size_t e, size_t) {
+                               for (size_t i = b; i < e; ++i) ++hits[i];
+                             });
+  for (int h : hits) EXPECT_EQ(h, 1);
+}
+
 TEST(ParallelFor, BackToBackCallsReuseThePool) {
   ScopedThreads threads(4);
   // Many small jobs in a row: exercises the park/wake protocol under TSan

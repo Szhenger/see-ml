@@ -76,6 +76,65 @@ TEST(Smf, SaveLoadRoundTrip) {
   }
 }
 
+/// Assembles a minimal pre-v3 SMF file (no seq_len, no attr0) with one
+/// non-const input tensor and one single-input op of `kind` — the byte
+/// layout writers no longer emit, for exercising the per-version gates.
+std::vector<uint8_t> LegacySmfBytes(uint32_t version, uint8_t kind) {
+  std::vector<uint8_t> b;
+  auto u16 = [&](uint16_t v) {
+    for (int i = 0; i < 2; ++i) b.push_back((v >> (8 * i)) & 0xFF);
+  };
+  auto u32 = [&](uint32_t v) {
+    for (int i = 0; i < 4; ++i) b.push_back((v >> (8 * i)) & 0xFF);
+  };
+  auto u64 = [&](uint64_t v) {
+    for (int i = 0; i < 8; ++i) b.push_back((v >> (8 * i)) & 0xFF);
+  };
+  auto str = [&](const char* s) {
+    const size_t n = std::strlen(s);
+    u16(static_cast<uint16_t>(n));
+    b.insert(b.end(), s, s + n);
+  };
+  u32(kSmfMagic);
+  u32(version);
+  u32(1);  // num_tensors
+  u32(1);  // num_ops
+  str("x");
+  str("y");
+  str("x");           // tensor name
+  b.push_back(1);     // rank
+  b.push_back(0);     // flags: non-const
+  u64(static_cast<uint64_t>(int64_t{-1}));  // dynamic leading dim
+  u64(0);             // data_offset
+  u64(0);             // byte_size
+  b.push_back(kind);  // op kind
+  str("a");
+  b.push_back(1);  // num_inputs
+  str("x");
+  str("y");
+  return b;
+}
+
+TEST(Smf, KindCeilingIsPerVersion) {
+  // A file carrying a kind newer than its own version is corruption, not
+  // forward compatibility: v1 ended at Relu (2), v2 at LayerNorm (6).
+  ScopedTempDir dir;
+  const std::string path = dir.File("legacy.smf");
+
+  WriteAll(path, LegacySmfBytes(1, /*kind=*/3));  // Gelu inside a v1 file
+  EXPECT_ERROR_CONTAINS(LoadSmf(path), "unknown op kind");
+
+  WriteAll(path, LegacySmfBytes(2, /*kind=*/7));  // Add inside a v2 file
+  EXPECT_ERROR_CONTAINS(LoadSmf(path), "unknown op kind");
+
+  // The ceilings gate exactly at their own vocabulary: the newest v1 and
+  // v2 kinds still parse (the reader checks kinds, not arities).
+  WriteAll(path, LegacySmfBytes(1, /*kind=*/2));
+  EXPECT_OK(LoadSmf(path));
+  WriteAll(path, LegacySmfBytes(2, /*kind=*/6));
+  EXPECT_OK(LoadSmf(path));
+}
+
 TEST(Smf, LoadRejectsDynamicDimBeyondLeading) {
   // The dynamic (-1) marker binds to the compiled batch and is only
   // meaningful as the LEADING dim; anywhere else it would flow into the
