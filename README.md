@@ -56,7 +56,7 @@ Read them in this order:
 | [test/README.md](test/README.md) | How the test tree mirrors the code, and how you test calculus with arithmetic. |
 | [docs/benchmarks.md](docs/benchmarks.md) | The metric program that gates frontier development: throughput, kernel, memory, lifecycle, and velocity tiers. |
 
-## Design Principles
+## Design Principles of Software Systems
 
 If you remember nothing else, remember these five, because every file in this repository is an application of one of them:
 
