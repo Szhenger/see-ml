@@ -1,25 +1,30 @@
-# SeeML Update Compiler — Usage
+# Using SeeML
 
-SeeML compiles an on-device model update ahead of time: LoRA adapters
-(Low-Rank Adaptation: a pair of small trainable matrices per frozen weight)
-are grafted onto a frozen model, the backward pass and optimizer are
-synthesized as a fixed instruction stream bound to a pre-planned memory
-arena, and the result is executed on-device by a zero-dependency virtual
-machine (VM). One `.seeu` plan = one complete, gated, resumable,
-atomically-committed update.
+## The shape of the workflow
 
-How the compiler is organized internally: [compiler.md](compiler.md);
-the on-device runtime: [runtime.md](runtime.md).
-The binary formats they read and write: [formats.md](formats.md).
-Terms and abbreviations: the [README glossary](../README.md#glossary).
+SeeML compiles an on-device model update *ahead of time*: LoRA adapters are grafted onto a frozen model, the backward pass and optimizer are synthesized as a fixed instruction stream bound to a pre-planned arena, and the result is executed on-device by a zero-dependency VM. One `.seeu` plan = one complete, gated, resumable, atomically-committed update.
 
-## 1. Export the model (build host, PyTorch)
+The workflow has three steps on two machines:
 
-```bash
-python3 tool/export_model.py --demo out/        # demo model + teacher + corpus
+```
+build host:  1. export   PyTorch model  ──▶  model.smf (+ corpus.sds)
+             2. compile  model.smf      ──▶  pkg/  (plan + vendored runtime + build.sh)
+device:      3. update   model.smf + corpus.sds  ──▶  updated.smf, or no change at all
 ```
 
-or from your own code:
+Notice what does *not* travel to the device: PyTorch, Python, this repository. The device receives a folder that builds with any C++23 compiler. If you want to understand what each step does internally, [compiler.md](compiler.md) and [runtime.md](runtime.md) go deep; the binary files exchanged between the steps are specified in [formats.md](formats.md). This document just gets you running.
+
+## Step 1: Export the model (build host, PyTorch)
+
+The quickest start — a demo model, teacher, and synthetic corpus in one command:
+
+```bash
+python3 tool/export_model.py --demo out/
+```
+
+This writes `model.smf` (a small `Linear(16,32) → ReLU → Linear(32,4)` classifier), `teacher.smf` (a wider sibling, for distillation experiments), and `corpus.sds` (2,048 labeled samples). Everything downstream can be tried against these three files.
+
+For your own model, use the two functions the script exports:
 
 ```python
 from export_model import export_smf, export_sds
@@ -27,12 +32,11 @@ export_smf(sequential_model, "model.smf")   # Linear/ReLU/GELU/SiLU/LayerNorm
 export_sds(inputs, labels, "corpus.sds")    # labels: int32 classes, dense f32, or None
 ```
 
-`export_smf` accepts an `nn.Sequential` of `Linear`, `ReLU`, `GELU`,
-`SiLU`, and `LayerNorm` modules (`Linear` weights are stored transposed
-from PyTorch's layout); `export_sds` takes fixed-shape inputs with class,
-dense, or no labels.
+The exporter accepts an `nn.Sequential` of `Linear`, `ReLU`, `GELU`, `SiLU`, and `LayerNorm` modules — anything else is a loud `ValueError`, not a silent skip. One detail worth knowing so the format makes sense later: PyTorch stores a `Linear`'s weight as `[out, in]`, but SMF's `MatMul(x, W)` wants `[in, out]`, so the exporter transposes on the way out. Labels: pass int32 class indices for cross-entropy, dense float vectors for MSE, or `None` for a distillation corpus (the teacher provides the targets).
 
-## 2. Compile the update plan (build host)
+## Step 2: Compile the update plan (build host)
+
+Here's a full-featured invocation; we'll unpack it flag by flag:
 
 ```bash
 seeml-update-compile \
@@ -45,52 +49,28 @@ seeml-update-compile \
   --steps 1000 --report pkg/report.json --build
 ```
 
-Every flag (parsing is strict — an unknown flag, a flag missing its value,
-or a numeric with trailing garbage is a hard error, never a silent
-default):
+**What to train on.** `--data-batch` (default 32) fixes the batch size — how many samples are processed together in each training step — *into the plan*; shapes are compile-time facts in SeeML, so this isn't a runtime knob. `--loss` picks the objective, the measure of wrongness that training drives down: `xent` (softmax cross-entropy, needs class labels), `mse` (mean squared error, dense labels), `kl` (**distillation**: the model learns to imitate a teacher model's output probabilities rather than hard labels — add `--teacher teacher.smf` and use an unlabeled corpus), or `xent+kl` (both, blended by `--distill-weight`, default 0.5; `--temperature`, default 2.0, softens both distributions — see [runtime.md](runtime.md) for why).
 
-| flag | meaning (default) |
-|---|---|
-| `--source model.smf` | the on-device model to update (required) |
-| `--out dir/` | emission directory (required) |
-| `--data-batch N` | compiled batch size (32) |
-| `--loss xent\|mse\|kl\|xent+kl` | training objective (`xent`) |
-| `--teacher t.smf` | open-weights teacher model, for `kl` / `xent+kl` |
-| `--distill-weight W` | KL weight in the composite loss (0.5) |
-| `--temperature T` | distillation temperature (2.0) |
-| `--lora-rank R` / `--lora-alpha A` / `--lora-seed S` | adapter rank / scale / init seed (8 / 16 / 42) |
-| `--targets substr,substr` | restrict adapters to weights whose names match |
-| `--optimizer adamw\|sgd` | optimizer (`adamw`) |
-| `--lr LR` / `--weight-decay WD` | learning rate / decay (1e-3 / 0.01) |
-| `--clip-norm C` | per-tensor L2 gradient clip (0 = off) |
-| `--lr-schedule const\|cosine` | runtime LR schedule (`const`) |
-| `--warmup N` / `--min-lr-factor F` | warmup steps / cosine floor as a fraction of `--lr` (0 / 0) |
-| `--quantize-base` | int8-quantize frozen weights in rodata |
-| `--steps N` | default step count baked into the plan (1000) |
-| `--no-fuse-epilogue` | compile the unfused reference form |
-| `--report out.json` | machine-readable compile report |
-| `--build` | run the emitted `build.sh` after emission |
+**What to adapt.** `--lora-rank` (default 8) and `--lora-alpha` (default 16) set the adapter geometry — the update lives in `r·(K+M)` parameters per adapted matmul instead of `K·M` ([compiler.md](compiler.md) does the math). `--targets substr1,substr2` restricts grafting to weights whose names match a substring; by default every eligible frozen matmul is adapted. `--lora-seed` (default 42) makes the adapter initialization reproducible.
 
-Distillation from an open-weights teacher: `--loss kl --teacher teacher.smf`
-(unlabeled corpus), or `--loss xent+kl --distill-weight 0.5`.
+**How to optimize.** `--optimizer adamw|sgd` (default adamw), `--lr` (default 1e-3), `--weight-decay` (default 0.01), and `--clip-norm` (default 0 = off; a positive value bakes per-tensor gradient clipping instructions into the stream). The schedule — `--lr-schedule const|cosine`, `--warmup N`, `--min-lr-factor F` — travels in the plan header and is evaluated per step on the device.
 
-GEMM (general matrix–matrix multiply) → AddBias → activation chains with
-no backward reader (the frozen teacher,
-unadapted layers) are fused into single-instruction epilogues by default —
-bitwise-identical results, fewer arena round-trips. `--no-fuse-epilogue`
-compiles the unfused reference form.
+**How big.** `--quantize-base` stores eligible frozen weights as int8 in the plan (4× smaller, dequantization fused into the GEMM for free) — and, because commit patches the *original file's* floats, quantization error never reaches the committed model. `--steps` (default 1000) is the default step count baked into the plan (the device may override it).
 
-The emitted `pkg/` is **self-contained**: the plan, the generated driver, and
-vendored runtime sources. `sh pkg/build.sh` builds `model_update` on any
-machine with a C++23 compiler — set `CXX` to cross-compile for the device.
+**What comes out.** The emitted `pkg/` is **self-contained**: the plan (`update_plan.seeu`), the same plan embedded as a C array, a generated driver `main`, the vendored runtime sources, and a `build.sh`. `--build` runs that script immediately; on any machine, `sh pkg/build.sh` builds the `model_update` binary with nothing but a C++23 compiler — set `CXX` to cross-compile for the device. `--report pkg/report.json` writes a machine-readable summary (arena bytes, instruction counts, per-adapter shapes and scales) worth archiving with each release.
 
-Inspect any plan with the disassembler:
+Compilation is also your first line of defense: infeasible memory footprints, shape mismatches, a loss that can't see any trainable parameter — all fail *here*, on the build host, with a one-line `"<unit>: <message>"` diagnostic.
+
+Curious what was actually generated? Disassemble any plan:
 
 ```bash
-seeml-seeu-dump pkg/update_plan.seeu --instrs
+seeml-seeu-dump pkg/update_plan.seeu            # header, integrity check, emit table
+seeml-seeu-dump pkg/update_plan.seeu --instrs   # all three instruction streams
 ```
 
-## 3. Run the update (device)
+Reading a training loop as thirty-ish opcodes of straight-line code is a genuinely instructive way to see what the compiler did — and a good sanity check that, say, your clip instructions exist.
+
+## Step 3: Run the update (device)
 
 ```bash
 model_update --model model.smf --data corpus.sds --out updated.smf \
@@ -115,47 +95,24 @@ model_update --model model.smf --data corpus.sds --out updated.smf \
 
 What happens, in order:
 
-1. **Load + verify** — plan hash checked; every instruction operand
-   bounds-validated before anything executes. One arena allocation, sized at
-   compile time.
-2. **Split + shuffle** — the last `--val-frac` of the corpus is held out;
-   training batches are served through a seeded per-epoch permutation.
-3. **Train** — N steps of fwd+bwd+clip+optimizer. Interruptible
-   (checkpoints are hash-bound to the plan and fsync-durable); aborts on a
-   non-finite loss.
-4. **Gate** — validation loss is evaluated before and after with the plan's
-   eval program; both passes rewind the held-out set so they average the
-   identical sample multiset. No improvement → exit 3, device untouched
-   (`--force` overrides).
-5. **Merge + commit** — deltas `Δ = (α/r)·A@B` are materialized and added to
-   the pristine f32 weights of the source file (which must hash-match the
-   plan), written durably, renamed atomically.
+1. **Load + verify** — the plan's hash is checked, then every instruction operand is bounds-validated *before anything executes*. One arena allocation, sized at compile time. A corrupt or foreign plan is refused at this door.
+2. **Split + shuffle** — the last `--val-frac` (here 10%) of the corpus is held out for validation; training batches are then served through a seeded per-epoch permutation. Same `--seed`, same batches, same bits — on any machine.
+3. **Train** — N steps of forward + backward + clip + optimizer. Interruptible: checkpoints (`--checkpoint`, `--checkpoint-every`) are hash-bound to the plan and fsync-durable, and `--resume` picks up from one, optimizer momentum and all. A non-finite loss aborts immediately rather than continuing on garbage.
+4. **Gate** — validation loss is evaluated before and after training with the plan's eval program. No improvement → exit code 3 and the device is left *untouched* (`--force` overrides, if you must).
+5. **Merge + commit** — deltas `Δ = (α/r)·A@B` are materialized and added to the pristine f32 weights of the source file (which must hash-match the plan), written durably, renamed atomically. A power cut at any moment leaves the old model or the new one — never a torn file.
 
-Exit codes: `0` committed, `1` runtime error, `2` bad arguments,
-`3` regression-gate rejection.
+Exit codes are the API for your update orchestrator: `0` committed, `1` runtime error, `2` bad arguments, `3` regression-gate rejection. `--loss-log` appends a CSV loss curve if you want to watch the descent.
 
-## Threading
+## Threading and determinism
 
-Both sides of the product parallelize: the compiler's byte-heavy passes
-(int8 quantization, adapter initialization, plan embedding) and the
-runtime's kernels, plus a feeder thread that stages the next batch while the
-current step computes. Control it with `SEEML_THREADS`:
+Both halves parallelize: the compiler's byte-heavy passes (int8 quantization, adapter initialization, plan embedding) and the runtime's kernels, plus a feeder thread that stages the next batch while the current step computes. Control it with one variable:
 
 ```bash
 SEEML_THREADS=1 model_update ...   # fully serial: no thread is ever created
 SEEML_THREADS=4 model_update ...   # pin the pool width; default = all cores
 ```
 
-Negative, zero, or malformed values (including `-1`, some tools' "all
-cores" convention) fall back to hardware concurrency rather than being
-taken literally.
-
-Parallel execution is **bitwise-deterministic**: work is split into chunks
-whose boundaries depend only on the problem shape (never the thread count),
-and reductions combine per-chunk partials in a fixed order. The same plan,
-data, and seed produce the same bits at any thread count — thread count is a
-throughput knob, not a numerics knob — so a loss curve from an 8-core dev
-board reproduces exactly on a single-core target.
+Here's the property that makes this knob safe to turn: parallel execution is **bitwise-deterministic**. Work is split into chunks whose boundaries depend only on the problem shape (never the thread count), and reductions combine per-chunk partials in a fixed order — so the same plan, data, and seed produce the *same bits* at any thread count. Thread count is a throughput knob, not a numerics knob. Practically: a loss curve from an 8-core dev board reproduces exactly on a single-core target, and any bug you find is reproducible by construction. ([runtime.md](runtime.md) explains the mechanism.)
 
 This is a tested contract, not an aspiration:
 `ParallelFor.OrderedPartialReductionIsBitwiseThreadCountInvariant`
@@ -164,6 +121,8 @@ the `ParallelDeterminism` suite (`test/runtime/executor/kernels_test.cc`)
 re-proves every kernel family bit-for-bit across thread counts.
 
 ## Development
+
+Working on SeeML itself:
 
 ```bash
 cmake -S . -B build && cmake --build build -j && ctest --test-dir build
@@ -176,3 +135,5 @@ cmake -B build -DSEEML_SANITIZE="address;undefined"
 cmake -B build -DSEEML_SANITIZE="thread"   # proves the pool + feeder sync
 cmake -B build -DSEEML_FUZZ=ON && ./build/seeml_fuzz_formats
 ```
+
+The test tree mirrors the source tree one-to-one — a suite lives where its subject lives — and [test/README.md](../test/README.md) explains the layout and the in-tree harness. The thread sanitizer build is not decoration: it's the mechanical proof that the worker pool and the feeder handoff are race-free, and the fuzzer hammers the binary-format parsers with hostile bytes — the same parsers whose paranoia [formats.md](formats.md) describes.

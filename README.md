@@ -1,60 +1,16 @@
-# SeeML: An ML Update Compiler (How to Train A Model)
+# SeeML: An ML Update Compiler (How to Train a Model)
 
-SeeML treats a machine-learning fine-tune the way an operating system treats
-a software update. On a build host, a compiler takes a frozen model, grafts
-LoRA adapters onto it (LoRA — Low-Rank Adaptation — trains a pair of small
-matrices beside each frozen weight instead of the weight itself), and
-compiles the *entire training run* — forward pass, backward pass, optimizer,
-memory plan — ahead of time into a single update plan. On the device, a small
-zero-dependency runtime executes that plan, gates the result on a measurable
-improvement, and commits the updated weights atomically — or leaves the
-device untouched.
+## This is SeeML
 
-## Why compile a training run ahead of time?
+Odds are, some device of yours updated an app this week. You barely noticed, and that's the point: the update arrived as a self-contained package, was verified before a single byte was trusted, applied atomically, and — had anything gone wrong — your device would have been left exactly as it was, as though nothing had happened at all.
 
-On-device training normally means shipping a framework runtime: dynamic
-allocation, dynamic shapes, kernel dispatch decided at run time, and numerics
-that drift with thread count. SeeML moves every one of those decisions to
-compile time, which buys three properties that matter when the thing being
-trained is a device you don't control:
+Now consider the neural networks that increasingly live on those same devices. Suppose you'd like one of them to *learn* — to train, right there on the device, on the device's own data. Training is ordinarily a messy, dynamic affair: a Python interpreter, a framework of a few hundred megabytes, memory allocated on the fly, results that vary run to run. Nothing about it resembles the disciplined little package that updated your app.
 
-- **Verifiable before it runs.** The plan is a fixed instruction stream over
-  a memory arena whose size and layout were decided by the compiler. At load
-  time the runtime re-proves the bounds of every instruction operand before
-  anything executes — a corrupt or foreign plan is rejected, never partially
-  run.
-- **Reproducible anywhere.** Parallel execution is bitwise-deterministic:
-  work is chunked by problem shape, never by thread count, so the same plan,
-  data, and seed produce the same bits on an 8-core dev board and a
-  single-core target.
-- **Safe to apply.** Like an OS update, the result is gated (validation loss
-  must improve, or the device is untouched), resumable (checkpoints are
-  hash-bound to their exact plan), and committed via fsync + atomic rename —
-  a power cut leaves the old model or the new one, never a torn file.
+So, a question: **how might we make training a model as safe, as small, and as boring as a software update?**
 
-The price of this is generality — see
-[Scope and limitations](#scope-and-limitations).
+It turns out the answer is a compiler.
 
-## Quickstart
-
-```bash
-# 1. Build host: export a PyTorch model + corpus (or use the built-in demo)
-python3 tool/export_model.py --demo out/
-
-# 2. Build host: compile the update plan into a self-contained package
-seeml-update-compile --source out/model.smf --out pkg/ \
-  --loss xent --lora-rank 8 --steps 1000 --build
-
-# 3. Device: run the update — train, gate, merge, commit
-pkg/model_update --model out/model.smf --data out/corpus.sds \
-  --out updated.smf
-```
-
-Full walkthrough, flag reference, and exit codes: [docs/usage.md](docs/usage.md).
-
-## Documentation map
-
-Read in this order:
+## First, what does it even mean to train a model?
 
 | document | what it covers |
 |---|---|
@@ -111,29 +67,49 @@ What SeeML can train today, stated up front:
   repository.
 
 ```bash
-cmake -S . -B build && cmake --build build -j && ctest --test-dir build
+# 0. Build the tools (any C++23 compiler)
+cmake -S . -B build && cmake --build build -j
 # or, without CMake:
-sh build/build.sh && for t in build/seeml_*_test; do "$t"; done
+sh build/build.sh
+
+# 1. Export a demo model, teacher, and corpus (build host, PyTorch)
+python3 tool/export_model.py --demo out/
+
+# 2. Compile an update plan and a self-contained native package
+./build/seeml-update-compile \
+  --source out/model.smf --out pkg/ \
+  --data-batch 32 --loss xent --lora-rank 8 --lora-alpha 16 \
+  --optimizer adamw --lr 1e-3 --steps 1000 --build
+
+# 3. Run the update (this is what would run on the device)
+./pkg/model_update --model out/model.smf --data out/corpus.sds \
+  --out out/updated.smf --val-frac 0.1 --seed 7
 ```
 
-## Glossary
+Exit code `0` means the model improved and was committed. Exit code `3` means it didn't — and the device was left untouched. That, in miniature, is the entire philosophy.
 
-Terms and abbreviations used throughout the docs, defined once here. Format
-names are specified byte-for-byte in [docs/formats.md](docs/formats.md).
+## How to read these docs
 
-| term | definition |
+These documents aim to be educational as well as descriptive. SeeML happens to be a small, complete instance of several of computer science's greatest hits — compilers, virtual machines, calculus done by a program, cache-aware algorithms, crash-safe storage — and the docs teach each idea from first principles before showing you SeeML's implementation of it. That includes the machine learning: if you've completed CS50x (or equivalent), you have every prerequisite; the ML itself is taught here, with the compiler as the textbook.
+
+Read them in this order:
+
+| Document | What it teaches |
 |---|---|
-| **SMF** | SeeML Model Format (`.smf`) — the dependency-free container for source and teacher models |
-| **SDS** | SeeML Dataset (`.sds`) — the fixed-shape training corpus streamed on-device |
-| **SEEU** | SeeML Update plan (`.seeu`) — the fully compiled update: instruction streams, frozen weights, arena layout, emit table |
-| **SEKP** | SeeML Checkpoint — the mid-training state container, hash-bound to its exact plan |
-| **SIR** | SeeML Intermediate Representation — the compiler's in-memory program form, in SSA style (static single assignment: every value is defined exactly once) |
-| **LoRA** | Low-Rank Adaptation — fine-tuning via a pair of small matrices `A` (n×r) and `B` (r×m) per frozen weight; the trained delta is `Δ = (α/r)·A@B` |
-| **GEMM** | general matrix–matrix multiply — the workhorse kernel of both training and merging |
-| **arena** | the runtime's single memory allocation, laid out entirely at compile time into read-only, persistent (checkpointed), I/O, and transient segments |
-| **plan** | the `.seeu` artifact: everything the device needs to run one complete update |
-| **AOT** | ahead-of-time — decided at compile time on the build host, not on the device |
-| **subsystem** | a top-level folder of `compiler/` or `runtime/`, named for its role in the process |
-| **discipline** | a folder inside a subsystem, named for the kind of work done by the units inside it |
-| **unit** | one class or function family with its own header — the granularity of diagnostics and tests |
-| **façade header** | the single include that re-exports a folder's units, so the files behind it can be reorganized without touching consumers |
+| [docs/usage.md](docs/usage.md) | The three-step workflow, every flag explained, and what actually happens when you run an update. Start here. |
+| [docs/compiler.md](docs/compiler.md) | The compiler, end to end — and most of the ML: what an intermediate representation is, the linear algebra of LoRA, how a program differentiates a program, what optimizers like AdamW actually compute, number formats and quantization, memory planning as register allocation, cache-aware matrix multiplication, and a multi-armed bandit that tunes it. |
+| [docs/runtime.md](docs/runtime.md) | The on-device virtual machine: load-time validation as a safety proof, numerically stable kernels (and why naive formulas explode), deterministic parallelism, a producer-consumer pipeline, and storage that survives a power cut. |
+| [docs/formats.md](docs/formats.md) | The four binary formats on disk — bytes, offsets, magic numbers, and hashes — and why each field is there. |
+| [test/README.md](test/README.md) | How the test tree mirrors the code, and how you test calculus with arithmetic. |
+
+## Design principles, in one breath
+
+If you remember nothing else, remember these five, because every file in this repository is an application of one of them:
+
+- **Decide early.** Anything decidable at compile time — shapes, offsets, instruction order, memory size — is decided at compile time. The device executes; it does not plan.
+- **Verify at every boundary.** Each subsystem hands its output to the next only through an explicit contract that is checked, both in the compiler and again on the device. A plan is proven safe before it is run.
+- **Same bits, any thread count.** Work is chunked by problem shape, never by thread count, so parallelism never changes results.
+- **No improvement, no change.** Every update must prove itself on data it never trained on; a failed update leaves the device exactly as it was.
+- **Power cuts are ordinary.** Every durable write is an fsync'd sidecar file plus an atomic rename. There is no torn state.
+
+Was this compiled for you? In a sense, yes — now go read [docs/usage.md](docs/usage.md).
