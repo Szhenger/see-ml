@@ -385,6 +385,58 @@ TEST(ForwardBuilder, RejectsSequenceOpsWithoutSeqLen) {
                         "declares no seq_len");
 }
 
+TEST(ForwardBuilder, BuildsTokenDecoderThroughEmbedding) {
+  SmfModel model = seeml::testing::MakeTinyTokenDecoder(16, 8, 2, 4, 12, 7);
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::I32, sir::Shape{8});
+  ASSERT_OK_AND_ASSIGN(sir::Value * out,
+                       BuildForward(block, model, "", build.input, 8, build));
+  EXPECT_TRUE(out->shape() == sir::Shape({8, 16}));  // [rows, vocab]
+  EXPECT_TRUE(block.validate());
+  EXPECT_EQ(CountOps(block, "sc_high.embedding"), 1u);
+}
+
+TEST(ForwardBuilder, RejectsFloatConsumerOfTokenInput) {
+  SmfModel model = seeml::testing::MakeTinyTokenDecoder(16, 8, 2, 4, 12, 7);
+  // A residual add reading the raw token input would treat ids as floats.
+  for (auto& op : model.ops)
+    if (op.name == "res1") op.inputs[0] = "x";
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::I32, sir::Shape{8});
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, 8, build),
+                        "only Embedding may read");
+}
+
+TEST(ForwardBuilder, RejectsEmbeddingTableThatIsNotAWeight) {
+  // A computed-activation table (rank-2 F32) would compile clean — autodiff
+  // skips the frozen embedding — then fail every load at the validator's
+  // rodata check. Reject it at the model, not the plan.
+  SmfModel model = seeml::testing::MakeTinyTokenDecoder(16, 8, 2, 4, 12, 7);
+  // Declare a non-const rank-2 tensor and point the table at it: bound up
+  // front (so topological order passes), but not a frozen weight.
+  model.tensors.push_back({.name = "io_table", .dims = {16, 8},
+                           .is_const = false});
+  for (auto& op : model.ops)
+    if (op.kind == SmfOpKind::kEmbedding) op.inputs[1] = "io_table";
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::I32, sir::Shape{8});
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, 8, build),
+                        "must be a frozen weight");
+}
+
+TEST(ForwardBuilder, RejectsEmbeddingWithoutTokenInput) {
+  SmfModel model = seeml::testing::MakeTinyTokenDecoder(16, 8, 2, 4, 12, 7);
+  model.tensors[0].dims = {-1, 8};  // input demoted back to feature rows
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::F32, sir::Shape{8, 8});
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, 8, build),
+                        "rank-1 dynamic");
+}
+
 TEST(ForwardBuilder, RejectsSeqLenPastInt64) {
   // Hostile u64 seq_len past INT64_MAX would wrap negative through the
   // int64 casts (rows % -1 == 0 accepts every batch) and reach the parser

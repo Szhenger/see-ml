@@ -118,6 +118,13 @@ void AttnDQ(const float* ds, const float* k, float* dq, size_t B, size_t S,
 void AttnDK(const float* ds, const float* q, float* dk, size_t B, size_t S,
             size_t H, size_t d);             // dK = (dS^T Q) / sqrt(d)
 
+// --- Token-native input (plan v7) --------------------------------------------
+// Frozen embedding gather: out[t, :] = table[tokens[t], :]. The feeder
+// contract proved every token < V before dispatch (exactly as class labels
+// are bounded), so the kernel gathers blindly, per the executor doctrine.
+void EmbedFwd(const int32_t* tokens, const float* table, float* out,
+              size_t rows, size_t dim);
+
 // --- Losses ------------------------------------------------------------------
 // loss = -(1/N) sum_n log softmax(logits)_n[label_n]; probs cached for bwd.
 void SoftmaxXEntFwd(const float* logits, const int32_t* labels, float* loss,

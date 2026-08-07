@@ -22,11 +22,35 @@ constexpr uint64_t kSdsHeaderBytes = 40;
 }  // namespace
 
 uint64_t Dataset::label_bytes_per_sample() const {
+  // Token records derive one class label per POSITION, so a record's label
+  // payload is input_dim (= seq) i32s — the shifted token view.
+  if (input_kind_ == 1) return input_dim_ * sizeof(int32_t);
   switch (label_kind_) {
     case 1: return sizeof(int32_t);
     case 2: return label_dim_ * sizeof(float);
     default: return 0;
   }
+}
+
+std::expected<Dataset, std::string> Dataset::FromTokens(
+    std::vector<int32_t> tokens, uint64_t num_records, uint64_t seq) {
+  Dataset d;
+  d.input_kind_ = 1;
+  d.label_kind_ = 1;  // derived next-token class ids
+  d.num_samples_ = num_records;
+  d.input_dim_ = seq;
+  d.tokens_ = std::move(tokens);
+  if (num_records == 0) return diag::feeding::Error("zero samples");
+  if (seq == 0) return diag::feeding::Error("zero input dim");
+  uint64_t want = 0;
+  if (seq >= UINT64_MAX || !MulU64(num_records, seq + 1, &want) ||
+      d.tokens_.size() != want)
+    return diag::feeding::Error("token buffer size mismatch");
+  for (uint64_t i = 0; i < want; ++i)
+    if (d.tokens_[i] < 0)
+      return diag::feeding::Error("negative token id at position " +
+                                  std::to_string(i));
+  return d;
 }
 
 std::expected<Dataset, std::string> Dataset::FromMemory(
@@ -77,14 +101,14 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
     return static_cast<bool>(f);
   };
 
-  uint32_t magic = 0, version = 0, label_kind = 0, pad = 0;
+  uint32_t magic = 0, version = 0, label_kind = 0, input_kind = 0;
   uint64_t num_samples = 0, input_dim = 0, label_dim = 0;
   if (!read(&magic, 4) || magic != kSdsMagic)
     return diag::feeding::Error("bad magic in '" + path + "'");
-  if (!read(&version, 4) || version != 1)
+  if (!read(&version, 4) || version < 1 || version > 2)
     return diag::feeding::Error("unsupported version");
   if (!read(&num_samples, 8) || !read(&input_dim, 8) || !read(&label_kind, 4) ||
-      !read(&pad, 4) || !read(&label_dim, 8))
+      !read(&input_kind, 4) || !read(&label_dim, 8))
     return diag::feeding::Error("truncated header");
 
   Dataset d;
@@ -92,6 +116,7 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
   d.input_dim_ = input_dim;
   d.label_kind_ = label_kind;
   d.label_dim_ = label_dim;
+  d.input_kind_ = input_kind;
   if (num_samples == 0 || input_dim == 0)
     return diag::feeding::Error("empty dataset");
   if (label_kind > 2)
@@ -99,6 +124,32 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
   if (label_kind == 2 &&
       (label_dim == 0 || label_dim > UINT64_MAX / sizeof(float)))
     return diag::feeding::Error("label dim out of range");
+  // The input_kind word was header padding in v1 (always zero); a nonzero
+  // value there is corruption, and token corpora require the derived
+  // next-token label discipline.
+  if (input_kind > 1 || (version < 2 && input_kind != 0))
+    return diag::feeding::Error("unknown input kind");
+  if (input_kind == 1) {
+    if (label_kind != 1 || label_dim != 0)
+      return diag::feeding::Error(
+          "token corpora derive next-token class labels (label_kind 1, "
+          "label_dim 0)");
+    // Records are (seq + 1) contiguous i32 ids with no stored label.
+    uint64_t record_ids = 0, payload = 0;
+    if (input_dim >= UINT64_MAX ||
+        !MulU64(input_dim + 1, sizeof(int32_t), &record_ids) ||
+        !MulU64(num_samples, record_ids, &payload) ||
+        payload > file_size - kSdsHeaderBytes)
+      return diag::feeding::Error("sample section exceeds file size");
+    if (payload > SIZE_MAX)
+      return diag::feeding::Error("dataset too large for this host");
+    d.tokens_.resize(num_samples * (input_dim + 1));
+    if (!read(d.tokens_.data(), static_cast<size_t>(payload)))
+      return diag::feeding::Error("truncated inputs");
+    for (const int32_t t : d.tokens_)
+      if (t < 0) return diag::feeding::Error("negative token id");
+    return d;
+  }
 
   // Overflow-safe sizing, cross-checked against the actual file size before
   // any allocation.
@@ -154,6 +205,18 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
 std::expected<void, std::string> Dataset::ValidateClassLabels(
     uint64_t num_classes) const {
   if (label_kind_ != 1 || num_classes == 0) return {};
+  if (input_kind_ == 1) {
+    // Every token is both an embedding index and (via the shifted view) a
+    // class label, so the whole stream is bounded — the caller passes the
+    // narrowest of the vocab and softmax widths.
+    for (uint64_t i = 0; i < tokens_.size(); ++i)
+      if (tokens_[i] < 0 || static_cast<uint64_t>(tokens_[i]) >= num_classes)
+        return diag::feeding::Error(
+            "token id " + std::to_string(tokens_[i]) + " at position " +
+            std::to_string(i) + " outside [0, " + std::to_string(num_classes) +
+            ")");
+    return {};
+  }
   const auto* labels = reinterpret_cast<const int32_t*>(labels_.data());
   for (uint64_t i = 0; i < num_samples_; ++i)
     if (labels[i] < 0 || static_cast<uint64_t>(labels[i]) >= num_classes)
@@ -172,14 +235,23 @@ std::expected<void, std::string> Dataset::SaveToFile(
     f.write(reinterpret_cast<const char*>(src),
             static_cast<std::streamsize>(n));
   };
-  const uint32_t version = 1, pad = 0;
+  const uint32_t version = input_kind_ == 1 ? 2 : 1;
   write(&kSdsMagic, 4);
   write(&version, 4);
   write(&num_samples_, 8);
   write(&input_dim_, 8);
   write(&label_kind_, 4);
-  write(&pad, 4);
+  write(&input_kind_, 4);  // header padding in v1 (always 0 there)
   write(&label_dim_, 8);
+  if (input_kind_ == 1) {
+    // Token records are one contiguous i32 block; labels are derived,
+    // never stored.
+    write(tokens_.data(), tokens_.size() * sizeof(int32_t));
+    f.close();
+    if (f.fail())
+      return diag::feeding::Error("short write to '" + path + "'");
+    return {};
+  }
   const uint64_t lbytes = label_bytes_per_sample();
   if (lbytes == 0) {
     // Unlabeled: the sample section is exactly the input block.
@@ -215,6 +287,31 @@ std::expected<void, std::string> Dataset::SaveToFile(
 
 void Dataset::FillBatch(uint64_t batch, float* input_slot,
                         uint8_t* label_slot) {
+  if (input_kind_ == 1) {
+    // `batch` counts token ROWS; the feeder contract proved it a whole
+    // number of records. Record r contributes tokens[0..S) as the input
+    // rows and the shifted view tokens[1..S] as the derived labels. The
+    // cursor/order/epoch machinery is untouched — it simply walks records.
+    const uint64_t S = input_dim_;
+    const uint64_t records = batch / S;
+    auto* in = reinterpret_cast<int32_t*>(input_slot);
+    auto* lab = reinterpret_cast<int32_t*>(label_slot);
+    for (uint64_t r = 0; r < records; ++r) {
+      const uint64_t i = order_.empty() ? cursor_ : order_[cursor_];
+      const int32_t* rec = tokens_.data() + i * (S + 1);
+      std::memcpy(in + r * S, rec, S * sizeof(int32_t));
+      if (lab) std::memcpy(lab + r * S, rec + 1, S * sizeof(int32_t));
+      cursor_ = cursor_ + 1;
+      if (cursor_ == num_samples_) {
+        cursor_ = 0;
+        if (!order_.empty()) {
+          Reshuffle();  // fresh permutation every epoch
+          ++epoch_;
+        }
+      }
+    }
+    return;
+  }
   const uint64_t lbytes = label_bytes_per_sample();
 
   if (order_.empty()) {
@@ -322,6 +419,19 @@ std::expected<Dataset, std::string> Dataset::SplitValidation(double fraction) {
   val.input_dim_ = input_dim_;
   val.label_kind_ = label_kind_;
   val.label_dim_ = label_dim_;
+  val.input_kind_ = input_kind_;
+  if (input_kind_ == 1) {
+    // Token corpora split at RECORD (sequence) granularity: the tail
+    // records move wholesale, so no sequence is ever cut in half.
+    const uint64_t rec_ids = input_dim_ + 1;
+    val.tokens_.assign(
+        tokens_.begin() + static_cast<ptrdiff_t>(train_n * rec_ids),
+        tokens_.end());
+    tokens_.resize(train_n * rec_ids);
+    num_samples_ = train_n;
+    cursor_ = 0;
+    return val;
+  }
   val.inputs_.assign(inputs_.begin() + static_cast<ptrdiff_t>(train_n * input_dim_),
                      inputs_.end());
   val.labels_.assign(labels_.begin() + static_cast<ptrdiff_t>(train_n * lbytes),

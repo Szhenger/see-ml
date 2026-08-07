@@ -47,8 +47,11 @@ inline constexpr uint32_t kSmfMagic = 0x31464D53;  // "SMF1" little-endian
 // layout is unchanged. v3 adds the transformer vocabulary
 // (Add/RmsNorm/Rope/Attention), a model-level u64 seq_len after the
 // output name, and a per-op u32 attr0 word after the output (heads for
-// Rope/Attention, 0 elsewhere). Readers accept v1..v3; the writer emits v3.
-inline constexpr uint32_t kSmfVersion = 3;
+// Rope/Attention, 0 elsewhere). v4 adds kEmbedding — with it, a model may
+// declare a rank-1 dynamic ({-1}) non-const input, meaning i32 token ids
+// consumed exclusively by embedding ops; the byte layout is v3's.
+// Readers accept v1..v4; the writer emits v4.
+inline constexpr uint32_t kSmfVersion = 4;
 inline constexpr uint32_t kSmfMinVersion = 1;
 
 // SMF is read/written by memcpy of host integers; the documented on-disk
@@ -71,12 +74,16 @@ enum class SmfOpKind : uint8_t {
   kRmsNorm = 8,    // inputs: {x, gamma}; RMS-normalizes the last dim
   kRope = 9,       // rotary position embedding; attr0 = num_heads
   kAttention = 10, // inputs: {q, k, v}; causal SDPA; attr0 = num_heads
+  // v4 vocabulary.
+  kEmbedding = 11, // inputs: {tokens (the i32 graph input), table [V, D]}
 };
-inline constexpr uint8_t kSmfOpKindMax = 10;
+inline constexpr uint8_t kSmfOpKindMax = 11;
 // A file carrying a kind newer than its own version is corrupt, not
-// forward-compatible: v1 ended at kRelu, v2 at kLayerNorm.
+// forward-compatible: v1 ended at kRelu, v2 at kLayerNorm, v3 at
+// kAttention.
 inline constexpr uint8_t kSmfOpKindMaxV1 = 2;
 inline constexpr uint8_t kSmfOpKindMaxV2 = 6;
+inline constexpr uint8_t kSmfOpKindMaxV3 = 10;
 
 struct SmfTensor {
   std::string name;

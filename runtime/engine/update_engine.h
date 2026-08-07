@@ -192,6 +192,7 @@ class UpdateEngine {
   const uint8_t* rodata_ = nullptr;       // points into the plan blob
   uint64_t step_ = 0;                     // 1-indexed AdamW timestep
   uint64_t num_classes_ = 0;              // softmax width, 0 = no class loss
+  uint64_t vocab_bound_ = 0;              // narrowest embedding table, 0 = none
   bool merged_ = false;
 
   // Where the eval program materializes its softmax probabilities — the

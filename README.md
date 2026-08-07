@@ -54,6 +54,7 @@ Read them in this order:
 | [docs/runtime.md](docs/runtime.md) | The on-device virtual machine: load-time validation as a safety proof, numerically stable kernels (and why naive formulas explode), deterministic parallelism, a producer-consumer pipeline, and storage that survives a power cut. |
 | [docs/formats.md](docs/formats.md) | The four binary formats on disk — bytes, offsets, magic numbers, and hashes — and why each field is there. |
 | [test/README.md](test/README.md) | How the test tree mirrors the code, and how you test calculus with arithmetic. |
+| [docs/benchmarks.md](docs/benchmarks.md) | The metric program that gates frontier development: throughput, kernel, memory, lifecycle, and velocity tiers. |
 
 ## Design Principles
 
@@ -69,16 +70,17 @@ If you remember nothing else, remember these five, because every file in this re
 
 What SeeML can train today, stated up front:
 
-- **Models.** Feed-forward and decoder-transformer graphs over eleven
+- **Models.** Feed-forward and decoder-transformer graphs over twelve
   operator kinds: `MatMul`, `AddBias`, `Relu`, `Gelu`, `Silu`, `Mul`,
-  `LayerNorm` (SMF v2), plus `Add`, `RmsNorm`, `Rope`, and causal
-  `Attention` (SMF v3, with model-level sequence geometry) — enough for
-  pre-norm decoder blocks with SwiGLU MLPs. The PyTorch exporter accepts an
+  `LayerNorm` (SMF v2), `Add`, `RmsNorm`, `Rope`, and causal `Attention`
+  (SMF v3, with model-level sequence geometry), plus `Embedding` (SMF v4)
+  — token-native decoders train end to end: the corpus carries i32 token
+  ids (SDS v2), next-token labels are derived from the shifted view, and
+  the frozen embedding gathers on-device. The PyTorch exporter accepts an
   `nn.Sequential` of `Linear`/activation/`LayerNorm` modules, and
-  `export_decoder_smf` emits decoder stacks from plain weight arrays
-  (embedding lookup stays outside the update: corpora carry pre-embedded
-  rows). The compiler's intermediate representation additionally models 2-D
-  convolution (lowered to matrix multiplication via im2col), but
+  `export_decoder_smf` emits decoder stacks from plain weight arrays. 
+  The compiler's intermediate representation additionally models 2-D convolution 
+  (lowered to matrix multiplication via im2col), but
   grouped/dilated forms are rejected and the SMF container does not yet
   carry convolutions.
 - **Training method.** LoRA adapters on frozen `MatMul` weights only — the
@@ -99,4 +101,5 @@ What SeeML can train today, stated up front:
 - **Integrity, not authenticity.** All hashing is FNV-1a — a corruption and
   mismatch detector, not a signature. Authenticate plans in your update
   transport.
+
 

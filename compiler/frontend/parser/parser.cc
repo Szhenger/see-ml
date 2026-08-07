@@ -99,6 +99,26 @@ std::expected<sir::Value*, std::string> BuildForward(
                                      (*x)->shape()));
         break;
       }
+      case SmfOpKind::kEmbedding: {
+        if (op.inputs.size() != 2)
+          return parsing::OpError("Embedding", op.name,
+                                  "needs 2 inputs (tokens, table)");
+        auto tokens = resolver.Resolve(op.inputs[0]);
+        if (!tokens) return std::unexpected(tokens.error());
+        auto table = resolver.Resolve(op.inputs[1]);
+        if (!table) return std::unexpected(table.error());
+        if (auto ok = sema::CheckEmbedding(op, **tokens, **table); !ok)
+          return std::unexpected(ok.error());
+        sir::Operation* emb = block.appendOp("sc_high.embedding");
+        emb->addOperand(*tokens);
+        emb->addOperand(*table);
+        resolver.Bind(
+            op.output,
+            emb->addResult(prefix + op.output, sir::DataType::F32,
+                           sir::Shape{(*tokens)->shape().dims.at(0),
+                                      (*table)->shape().dims.at(1)}));
+        break;
+      }
       case SmfOpKind::kAdd: {
         if (op.inputs.size() != 2)
           return parsing::OpError("Add", op.name, "needs 2 inputs");

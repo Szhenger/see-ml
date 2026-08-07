@@ -780,6 +780,18 @@ TEST(Gelu, BackwardStaysFiniteAtExtremeInputs) {
   EXPECT_EQ(dx[1], 0.0f);  // derivative saturates to 0
 }
 
+TEST(Embed, GathersTableRowsByTokenId) {
+  // table [4, 3]; tokens pick rows out of order and with a repeat.
+  const std::vector<float> table = {0, 1, 2,  10, 11, 12,
+                                    20, 21, 22, 30, 31, 32};
+  const std::vector<int32_t> tokens = {2, 0, 3, 0};
+  std::vector<float> out(tokens.size() * 3, -1.0f);
+  k::EmbedFwd(tokens.data(), table.data(), out.data(), tokens.size(), 3);
+  const std::vector<float> want = {20, 21, 22, 0, 1, 2,
+                                   30, 31, 32, 0, 1, 2};
+  for (size_t i = 0; i < want.size(); ++i) EXPECT_EQ(out[i], want[i]);
+}
+
 TEST(Attention, SingleTokenSequenceIsIdentityOverV) {
   // S = 1: the causal prefix is one element, P is exactly 1, and O copies V.
   const size_t B = 2, S = 1, H = 2, d = 3, n = B * S * H * d;

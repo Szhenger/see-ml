@@ -118,6 +118,32 @@ TEST(PlanValidator, SoftmaxRowsBackwardOverflowIsRejected) {
   EXPECT_ERROR(ValidateInstruction(sm, kArena, kRodata, up::kSeeuVersion));
 }
 
+TEST(PlanValidator, EmbedProvesBuffersAndDemandsRodataTable) {
+  // T=4 tokens (i32), table [V=8, D=4] in RODATA, out [4, 4] in the arena.
+  up::UpdateInstruction emb;
+  emb.opcode = static_cast<uint16_t>(up::OpCode::kEmbedFwd);
+  emb.in[0] = up::MakeArenaRef(0);
+  emb.in[1] = up::MakeRodataRef(0);  // 8*4*4 = 128 B <= kRodata
+  emb.in[2] = up::MakeArenaRef(64);
+  emb.out[0] = 4;
+  emb.out[1] = (uint64_t{8} << 32) | 4;
+  EXPECT_OK(ValidateInstruction(emb, kArena, kRodata, up::kSeeuVersion));
+  // The gather's index bound is the FEEDER contract's job, but the buffers
+  // are this validator's: an arena-resident table is rejected (only the
+  // compiler's rodata packing produces one), as is a pre-v7 plan carrying
+  // the opcode, an out-of-bounds output, and an output aliasing the tokens.
+  emb.in[1] = up::MakeArenaRef(256);
+  EXPECT_ERROR(ValidateInstruction(emb, kArena, kRodata, up::kSeeuVersion));
+  emb.in[1] = up::MakeRodataRef(0);
+  EXPECT_ERROR_CONTAINS(
+      ValidateInstruction(emb, kArena, kRodata, up::kSeeuTokenVersion - 1),
+      "token opcode");
+  emb.in[2] = up::MakeArenaRef(kArena - 32);
+  EXPECT_ERROR(ValidateInstruction(emb, kArena, kRodata, up::kSeeuVersion));
+  emb.in[2] = up::MakeArenaRef(0);  // write over the tokens read
+  EXPECT_ERROR(ValidateInstruction(emb, kArena, kRodata, up::kSeeuVersion));
+}
+
 TEST(PlanValidator, RopeRequiresEvenHeadWidth) {
   up::UpdateInstruction rope;
   rope.opcode = static_cast<uint16_t>(up::OpCode::kRopeFwd);

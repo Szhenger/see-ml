@@ -107,6 +107,11 @@ std::expected<void, std::string> ValidateInstruction(
     return diag::validating::Error(
         "transformer opcode " + std::to_string(ins.opcode) + " in a pre-v" +
         std::to_string(up::kSeeuTransformerVersion) + " plan");
+  if (ins.opcode == static_cast<uint16_t>(up::OpCode::kEmbedFwd) &&
+      plan_version < up::kSeeuTokenVersion)
+    return diag::validating::Error(
+        "token opcode " + std::to_string(ins.opcode) + " in a pre-v" +
+        std::to_string(up::kSeeuTokenVersion) + " plan");
   // Shared geometry for the transformer family: activations are
   // [B*S, H*d] f32, the probability matrix [B*H*S, S]. Derived with the
   // same overflow-safe chain the kernels' loop bounds imply.
@@ -312,6 +317,21 @@ std::expected<void, std::string> ValidateInstruction(
       if (!attn_geometry(d0, d1, &td, &pn)) return fail();
       if (!ref_ok(ins.in[0], pn, false) || !ref_ok(ins.in[1], td, false) ||
           !ref_ok(ins.in[2], td, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kEmbedFwd: {
+      // out[t, :] = table[tokens[t], :] with T = d0 rows and a [V, D]
+      // table packed as d1 = V<<32|D. The table must be rodata: only the
+      // compiler's own packing produces it, and the gather's row bound
+      // (tokens[t] < V) is the FEEDER contract's runtime obligation — the
+      // extents proven here are the buffers, not the indices.
+      const uint64_t vocab = d1 >> 32, dim = d1 & 0xFFFFFFFFu;
+      uint64_t vd = 0, td = 0;
+      if (!MulOk(vocab, dim, &vd) || !MulOk(d0, dim, &td)) return fail();
+      if (!up::IsRodataRef(ins.in[1])) return fail();
+      if (!ref_ok(ins.in[0], d0, false) ||  // i32 tokens: 4-byte elements
+          !ref_ok(ins.in[1], vd, false) || !ref_ok(ins.in[2], td, true))
         return fail();
       return disjoint();
     }

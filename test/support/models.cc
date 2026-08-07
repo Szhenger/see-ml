@@ -195,6 +195,31 @@ SmfModel MakeTinyDecoder(int64_t dim, int64_t heads, int64_t seq, int64_t ffn,
   return m;
 }
 
+SmfModel MakeTinyTokenDecoder(int64_t vocab, int64_t dim, int64_t heads,
+                              int64_t seq, int64_t ffn, uint64_t seed) {
+  // The decoder block of MakeTinyDecoder, fed by an embedding gather over
+  // a rank-1 dynamic i32 input instead of pre-embedded rows.
+  SmfModel m = MakeTinyDecoder(dim, heads, seq, ffn, vocab, seed);
+  m.tensors[0].dims = {-1};  // x: token ids, one per row
+  std::mt19937_64 rng(seed ^ 0x9E3779B97F4A7C15ULL);
+  std::normal_distribution<float> dist(0.0f, 0.5f);
+  std::vector<float> table(static_cast<size_t>(vocab * dim));
+  for (auto& v : table) v = dist(rng);
+  m.tensors.push_back({.name = "emb",
+                       .dims = {vocab, dim},
+                       .is_const = true,
+                       .data = AsBytes(table)});
+  m.tensors.back().byte_size = m.tensors.back().data.size();
+  // The embedding replaces x at the front of the op list; every op that
+  // read "x" as features now reads the gathered rows "e".
+  m.ops.insert(m.ops.begin(),
+               {SmfOpKind::kEmbedding, "embed", {"x", "emb"}, "e"});
+  for (size_t i = 1; i < m.ops.size(); ++i)
+    for (auto& in : m.ops[i].inputs)
+      if (in == "x") in = "e";
+  return m;
+}
+
 UpdateConfig BaseConfig(int64_t batch) {
   UpdateConfig config;
   config.batch = batch;

@@ -168,6 +168,16 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.out[0] = ref(op->operand(3));  // mean cache
       ins.out[1] = ref(op->operand(4));  // rstd cache
       ins.out[2] = pack32(dx->shape().dims.at(0), dx->shape().dims.at(1));
+    } else if (m == "sc_high.embedding") {
+      const sir::Value* out = op->result(0);
+      const sir::Value* table = op->operand(1);
+      set(OpCode::kEmbedFwd);
+      ins.in[0] = ref(op->operand(0));   // i32 tokens
+      ins.in[1] = ref(table);            // rodata [V, D]
+      ins.in[2] = ref(out);
+      ins.out[0] = static_cast<uint64_t>(out->shape().dims.at(0));
+      ins.out[1] =
+          pack32(table->shape().dims.at(0), table->shape().dims.at(1));
     } else if (m == "sc_high.rms_norm") {
       const sir::Value* y = op->result(0);
       set(OpCode::kRmsNormFwd);

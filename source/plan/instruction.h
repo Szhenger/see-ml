@@ -93,6 +93,14 @@ enum class OpCode : uint16_t {
   kSoftmaxRowsBwd = 38,  // in: P, dP, dS; out[0]=rows<<32|cols
   kAttnDQ = 39,   // dQ = (dS K)/sqrt(d):   in: dS, k, dQ; out[0..1]=B|S, H|d
   kAttnDK = 40,   // dK = (dS^T Q)/sqrt(d): in: dS, q, dK; out[0..1]=B|S, H|d
+  // --- Token-native input (plan v7). ----------------------------------------
+  // Frozen embedding gather: out[t, :] = table[tokens[t], :]. Tokens are
+  // i32; the table is frozen rodata (never adapted — LoRA targets MatMuls).
+  // The validator proves the extents; the RUNTIME bound tokens[t] < V is
+  // the feeder contract's job, exactly as class labels are bounded by the
+  // narrowest softmax width before anything executes.
+  kEmbedFwd = 41,  // in: tokens(i32 [T]), table(ro [V,D]), out([T,D]);
+                   // out[0]=T, out[1]=V<<32|D
 };
 
 // --- Instruction flags (plan v5): fused GEMM epilogues. ----------------------
