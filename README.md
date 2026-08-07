@@ -1,6 +1,6 @@
 # SeeML: An ML Update Compiler (How to Train a Model)
 
-## This is Machine Learning Systems
+## This is Machine Learning
 
 Odds are, some device of yours updated an app this week. You barely noticed, and that's the point: the update arrived as a self-contained package, was verified before a single byte was trusted, applied atomically, and — had anything gone wrong — your device would have been left exactly as it was, as though nothing had happened at all.
 
