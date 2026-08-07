@@ -10,41 +10,6 @@ So, a question: **how might we make training a model as safe, as small, and as b
 
 It turns out the answer is a compiler.
 
-## Scope and Limitations
-
-What SeeML can train today, stated up front:
-
-- **Models.** Feed-forward and decoder-transformer graphs over eleven
-  operator kinds: `MatMul`, `AddBias`, `Relu`, `Gelu`, `Silu`, `Mul`,
-  `LayerNorm` (SMF v2), plus `Add`, `RmsNorm`, `Rope`, and causal
-  `Attention` (SMF v3, with model-level sequence geometry) — enough for
-  pre-norm decoder blocks with SwiGLU MLPs. The PyTorch exporter accepts an
-  `nn.Sequential` of `Linear`/activation/`LayerNorm` modules, and
-  `export_decoder_smf` emits decoder stacks from plain weight arrays
-  (embedding lookup stays outside the update: corpora carry pre-embedded
-  rows). The compiler's intermediate representation additionally models 2-D
-  convolution (lowered to matrix multiplication via im2col), but
-  grouped/dilated forms are rejected and the SMF container does not yet
-  carry convolutions.
-- **Training method.** LoRA adapters on frozen `MatMul` weights only — the
-  base model is never trained directly. Optimizers: SGD or AdamW, one
-  parameter group. Losses: cross-entropy, MSE, KL distillation from a
-  teacher model, or a weighted cross-entropy + KL composite.
-- **Numerics.** Training is f32 throughout. `--quantize-base` stores the
-  *frozen* weights as int8 in read-only data; because commit applies deltas
-  to the pristine f32 source file, quantization error is never baked into
-  the committed model.
-- **Shapes.** The batch size is fixed at compile time and baked into the
-  plan; the dataset must match the compiled geometry.
-- **Target machine.** The compiler derives its cache tilings from the
-  machine it runs on (host = target). The emitted package cross-compiles
-  (set `CXX`), but tilings remain build-host-derived hints. Execution is
-  CPU; on Apple hosts a hardware-validated Metal GEMM dispatch harness
-  exists (roadmap Project 5), but the engine does not yet dispatch to it.
-- **Integrity, not authenticity.** All hashing is FNV-1a — a corruption and
-  mismatch detector, not a signature. Authenticate plans in your update
-  transport.
-
 ## Prerequisites of Machine Learning
 
 - **Build and run:** a C++23 compiler (clang or gcc). CMake is supported but
@@ -100,4 +65,38 @@ If you remember nothing else, remember these five, because every file in this re
 - **No improvement, no change.** Every update must prove itself on data it never trained on; a failed update leaves the device exactly as it was.
 - **Power cuts are ordinary.** Every durable write is an fsync'd sidecar file plus an atomic rename. There is no torn state.
 
-Was this compiled for you? In a sense, yes — now go read [docs/usage.md](docs/usage.md).
+## Scope and Limitations
+
+What SeeML can train today, stated up front:
+
+- **Models.** Feed-forward and decoder-transformer graphs over eleven
+  operator kinds: `MatMul`, `AddBias`, `Relu`, `Gelu`, `Silu`, `Mul`,
+  `LayerNorm` (SMF v2), plus `Add`, `RmsNorm`, `Rope`, and causal
+  `Attention` (SMF v3, with model-level sequence geometry) — enough for
+  pre-norm decoder blocks with SwiGLU MLPs. The PyTorch exporter accepts an
+  `nn.Sequential` of `Linear`/activation/`LayerNorm` modules, and
+  `export_decoder_smf` emits decoder stacks from plain weight arrays
+  (embedding lookup stays outside the update: corpora carry pre-embedded
+  rows). The compiler's intermediate representation additionally models 2-D
+  convolution (lowered to matrix multiplication via im2col), but
+  grouped/dilated forms are rejected and the SMF container does not yet
+  carry convolutions.
+- **Training method.** LoRA adapters on frozen `MatMul` weights only — the
+  base model is never trained directly. Optimizers: SGD or AdamW, one
+  parameter group. Losses: cross-entropy, MSE, KL distillation from a
+  teacher model, or a weighted cross-entropy + KL composite.
+- **Numerics.** Training is f32 throughout. `--quantize-base` stores the
+  *frozen* weights as int8 in read-only data; because commit applies deltas
+  to the pristine f32 source file, quantization error is never baked into
+  the committed model.
+- **Shapes.** The batch size is fixed at compile time and baked into the
+  plan; the dataset must match the compiled geometry.
+- **Target machine.** The compiler derives its cache tilings from the
+  machine it runs on (host = target). The emitted package cross-compiles
+  (set `CXX`), but tilings remain build-host-derived hints. Execution is
+  CPU; on Apple hosts a hardware-validated Metal GEMM dispatch harness
+  exists (roadmap Project 5), but the engine does not yet dispatch to it.
+- **Integrity, not authenticity.** All hashing is FNV-1a — a corruption and
+  mismatch detector, not a signature. Authenticate plans in your update
+  transport.
+
