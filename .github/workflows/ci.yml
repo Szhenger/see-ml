@@ -1,0 +1,225 @@
+# =============================================================================
+# CI — the per-diff invariant gate. Every pull request (and every push to
+# main) must re-prove the three properties the project is built around:
+#
+#   correctness   build+test on every supported toolchain, ASan+UBSan over
+#                 the full suite set, and a bounded fuzz pass over the four
+#                 untrusted-input arms (SMF / SEEU / SDS / compile-of-SMF)
+#   determinism   the bitwise-invariance suites re-run under SEEML_THREADS
+#                 in {1, 3, 8}, so every "same bits at any width" assertion
+#                 executes against genuinely different worker-pool shapes
+#   boundedness   the seeded distribution-bound and concurrency-race tests
+#                 run in every matrix cell; the slow ThreadSanitizer pass
+#                 over the same races lives in nightly.yml
+#
+# The suites themselves carry the assertions; CI's job is to run them on
+# configurations a developer machine does not (other OS/compilers,
+# sanitizers, varied pool widths) and to refuse the merge when any fails.
+# =============================================================================
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # --- Correctness: the supported-toolchain matrix ---------------------------
+  # README promises clang or gcc, CMake optional: the shell driver is the
+  # canonical build here. macOS additionally exercises the ObjC++ Metal
+  # harness (the suite degrades to a note when the runner has no device).
+  build-and-test:
+    name: test (${{ matrix.os }}, ${{ matrix.cxx }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, cxx: g++ }
+          - { os: ubuntu-latest, cxx: clang++ }
+          - { os: macos-latest, cxx: clang++ }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CXX: ${{ matrix.cxx }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (shell driver, no CMake)
+        run: sh build/build.sh
+      - name: Run every suite
+        run: |
+          fail=0
+          for t in build/seeml_*_test; do
+            echo "== $t"
+            "$t" || fail=1
+          done
+          exit $fail
+
+  # --- Determinism: identical bits at every pool width -----------------------
+  # SEEML_THREADS pins the global worker pool. The bitwise assertions inside
+  # the suites (plan bytes, persist segments, kernel outputs, hashes) then
+  # execute serially, at an odd width, and wide — any scheduling-dependent
+  # numeric would trip at least one width.
+  determinism:
+    name: determinism (widths 1/3/8)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: sh build/build.sh
+      - name: Run all suites at each width
+        run: |
+          fail=0
+          for w in 1 3 8; do
+            echo "==== SEEML_THREADS=$w"
+            for t in build/seeml_*_test; do
+              SEEML_THREADS=$w "$t" > /tmp/out.log 2>&1 || {
+                echo "FAILED at width $w: $t"
+                cat /tmp/out.log
+                fail=1
+              }
+            done
+          done
+          exit $fail
+
+  # --- Correctness: Address + UndefinedBehavior sanitizers -------------------
+  # The bug class the reviews kept surfacing (e.g. a float->int8 cast of
+  # clamp(NaN)) is exactly what UBSan turns from silent corruption into a
+  # red build. Uses the CMake path, which carries the sanitizer plumbing.
+  asan-ubsan:
+    name: ASan + UBSan
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CXX: clang++
+      ASAN_OPTIONS: strict_string_checks=1:detect_stack_use_after_return=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >
+          cmake -S . -B build-san
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DSEEML_SANITIZE="address;undefined"
+      - name: Build
+        run: cmake --build build-san -j "$(nproc)"
+      - name: Test
+        run: ctest --test-dir build-san --output-on-failure
+
+  # --- Correctness: bounded fuzz over the untrusted-input arms ---------------
+  # 90 seconds per PR is a smoke pass, not a campaign (nightly runs the long
+  # one): it still catches shallow regressions in the reader/validator
+  # rejection paths that a hand-written test didn't anticipate.
+  fuzz-smoke:
+    name: fuzz (90s smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CXX: clang++
+      CC: clang
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-fuzz -DSEEML_FUZZ=ON
+      - name: Build harness
+        run: cmake --build build-fuzz -j "$(nproc)" --target seeml_fuzz_formats
+      - name: Fuzz
+        run: |
+          mkdir -p corpus
+          ./build-fuzz/seeml_fuzz_formats -max_total_time=90 \
+            -print_final_stats=1 corpus
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashes
+          path: |
+            crash-*
+            corpus
+          if-no-files-found: ignore
+
+  # --- Correctness: the product contract, end to end -------------------------
+  # The strongest claim in the docs — "the emitted package builds and runs
+  # with no access to this repository" — exercised for real: PyTorch export
+  # -> compile -> the package's own generated build.sh -> model_update
+  # training, gating, and committing on-device style. Then the determinism
+  # invariant at the artifact level: a fully serial re-run must commit a
+  # BITWISE-identical model. Outcome-robust: if the seeded demo's gate
+  # rejects (exit 3), the run is retried with --force — the invariants
+  # under test are build/run/commit/determinism, not the demo's luck.
+  e2e-package:
+    name: e2e (export -> compile -> package -> update)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CXX: clang++
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install CPU torch for the exporter
+        run: pip install --index-url https://download.pytorch.org/whl/cpu torch numpy
+      - name: Export the demo model + corpus
+        run: python3 tool/export_model.py --demo out/
+      - name: Build the compiler
+        run: sh build/build.sh
+      - name: Compile the plan and build the emitted package
+        run: |
+          ./build/seeml-update-compile --source out/model.smf --out out/pkg \
+            --data-batch 16 --loss xent --lora-rank 8 --lr 5e-3 --steps 300 \
+            --report out/pkg/report.json --build
+          test -x out/pkg/model_update
+      - name: Verify the plan seal with the disassembler
+        run: ./build/seeml-seeu-dump out/pkg/update_plan.seeu | grep -q "(verified)"
+      - name: Run the update (parallel), tolerating a gate rejection
+        run: |
+          set +e
+          out/pkg/model_update --model out/model.smf --data out/corpus.sds \
+            --out out/updated.smf --seed 7 --val-frac 0.1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "gate: improved and committed"
+            echo "E2E_FORCE=" >> "$GITHUB_ENV"
+          elif [ "$rc" -eq 3 ]; then
+            echo "gate: rejected — exercising the commit path with --force"
+            out/pkg/model_update --model out/model.smf --data out/corpus.sds \
+              --out out/updated.smf --seed 7 --val-frac 0.1 --force
+            echo "E2E_FORCE=--force" >> "$GITHUB_ENV"
+          else
+            echo "model_update failed with a real error ($rc)"
+            exit "$rc"
+          fi
+          test -s out/updated.smf
+      - name: Serial re-run commits a bitwise-identical model
+        run: |
+          # The gate's verdict is deterministic (same data, seed, and plan;
+          # thread count never changes bits), so the parallel run's verdict
+          # carries over — a divergence would itself be a determinism bug
+          # and correctly fails this step.
+          SEEML_THREADS=1 out/pkg/model_update --model out/model.smf \
+            --data out/corpus.sds --out out/updated_serial.smf \
+            --seed 7 --val-frac 0.1 ${E2E_FORCE}
+          cmp out/updated.smf out/updated_serial.smf
+          echo "serial and parallel commits are bitwise identical"
+
+  # --- Correctness: the Python exporter at least parses ----------------------
+  # Torch is deliberately not installed (heavy; the exporter's torch imports
+  # are function-local): this gates syntax and top-level import errors.
+  exporter-syntax:
+    name: exporter syntax
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Byte-compile
+        run: python3 -m py_compile tool/export_model.py
