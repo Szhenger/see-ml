@@ -1,6 +1,6 @@
 # The SeeML Compiler
 
-## What does it mean to *compile* training?
+## What does it mean to *compile* Training?
 
 Ordinarily, training a model is something you *run* — a framework interprets
 your graph, allocates memory as it goes, and dispatches kernels on the fly.
@@ -37,7 +37,7 @@ compiler/
     tokenizing/ parsing/ passing/ updating/ architecting/ generating/
 ```
 
-## The shape of the pipeline
+## The Shape of the Pipeline
 
 Read the folders top to bottom and you have the pipeline. **`frontend/`**
 turns untrusted SMF (SeeML Model Format) bytes into SIR — the SSA
@@ -59,7 +59,7 @@ adjoints/steps) so you always know which layer of the story you're in; and
 `driver/contract.h` is where the compiler distrusts *itself*, catching a
 misused subsystem as a compiler bug rather than letting it reach the device.
 
-## Where to go next
+## Where to go Next
 
 This is the orientation; the teaching is in
 **[docs/compiler.md](../docs/compiler.md)**, which walks every stage from
