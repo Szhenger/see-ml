@@ -1,6 +1,6 @@
 # The SeeML Compiler
 
-## What does it mean to *compile* Training?
+## What Does it Mean to *Compile* Training?
 
 Ordinarily, training a model is something you *run* — a framework interprets
 your graph, allocates memory as it goes, and dispatches kernels on the fly.
@@ -59,7 +59,7 @@ adjoints/steps) so you always know which layer of the story you're in; and
 `driver/contract.h` is where the compiler distrusts *itself*, catching a
 misused subsystem as a compiler bug rather than letting it reach the device.
 
-## Where to go Next
+## Where to Go Next
 
 This is the orientation; the teaching is in
 **[docs/compiler.md](../docs/compiler.md)**, which walks every stage from
