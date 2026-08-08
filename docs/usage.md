@@ -1,6 +1,6 @@
 # Using SeeML
 
-## The shape of the workflow
+## The Shape of the Workflow
 
 SeeML compiles an on-device model update *ahead of time*: LoRA adapters are grafted onto a frozen model, the backward pass and optimizer are synthesized as a fixed instruction stream bound to a pre-planned arena, and the result is executed on-device by a zero-dependency VM. One `.seeu` plan = one complete, gated, resumable, atomically-committed update.
 
@@ -14,7 +14,7 @@ device:      3. update   model.smf + corpus.sds  ──▶  updated.smf, or no c
 
 Notice what does *not* travel to the device: PyTorch, Python, this repository. The device receives a folder that builds with any C++23 compiler. If you want to understand what each step does internally, [compiler.md](compiler.md) and [runtime.md](runtime.md) go deep; the binary files exchanged between the steps are specified in [formats.md](formats.md). This document just gets you running.
 
-## Step 1: Export the model (build host, PyTorch)
+## Step 1: Export the Model (build host, PyTorch)
 
 The quickest start — a demo model, teacher, and synthetic corpus in one command:
 
@@ -34,7 +34,7 @@ export_sds(inputs, labels, "corpus.sds")    # labels: int32 classes, dense f32, 
 
 The exporter accepts an `nn.Sequential` of `Linear`, `ReLU`, `GELU`, `SiLU`, and `LayerNorm` modules — anything else is a loud `ValueError`, not a silent skip. One detail worth knowing so the format makes sense later: PyTorch stores a `Linear`'s weight as `[out, in]`, but SMF's `MatMul(x, W)` wants `[in, out]`, so the exporter transposes on the way out. Labels: pass int32 class indices for cross-entropy, dense float vectors for MSE, or `None` for a distillation corpus (the teacher provides the targets).
 
-## Step 2: Compile the update plan (build host)
+## Step 2: Compile the Update Plan (build host)
 
 Here's a full-featured invocation; we'll unpack it flag by flag:
 
@@ -70,7 +70,7 @@ seeml-seeu-dump pkg/update_plan.seeu --instrs   # all three instruction streams
 
 Reading a training loop as thirty-ish opcodes of straight-line code is a genuinely instructive way to see what the compiler did — and a good sanity check that, say, your clip instructions exist.
 
-## Step 3: Run the update (device)
+## Step 3: Run the Update (device)
 
 ```bash
 model_update --model model.smf --data corpus.sds --out updated.smf \
@@ -103,7 +103,7 @@ What happens, in order:
 
 Exit codes are the API for your update orchestrator: `0` committed, `1` runtime error, `2` bad arguments, `3` regression-gate rejection. `--loss-log` appends a CSV loss curve if you want to watch the descent.
 
-## Threading and determinism
+## Threading and Determinism
 
 Both halves parallelize: the compiler's byte-heavy passes (int8 quantization, adapter initialization, plan embedding) and the runtime's kernels, plus a feeder thread that stages the next batch while the current step computes. Control it with one variable:
 
