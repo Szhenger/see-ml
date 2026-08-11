@@ -155,6 +155,11 @@ bool ArgsOk(int argc, char** argv) {
   static const char* const kBoolFlags[] = {"--force", "--resume", "--help",
                                            "-h"};
   for (int i = 1; i < argc; ++i) {
+    // Empty argv slots are shell debris (a quoted-but-unset "$VAR"), not
+    // typos: nothing can be misread from one, and the pre-strict runner
+    // accepted them — rejecting them would break existing wrappers for
+    // zero safety gain. They stay ignorable.
+    if (argv[i][0] == '\0') continue;
     bool known = false;
     for (const char* f : kValueFlags) {
       if (std::strcmp(argv[i], f) != 0) continue;
