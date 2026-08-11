@@ -513,6 +513,28 @@ TEST(UpdateEngineCommit, RejectsModelFileThePlanWasNotCompiledFrom) {
   EXPECT_OK(engine.CommitToModel(right, dir.File("ok.smf")));
 }
 
+TEST(UpdateEngineCommit, VerifySourceModelFailsFastOnTheWrongFile) {
+  ScopedTempDir dir;
+  SmfModel model = MakeMlp(kInDim, 10, 3, 1);
+  SmfModel other = MakeMlp(kInDim, 10, 3, 99);  // same shapes, other bytes
+  const std::string right = dir.File("right.smf");
+  const std::string wrong = dir.File("wrong.smf");
+  ASSERT_OK(SaveSmf(right, model));
+  ASSERT_OK(SaveSmf(wrong, other));
+
+  ASSERT_OK_AND_ASSIGN(SmfModel saved, LoadSmf(right));
+  auto compiled = UpdateCompiler(BaseConfig(kBatch)).Compile(saved);
+  ASSERT_OK(compiled);
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(compiled->plan.data(),
+                                  compiled->plan.size()));
+
+  // No train, no merge: the pre-flight check must work straight after load —
+  // its whole purpose is refusing before any training cycles are spent.
+  EXPECT_ERROR_CONTAINS(engine.VerifySourceModel(wrong), "source_model_hash");
+  EXPECT_OK(engine.VerifySourceModel(right));
+}
+
 TEST(UpdateEngineCommit, EvaluateBetweenMergeAndCommitDoesNotCorruptDeltas) {
   // Train -> RunMerge -> Evaluate -> CommitToModel is the natural
   // "validate after merging" sequence. The merge's delta buffers must live

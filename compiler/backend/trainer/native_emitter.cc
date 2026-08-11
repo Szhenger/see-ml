@@ -172,6 +172,14 @@ int main(int argc, char** argv) {
     std::fprintf(stderr, "load: %s\n", r.error().c_str());
     return 1;
   }
+
+  // Fail fast: the plan's emit offsets are only meaningful inside the exact
+  // file it was compiled from, and commit would refuse anyway — but only
+  // after the full training run. One file scan here buys that refusal now.
+  if (auto r = engine.VerifySourceModel(model); !r) {
+    std::fprintf(stderr, "model: %s\n", r.error().c_str());
+    return 1;
+  }
   std::fprintf(stderr,
                "seeml-update: resource contract — arena %llu bytes"
                " (%llu persistent)\n",
@@ -327,6 +335,8 @@ std::string BuildScript(const GemmTiling* tiling) {
        "activation.o normalization.o loss.o optimizer.o attention.o "
        "parallel_for.o durable_io.o plan_validator.o checkpoint.o "
        "-o model_update\n";
+  s += "# The .o files are intermediates; the deliverable is the binary.\n";
+  s += "rm -f ./*.o\n";
   s += "echo \"built: $(pwd)/model_update\"\n";
   return s;
 }

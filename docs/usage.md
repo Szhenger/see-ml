@@ -103,7 +103,7 @@ What happens, in order:
 4. **Gate** — validation loss is evaluated before and after training with the plan's eval program. No improvement → exit code 3 and the device is left *untouched* (`--force` overrides, if you must).
 5. **Merge + commit** — deltas `Δ = (α/r)·A@B` are materialized and added to the pristine f32 weights of the source file (which must hash-match the plan), written durably, renamed atomically. A power cut at any moment leaves the old model or the new one — never a torn file.
 
-Exit codes are the API for your update orchestrator: `0` committed, `1` runtime error, `2` bad arguments, `3` regression-gate rejection. `--loss-log` appends a CSV loss curve if you want to watch the descent.
+Exit codes are the API for your update orchestrator: `0` committed, `1` runtime error, `2` bad arguments, `3` regression-gate rejection. `--loss-log` writes the full per-step CSV loss curve once training completes (it is not appended live, so tail it after the run, not during).
 
 ## Threading and Determinism
 

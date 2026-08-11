@@ -299,11 +299,12 @@ int main(int argc, char** argv) {
   // Verify the integrity seal the same way the runtime does.
   const uint64_t state = PlanSelfHash(plan.data(), plan.size(),
                                       offsetof(PlanHeader, plan_hash));
+  const bool sealed = state == h.plan_hash;
 
   std::printf("seeu plan: %s\n", argv[1]);
   std::printf("  version            %u\n", h.version);
   std::printf("  plan_hash          %016" PRIx64 "  (%s)\n", h.plan_hash,
-              state == h.plan_hash ? "verified" : "MISMATCH — corrupt");
+              sealed ? "verified" : "MISMATCH — corrupt");
   std::printf("  source_model_hash  %016" PRIx64 "%s\n", h.source_model_hash,
               h.source_model_hash ? "" : "  (unbound)");
   std::printf("  arena              %" PRIu64 " B (%" PRIu64 " B persistent)\n",
@@ -360,5 +361,7 @@ int main(int argc, char** argv) {
                         sizeof(UpdateInstruction), plan.size()))
       Disassemble("merge", stream(h.merge_instr_offset), h.merge_instr_count);
   }
-  return 0;
+  // The dump above is still useful forensics for a corrupt plan, but a
+  // script must not need to parse text to learn the seal failed.
+  return sealed ? 0 : 1;
 }
