@@ -13,7 +13,7 @@
 
 namespace seeml::update {
 
-inline constexpr char kSeemlVersion[] = "1.2.0";
+inline constexpr char kSeemlVersion[] = "1.0.2";
 
 }  // namespace seeml::update
 

@@ -140,6 +140,14 @@ class UpdateEngine {
   [[nodiscard]] std::expected<void, std::string> CommitToModel(
       const std::string& source_model_path, const std::string& out_path) const;
 
+  /// Checks that `source_model_path` hashes to the plan's source_model_hash,
+  /// without training or writing anything. CommitToModel re-verifies the
+  /// copy it patches (no TOCTOU window); calling this right after load
+  /// merely fails fast — a mismatched model costs one file scan instead of
+  /// a full training run. Plans with no hash binding (hash 0) always pass.
+  [[nodiscard]] std::expected<void, std::string> VerifySourceModel(
+      const std::string& source_model_path) const;
+
   [[nodiscard]] std::expected<void, std::string> SaveCheckpoint(
       const std::string& path) const;
   [[nodiscard]] std::expected<void, std::string> LoadCheckpoint(

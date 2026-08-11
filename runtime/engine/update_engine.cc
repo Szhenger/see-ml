@@ -739,6 +739,19 @@ std::expected<void, std::string> UpdateEngine::RunMerge() {
   return {};
 }
 
+std::expected<void, std::string> UpdateEngine::VerifySourceModel(
+    const std::string& source_model_path) const {
+  if (header_.source_model_hash == 0) return {};
+  auto hash = HashFileContent(source_model_path);
+  if (!hash) return std::unexpected(hash.error());
+  if (*hash != header_.source_model_hash)
+    return diag::executing::Error(
+        "source model does not match the plan's "
+        "source_model_hash — refusing to run against '" +
+        source_model_path + "'");
+  return {};
+}
+
 std::expected<void, std::string> UpdateEngine::CommitToModel(
     const std::string& source_model_path, const std::string& out_path) const {
   if (!merged_)
