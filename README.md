@@ -13,7 +13,9 @@ It turns out the answer is a compiler.
 ## Prerequisites of Machine Learning
 
 - **Build and run:** a C++23 compiler with `std::expected` support — GCC 13+,
-  Clang 17+ (against libstdc++ 13+), or Apple Clang 15+. CMake is supported
+  Apple Clang 15+, or (paired with libstdc++, as on Linux) Clang 19+:
+  earlier Clangs don't define `__cpp_concepts >= 202002L`, so libstdc++'s
+  `<expected>` header hides the template from them. CMake is supported
   but optional — `build/build.sh` drives a full build with `sh` alone.
 - **Model export only:** Python 3 with PyTorch and NumPy
   (`tool/export_model.py`); `pip install -r tool/requirements.txt` installs

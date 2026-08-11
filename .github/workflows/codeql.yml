@@ -33,11 +33,11 @@ jobs:
           languages: c-cpp
           queries: security-and-quality
       - name: Pin the Linux toolchain
-        run: sudo apt-get update -q && sudo apt-get install -y -q clang-18
+        run: wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all
       - name: Build (traced)
         run: sh build/build.sh
         env:
-          CXX: clang++-18
+          CXX: clang++-19
       - uses: github/codeql-action/analyze@v3
         with:
           category: "/language:c-cpp"
