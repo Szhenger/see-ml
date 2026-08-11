@@ -104,8 +104,8 @@ What SeeML can train today, stated up front:
   mismatch detector, not a signature. Authenticate plans in your update
   transport.
 
-## License
+## Development
 
-MIT — see [LICENSE](LICENSE).
+This project was developed at SmoothML! 
 
 
