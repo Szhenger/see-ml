@@ -390,6 +390,11 @@ void Dataset::RestoreServingPos(ServingPos pos) {
   }
 }
 
+void Dataset::SkipServed(uint64_t rows) {
+  const uint64_t records = input_kind_ == 1 ? rows / input_dim_ : rows;
+  RestoreServingPos({records % num_samples_, records / num_samples_});
+}
+
 void Dataset::Reshuffle() {
   for (uint64_t i = 0; i < num_samples_; ++i) order_[i] = i;
   // Fisher–Yates with an unbiased-enough bound (num_samples << 2^64).

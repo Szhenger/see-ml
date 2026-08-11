@@ -644,6 +644,54 @@ TEST(UpdateSystem, TokenDecoderGradientsMatchFiniteDifferences) {
   GradientCheck(compiled, engine, 3737, /*tol=*/3e-2);
 }
 
+TEST(UpdateSystem, TokenDecoderResumeMatchesUninterruptedRun) {
+  const int64_t vocab = 16, dim = 8, heads = 2, seq = 4, ffn = 16;
+  const int64_t batch = 16;  // 4 records per step: on resume the feeder
+                             // must advance in records, not rows
+  SmfModel model =
+      seeml::testing::MakeTinyTokenDecoder(vocab, dim, heads, seq, ffn, 41);
+  UpdateConfig config = BaseConfig(batch);
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+
+  // The uninterrupted twin: 6 steps over a shuffled 10-record corpus, so
+  // step 3 crosses an epoch boundary and the replay covers a reshuffle.
+  UpdateEngine straight;
+  ASSERT_OK(
+      straight.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+  ASSERT_OK_AND_ASSIGN(Dataset d1,
+                       seeml::testing::MakeTokenCorpus(10, seq, vocab, 43));
+  d1.EnableShuffle(7);
+  ASSERT_OK(straight.Train(d1, 6, Quiet()));
+
+  // The interrupted twin: 3 steps, checkpoint, process death, cold resume.
+  ScopedTempDir dir;
+  const std::string ck = dir.File("ck.bin");
+  {
+    UpdateEngine first;
+    ASSERT_OK(
+        first.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+    ASSERT_OK_AND_ASSIGN(Dataset d2,
+                         seeml::testing::MakeTokenCorpus(10, seq, vocab, 43));
+    d2.EnableShuffle(7);
+    ASSERT_OK(first.Train(d2, 3, Quiet()));
+    ASSERT_OK(first.SaveCheckpoint(ck));
+  }
+  UpdateEngine resumed;
+  ASSERT_OK(
+      resumed.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+  ASSERT_OK_AND_ASSIGN(Dataset d3,
+                       seeml::testing::MakeTokenCorpus(10, seq, vocab, 43));
+  d3.EnableShuffle(7);
+  TrainOptions opt = Quiet();
+  opt.checkpoint_path = ck;
+  opt.resume = true;
+  ASSERT_OK(resumed.Train(d3, 3, opt));
+  EXPECT_EQ(std::memcmp(straight.arena(), resumed.arena(),
+                        straight.header().persistent_size),
+            0);
+}
+
 TEST(UpdateSystem, TokenDecoderTrainsMergesAndCommits) {
   const int64_t vocab = 16, dim = 8, heads = 2, seq = 4, ffn = 16;
   const int64_t batch = 16;  // 4 sequences per step

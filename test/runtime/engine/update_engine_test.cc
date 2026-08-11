@@ -399,6 +399,47 @@ TEST(UpdateEngineCheckpoint, RoundTripRestoresPersistentState) {
   EXPECT_EQ(std::memcmp(engine.arena(), saved.data(), saved.size()), 0);
 }
 
+TEST(UpdateEngineCheckpoint, ResumedRunMatchesUninterruptedRunBitwise) {
+  ScopedTempDir dir;
+  const std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
+  ASSERT_FALSE(plan.empty());
+
+  // The uninterrupted twin: 6 steps over a shuffled feeder.
+  UpdateEngine straight;
+  ASSERT_OK(straight.LoadFromMemory(plan.data(), plan.size()));
+  ASSERT_OK_AND_ASSIGN(Dataset d1, MakeClassificationData(10, kInDim, 5));
+  d1.EnableShuffle(42);
+  ASSERT_OK(straight.Train(d1, 6, Quiet()));
+
+  // The interrupted twin: 3 steps, checkpoint, process death — then a cold
+  // resume (fresh engine, freshly loaded feeder) for 3 more. With 10
+  // samples the feeder crosses an epoch boundary mid-way, so the resumed
+  // serving position must replay a reshuffle, not just a cursor.
+  const std::string ck = dir.File("ck.bin");
+  {
+    UpdateEngine first;
+    ASSERT_OK(first.LoadFromMemory(plan.data(), plan.size()));
+    ASSERT_OK_AND_ASSIGN(Dataset d2, MakeClassificationData(10, kInDim, 5));
+    d2.EnableShuffle(42);
+    ASSERT_OK(first.Train(d2, 3, Quiet()));
+    ASSERT_OK(first.SaveCheckpoint(ck));
+  }
+  UpdateEngine resumed;
+  ASSERT_OK(resumed.LoadFromMemory(plan.data(), plan.size()));
+  ASSERT_OK_AND_ASSIGN(Dataset d3, MakeClassificationData(10, kInDim, 5));
+  d3.EnableShuffle(42);
+  TrainOptions opt = Quiet();
+  opt.checkpoint_path = ck;
+  opt.resume = true;
+  ASSERT_OK(resumed.Train(d3, 3, opt));
+  EXPECT_EQ(resumed.step(), 6u);
+
+  // "Power cuts are ordinary": the resumed run and the uninterrupted run
+  // must be the same run, bit for bit.
+  EXPECT_EQ(std::memcmp(straight.arena(), resumed.arena(),
+                        straight.header().persistent_size), 0);
+}
+
 TEST(UpdateEngineCheckpoint, RejectsIncompatibleCheckpoint) {
   ScopedTempDir dir;
   const std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));

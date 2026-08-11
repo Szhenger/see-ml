@@ -619,9 +619,24 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
       return std::unexpected(r.error());
 
   if (options.resume && !options.checkpoint_path.empty()) {
-    if (auto r = LoadCheckpoint(options.checkpoint_path); !r)
+    if (auto r = LoadCheckpoint(options.checkpoint_path); !r) {
       std::fprintf(stderr, "seeml-update: no checkpoint resumed (%s)\n",
                    r.error().c_str());
+    } else if (step_ > 0) {
+      // Replay the feeder to where the interrupted run stood: step_ batches
+      // of header_.batch rows each. Without this, a resumed process serves
+      // the permutation from the top, and its batch order — hence its
+      // final bits — diverges from the same run left uninterrupted. The
+      // dataset owns the rows-to-cursor exchange rate (token corpora
+      // advance one record per seq_len rows) and replays per-epoch
+      // permutations from the shuffle seed, so the position is exact even
+      // across epoch boundaries.
+      uint64_t served = 0;
+      if (!MulOk(step_, header_.batch, &served))
+        return diag::executing::Error("resumed step count overflows the "
+                                      "feeder position");
+      data.SkipServed(served);
+    }
   }
 
   TrainReport report;

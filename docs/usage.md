@@ -36,6 +36,17 @@ export_sds(inputs, labels, "corpus.sds")    # labels: int32 classes, dense f32, 
 
 The exporter accepts an `nn.Sequential` of `Linear`, `ReLU`, `GELU`, `SiLU`, and `LayerNorm` modules — anything else is a loud `ValueError`, not a silent skip. One detail worth knowing so the format makes sense later: PyTorch stores a `Linear`'s weight as `[out, in]`, but SMF's `MatMul(x, W)` wants `[in, out]`, so the exporter transposes on the way out. Labels: pass int32 class indices for cross-entropy, dense float vectors for MSE, or `None` for a distillation corpus (the teacher provides the targets).
 
+**Token-native decoders.** For a decoder transformer that consumes raw token ids (SMF v4), export the frozen embedding table alongside the blocks, and a corpus of plain ids — no labels, no embedded vectors:
+
+```python
+from export_model import export_token_decoder_smf, export_token_sds
+export_token_decoder_smf(embedding, blocks, head, "decoder.smf",
+                         seq_len=S, num_heads=H)   # embedding: [V, D] f32
+export_token_sds(records, "corpus.sds")            # records: [N, S+1] i32
+```
+
+Each corpus record is `S + 1` ids: the runtime feeds the first `S` and derives next-token labels from the shifted view, and the embedding gathers on-device. `python3 tool/export_model.py --demo-decoder out/` writes a working example of both files (NumPy only — no PyTorch needed). Remember that `--data-batch` counts *rows* (tokens), so it must be a multiple of `seq_len`.
+
 ## Step 2: Compile the Update Plan (build host)
 
 Here's a full-featured invocation; we'll unpack it flag by flag:
@@ -91,7 +102,7 @@ model_update --model model.smf --data corpus.sds --out updated.smf \
 | `--val-frac F` | held-out fraction for the regression gate (0.1); 0 gates on the training-loss trend instead |
 | `--checkpoint path` | checkpoint file, hash-bound to the plan |
 | `--checkpoint-every N` | steps between checkpoints (0 = off) |
-| `--resume` | resume from `--checkpoint` if present |
+| `--resume` | resume from `--checkpoint` if present; `--steps N` then means N *further* steps |
 | `--loss-log curve.csv` | write the per-step loss curve |
 | `--force` | commit even if the gate shows no improvement |
 
@@ -99,7 +110,7 @@ What happens, in order:
 
 1. **Load + verify** — the plan's hash is checked, then every instruction operand is bounds-validated *before anything executes*. One arena allocation, sized at compile time. A corrupt or foreign plan is refused at this door.
 2. **Split + shuffle** — the last `--val-frac` (here 10%) of the corpus is held out for validation; training batches are then served through a seeded per-epoch permutation. Same `--seed`, same batches, same bits — on any machine.
-3. **Train** — N steps of forward + backward + clip + optimizer. Interruptible: checkpoints (`--checkpoint`, `--checkpoint-every`) are hash-bound to the plan and fsync-durable, and `--resume` picks up from one, optimizer momentum and all. A non-finite loss aborts immediately rather than continuing on garbage.
+3. **Train** — N steps of forward + backward + clip + optimizer. Interruptible: checkpoints (`--checkpoint`, `--checkpoint-every`) are hash-bound to the plan and fsync-durable, and `--resume` picks up from one — optimizer momentum, step counter, *and* the data-shuffle position, which is replayed so a resumed run produces the same bits as one that was never interrupted. `--steps` after `--resume` counts further steps, not a total. A non-finite loss aborts immediately rather than continuing on garbage.
 4. **Gate** — validation loss is evaluated before and after training with the plan's eval program. No improvement → exit code 3 and the device is left *untouched* (`--force` overrides, if you must).
 5. **Merge + commit** — deltas `Δ = (α/r)·A@B` are materialized and added to the pristine f32 weights of the source file (which must hash-match the plan), written durably, renamed atomically. A power cut at any moment leaves the old model or the new one — never a torn file.
 

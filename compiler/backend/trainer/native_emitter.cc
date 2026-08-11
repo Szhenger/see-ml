@@ -137,9 +137,60 @@ bool ParseF64(const char* s, double* out) {
   return true;
 }
 
+constexpr const char* kUsage =
+    "usage: model_update --model <source.smf> --data <corpus.sds>"
+    " [--out updated.smf] [--steps N] [--seed S]"
+    " [--val-frac F] [--checkpoint ckpt] [--checkpoint-every N]"
+    " [--resume] [--loss-log curve.csv] [--force] [--help]\n";
+
+/// Every argv slot must be a known flag or a known flag's value: the
+/// compiler CLI treats unconsumed arguments as hard errors, and the device
+/// runner follows the same rule — a typo'd --val-frc must not silently
+/// train with the default.
+bool ArgsOk(int argc, char** argv) {
+  static const char* const kValueFlags[] = {
+      "--model",      "--data",     "--out",
+      "--steps",      "--seed",     "--val-frac",
+      "--checkpoint", "--loss-log", "--checkpoint-every"};
+  static const char* const kBoolFlags[] = {"--force", "--resume", "--help",
+                                           "-h"};
+  for (int i = 1; i < argc; ++i) {
+    bool known = false;
+    for (const char* f : kValueFlags) {
+      if (std::strcmp(argv[i], f) != 0) continue;
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "model_update: %s requires a value\n", argv[i]);
+        return false;
+      }
+      known = true;
+      ++i;
+      break;
+    }
+    if (!known)
+      for (const char* f : kBoolFlags)
+        if (std::strcmp(argv[i], f) == 0) {
+          known = true;
+          break;
+        }
+    if (!known) {
+      std::fprintf(stderr,
+                   "model_update: unknown argument '%s' (see --help)\n",
+                   argv[i]);
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (Has(argc, argv, "--help") || Has(argc, argv, "-h")) {
+    std::fputs(kUsage, stdout);
+    return 0;
+  }
+  if (!ArgsOk(argc, argv)) return 2;
+
   const std::string model = Arg(argc, argv, "--model", "");
   const std::string data = Arg(argc, argv, "--data", "");
   const std::string out = Arg(argc, argv, "--out", "updated_model.smf");
@@ -159,11 +210,7 @@ int main(int argc, char** argv) {
   }
 
   if (model.empty() || data.empty()) {
-    std::fprintf(stderr,
-                 "usage: model_update --model <source.smf> --data <corpus.sds>"
-                 " [--out updated.smf] [--steps N] [--seed S]"
-                 " [--val-frac F] [--checkpoint ckpt] [--checkpoint-every N]"
-                 " [--resume] [--loss-log curve.csv] [--force]\n");
+    std::fputs(kUsage, stderr);
     return 2;
   }
 
