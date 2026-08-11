@@ -91,7 +91,10 @@ struct SmfTensor {
   bool is_const = false;
   uint64_t data_offset = 0;  // absolute file offset of the f32 blob
   uint64_t byte_size = 0;
-  std::vector<uint8_t> data;  // populated for constant tensors on load
+  // Populated for constant tensors on load. The `{}` matters: designated
+  // initializers all over the tests omit this field, and GCC's -Wextra
+  // flags an omitted field as missing unless it has a default initializer.
+  std::vector<uint8_t> data{};
 };
 
 struct SmfOp {
