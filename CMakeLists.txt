@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.20)
-project(seeml VERSION 1.2.0 LANGUAGES CXX)
+
+# The release version has one home: source/identity/version.h. Extract it at
+# configure time so CMake, the tools, and build.sh can never disagree.
+file(STRINGS source/identity/version.h _seeml_version_line REGEX "kSeemlVersion")
+string(REGEX MATCH "[0-9]+\\.[0-9]+\\.[0-9]+" SEEML_VERSION "${_seeml_version_line}")
+if(NOT SEEML_VERSION)
+    message(FATAL_ERROR "cannot parse kSeemlVersion from source/identity/version.h")
+endif()
+project(seeml VERSION ${SEEML_VERSION} LANGUAGES CXX)
 
 # ==============================================================================
 # Global Configuration

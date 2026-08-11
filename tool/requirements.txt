@@ -1,0 +1,4 @@
+# Build-host dependencies for tool/export_model.py — model export only.
+# The compiler, the runtime, and every emitted package need none of this.
+torch>=1.7    # nn.SiLU is the newest module the exporter touches
+numpy>=1.17   # np.random.Generator API used by --demo

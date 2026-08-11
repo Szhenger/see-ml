@@ -14,7 +14,9 @@ It turns out the answer is a compiler.
 
 - **Build and run:** a C++23 compiler (clang or gcc). CMake is supported but
   optional — `build/build.sh` drives a full build with `sh` alone.
-- **Model export only:** Python 3 with PyTorch (`tool/export_model.py`).
+- **Model export only:** Python 3 with PyTorch and NumPy
+  (`tool/export_model.py`); `pip install -r tool/requirements.txt` installs
+  both.
 - **On-device:** nothing. The runtime is zero-dependency and vendored into
   every emitted package; the package builds with no access to this
   repository.
@@ -101,5 +103,9 @@ What SeeML can train today, stated up front:
 - **Integrity, not authenticity.** All hashing is FNV-1a — a corruption and
   mismatch detector, not a signature. Authenticate plans in your update
   transport.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
 
 

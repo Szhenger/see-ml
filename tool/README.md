@@ -19,8 +19,9 @@ tool/
 
 **`export_model.py`** is the on-ramp: it converts a PyTorch `nn.Sequential`
 (or a decoder stack) into the SMF model container and turns arrays into an
-SDS corpus — the only Python in the product, and the only place PyTorch is
-needed. Everything downstream is dependency-free C++.
+SDS corpus — the only Python in the product, and the only place PyTorch and
+NumPy are needed (`pip install -r tool/requirements.txt`). Everything
+downstream is dependency-free C++.
 
 **`seeml_update_compile.cc`** is the compiler itself as a command: source
 model in, `.seeu` plan (and optional self-contained native package) out. Its

@@ -1,12 +1,13 @@
 // =============================================================================
 // seeml-seeu-dump — .seeu Update Plan disassembler.
 //
-//   seeml-seeu-dump plan.seeu [--instrs]
+//   seeml-seeu-dump plan.seeu [--instrs] [--version]
 //
 // Prints the plan header (memory contract, I/O slots, hyperparameters,
 // integrity hashes, section table) and, with --instrs, disassembles the
 // train / eval / merge instruction streams. This is the field-debugging
-// tool: it depends only on update_types.h + hash.h so it builds anywhere.
+// tool: it depends only on update_types.h + hash.h + version.h so it
+// builds anywhere.
 // =============================================================================
 
 #include <cinttypes>
@@ -17,6 +18,7 @@
 
 #include "source/plan/update_types.h"
 #include "source/identity/hash.h"
+#include "source/identity/version.h"
 
 namespace {
 
@@ -222,6 +224,15 @@ bool SectionInBounds(uint64_t offset, uint64_t count, uint64_t elem_bytes,
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc >= 2 && (std::strcmp(argv[1], "--help") == 0 ||
+                    std::strcmp(argv[1], "-h") == 0)) {
+    std::printf("usage: seeml-seeu-dump plan.seeu [--instrs] [--version]\n");
+    return 0;
+  }
+  if (argc >= 2 && std::strcmp(argv[1], "--version") == 0) {
+    std::printf("seeml-seeu-dump %s\n", kSeemlVersion);
+    return 0;
+  }
   if (argc < 2) {
     std::fprintf(stderr, "usage: seeml-seeu-dump plan.seeu [--instrs]\n");
     return 2;
