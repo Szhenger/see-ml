@@ -158,7 +158,12 @@ bool ArgsOk(int argc, char** argv) {
     bool known = false;
     for (const char* f : kValueFlags) {
       if (std::strcmp(argv[i], f) != 0) continue;
-      if (i + 1 >= argc) {
+      // A '-'-prefixed value is a flag that swallowed its neighbor
+      // (`--out --force`), not a value: Arg() would take it as a filename
+      // while Has() independently still sees it as set. No legitimate
+      // value here starts with '-' (paths aside, and steps/seed/val-frac
+      // reject negatives anyway), so refuse rather than double-read.
+      if (i + 1 >= argc || argv[i + 1][0] == '-') {
         std::fprintf(stderr, "model_update: %s requires a value\n", argv[i]);
         return false;
       }
@@ -185,11 +190,15 @@ bool ArgsOk(int argc, char** argv) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Strictness before convenience: ArgsOk first, so `--out -h` is a
+  // missing-value error rather than a help hit on a swallowed slot. After
+  // it passes, every argv slot is a known flag or a non-flag value, and
+  // Has()/Arg() below cannot double-read a slot.
+  if (!ArgsOk(argc, argv)) return 2;
   if (Has(argc, argv, "--help") || Has(argc, argv, "-h")) {
     std::fputs(kUsage, stdout);
     return 0;
   }
-  if (!ArgsOk(argc, argv)) return 2;
 
   const std::string model = Arg(argc, argv, "--model", "");
   const std::string data = Arg(argc, argv, "--data", "");

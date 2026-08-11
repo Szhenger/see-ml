@@ -635,7 +635,8 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
       if (!MulOk(step_, header_.batch, &served))
         return diag::executing::Error("resumed step count overflows the "
                                       "feeder position");
-      data.SkipServed(served);
+      if (auto r = data.SkipServed(served); !r)
+        return std::unexpected(r.error());
     }
   }
 

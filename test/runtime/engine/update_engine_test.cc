@@ -432,6 +432,9 @@ TEST(UpdateEngineCheckpoint, ResumedRunMatchesUninterruptedRunBitwise) {
   opt.checkpoint_path = ck;
   opt.resume = true;
   ASSERT_OK(resumed.Train(d3, 3, opt));
+  // Both engines must actually have trained to step 6 — otherwise the byte
+  // comparison below could pass vacuously on two equally-early states.
+  EXPECT_EQ(straight.step(), 6u);
   EXPECT_EQ(resumed.step(), 6u);
 
   // "Power cuts are ordinary": the resumed run and the uninterrupted run

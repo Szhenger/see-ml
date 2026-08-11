@@ -111,8 +111,9 @@ class Dataset {
   /// restored_step × batch). The row-to-cursor exchange rate is the
   /// dataset's own: token corpora serve one *record* per seq_len rows,
   /// float corpora one sample per row. Token plans compile batch as a
-  /// whole number of sequences, so the division here is exact.
-  void SkipServed(uint64_t rows);
+  /// whole number of sequences, so `rows` must divide into whole records;
+  /// a remainder is an error, never a silent truncation.
+  [[nodiscard]] std::expected<void, std::string> SkipServed(uint64_t rows);
 
   /// Splits off the LAST `fraction` of samples (before any shuffling) as a
   /// held-out validation set, removing them from this dataset. Deterministic:

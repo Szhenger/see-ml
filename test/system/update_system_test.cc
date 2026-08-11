@@ -687,6 +687,11 @@ TEST(UpdateSystem, TokenDecoderResumeMatchesUninterruptedRun) {
   opt.checkpoint_path = ck;
   opt.resume = true;
   ASSERT_OK(resumed.Train(d3, 3, opt));
+
+  // Guard against a vacuous pass: both engines must actually have trained
+  // to step 6 before the byte comparison means anything.
+  EXPECT_EQ(straight.step(), 6u);
+  EXPECT_EQ(resumed.step(), 6u);
   EXPECT_EQ(std::memcmp(straight.arena(), resumed.arena(),
                         straight.header().persistent_size),
             0);

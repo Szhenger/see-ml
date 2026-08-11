@@ -315,6 +315,9 @@ def export_token_sds(records, path: str):
     a = np.ascontiguousarray(np.asarray(records, dtype=np.int32))
     if a.ndim != 2 or a.shape[1] < 2:
         raise ValueError("export_token_sds: records must be [N, seq_len + 1]")
+    if a.shape[0] == 0:
+        raise ValueError("export_token_sds: no records — an empty corpus "
+                         "would only fail later, at on-device load")
     if (a < 0).any():
         raise ValueError("export_token_sds: negative token id")
     n, s = a.shape[0], a.shape[1] - 1
@@ -369,8 +372,9 @@ def _demo_decoder(out_dir: str):
     export_token_sds(records.astype(np.int32),
                      f"{out_dir}/decoder_corpus.sds")
     print(f"try: seeml-update-compile --source {out_dir}/decoder.smf"
-          f" --data-batch {4 * seq} --loss xent --lora-rank 4"
-          " --lora-alpha 8 --optimizer adamw --lr 2e-3 --steps 600")
+          f" --out {out_dir}/pkg/ --data-batch {4 * seq} --loss xent"
+          " --lora-rank 4 --lora-alpha 8 --optimizer adamw --lr 2e-3"
+          " --steps 600 --build")
 
 
 if __name__ == "__main__":

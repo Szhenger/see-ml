@@ -390,9 +390,21 @@ void Dataset::RestoreServingPos(ServingPos pos) {
   }
 }
 
-void Dataset::SkipServed(uint64_t rows) {
-  const uint64_t records = input_kind_ == 1 ? rows / input_dim_ : rows;
+std::expected<void, std::string> Dataset::SkipServed(uint64_t rows) {
+  uint64_t records = rows;
+  if (input_kind_ == 1) {
+    // One record serves input_dim_ rows. The compiler fixes batch as a
+    // whole number of sequences, so a remainder here means the caller's
+    // step arithmetic and this corpus disagree — refuse loudly rather
+    // than silently desynchronize the replayed cursor.
+    if (rows % input_dim_ != 0)
+      return diag::feeding::Error(
+          "served rows are not a whole number of token records — cannot "
+          "replay the serving position");
+    records = rows / input_dim_;
+  }
   RestoreServingPos({records % num_samples_, records / num_samples_});
+  return {};
 }
 
 void Dataset::Reshuffle() {
