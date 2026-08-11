@@ -137,9 +137,74 @@ bool ParseF64(const char* s, double* out) {
   return true;
 }
 
+constexpr const char* kUsage =
+    "usage: model_update --model <source.smf> --data <corpus.sds>"
+    " [--out updated.smf] [--steps N] [--seed S]"
+    " [--val-frac F] [--checkpoint ckpt] [--checkpoint-every N]"
+    " [--resume] [--loss-log curve.csv] [--force] [--help]\n";
+
+/// Every argv slot must be a known flag or a known flag's value: the
+/// compiler CLI treats unconsumed arguments as hard errors, and the device
+/// runner follows the same rule — a typo'd --val-frc must not silently
+/// train with the default.
+bool ArgsOk(int argc, char** argv) {
+  static const char* const kValueFlags[] = {
+      "--model",      "--data",     "--out",
+      "--steps",      "--seed",     "--val-frac",
+      "--checkpoint", "--loss-log", "--checkpoint-every"};
+  static const char* const kBoolFlags[] = {"--force", "--resume", "--help",
+                                           "-h"};
+  for (int i = 1; i < argc; ++i) {
+    // Empty argv slots are shell debris (a quoted-but-unset "$VAR"), not
+    // typos: nothing can be misread from one, and the pre-strict runner
+    // accepted them — rejecting them would break existing wrappers for
+    // zero safety gain. They stay ignorable.
+    if (argv[i][0] == '\0') continue;
+    bool known = false;
+    for (const char* f : kValueFlags) {
+      if (std::strcmp(argv[i], f) != 0) continue;
+      // A '-'-prefixed value is a flag that swallowed its neighbor
+      // (`--out --force`), not a value: Arg() would take it as a filename
+      // while Has() independently still sees it as set. No legitimate
+      // value here starts with '-' (paths aside, and steps/seed/val-frac
+      // reject negatives anyway), so refuse rather than double-read.
+      if (i + 1 >= argc || argv[i + 1][0] == '-') {
+        std::fprintf(stderr, "model_update: %s requires a value\n", argv[i]);
+        return false;
+      }
+      known = true;
+      ++i;
+      break;
+    }
+    if (!known)
+      for (const char* f : kBoolFlags)
+        if (std::strcmp(argv[i], f) == 0) {
+          known = true;
+          break;
+        }
+    if (!known) {
+      std::fprintf(stderr,
+                   "model_update: unknown argument '%s' (see --help)\n",
+                   argv[i]);
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Strictness before convenience: ArgsOk first, so `--out -h` is a
+  // missing-value error rather than a help hit on a swallowed slot. After
+  // it passes, every argv slot is a known flag or a non-flag value, and
+  // Has()/Arg() below cannot double-read a slot.
+  if (!ArgsOk(argc, argv)) return 2;
+  if (Has(argc, argv, "--help") || Has(argc, argv, "-h")) {
+    std::fputs(kUsage, stdout);
+    return 0;
+  }
+
   const std::string model = Arg(argc, argv, "--model", "");
   const std::string data = Arg(argc, argv, "--data", "");
   const std::string out = Arg(argc, argv, "--out", "updated_model.smf");
@@ -159,11 +224,7 @@ int main(int argc, char** argv) {
   }
 
   if (model.empty() || data.empty()) {
-    std::fprintf(stderr,
-                 "usage: model_update --model <source.smf> --data <corpus.sds>"
-                 " [--out updated.smf] [--steps N] [--seed S]"
-                 " [--val-frac F] [--checkpoint ckpt] [--checkpoint-every N]"
-                 " [--resume] [--loss-log curve.csv] [--force]\n");
+    std::fputs(kUsage, stderr);
     return 2;
   }
 

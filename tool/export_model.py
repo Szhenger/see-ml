@@ -9,9 +9,18 @@ Usage:
     python3 export_model.py --demo out_dir/
         Writes a demo model.smf, teacher.smf and corpus.sds for a smoke run.
 
+    python3 export_model.py --demo-decoder out_dir/
+        Writes a token-native demo decoder.smf (SMF v4) and its
+        decoder_corpus.sds (SDS v2, i32 token ids). NumPy only.
+
     from export_model import export_smf, export_sds
         export_smf(torch_sequential, "model.smf")
         export_sds(inputs, labels, "corpus.sds")
+
+    from export_model import export_token_decoder_smf, export_token_sds
+        export_token_decoder_smf(embedding, blocks, head, "model.smf",
+                                 seq_len=S, num_heads=H)
+        export_token_sds(token_records, "corpus.sds")  # [N, S+1] i32
 
 Supported modules inside an nn.Sequential:
     nn.Linear     -> MatMul(x, W[in,out]) + AddBias(b[out])  (W stored
@@ -33,6 +42,7 @@ ALIGN = 64
 
 (OP_MATMUL, OP_ADDBIAS, OP_RELU, OP_GELU, OP_SILU, OP_MUL, OP_LAYERNORM,
  OP_ADD, OP_RMSNORM, OP_ROPE, OP_ATTENTION) = range(11)
+OP_EMBEDDING = 11  # SMF v4: gather table rows by the model's i32 token input
 
 
 def _align(n: int) -> int:
@@ -45,13 +55,16 @@ def _s(name: str) -> bytes:
 
 
 class _SmfBuilder:
-    def __init__(self, input_name: str, input_dim: int, seq_len: int = 0):
+    def __init__(self, input_name: str, input_dim: int, seq_len: int = 0,
+                 token_input: bool = False):
         self.input_name = input_name
         self.output_name = input_name
         self.seq_len = seq_len  # rows per sequence; 0 = non-sequential
-        self.tensors = [
-            dict(name=input_name, dims=[-1, input_dim], const=False, data=b"")
-        ]
+        # A token-native model (SMF v4) declares a rank-1 dynamic input:
+        # one i32 token id per row, gathered on-device by kEmbedding.
+        self.version = 4 if token_input else SMF_VERSION
+        dims = [-1] if token_input else [-1, input_dim]
+        self.tensors = [dict(name=input_name, dims=dims, const=False, data=b"")]
         self.ops = []
 
     def add_tensor(self, name, dims, data: bytes):
@@ -64,7 +77,7 @@ class _SmfBuilder:
 
     def serialize(self) -> bytes:
         def meta(offsets):
-            out = struct.pack("<IIII", SMF_MAGIC, SMF_VERSION,
+            out = struct.pack("<IIII", SMF_MAGIC, self.version,
                               len(self.tensors), len(self.ops))
             out += _s(self.input_name) + _s(self.output_name)
             out += struct.pack("<Q", self.seq_len)
@@ -157,33 +170,23 @@ def export_smf(model, path: str, input_name: str = "x"):
     print(f"wrote {path} ({idx} linear layers)")
 
 
-def export_decoder_smf(blocks, head, path: str, seq_len: int, num_heads: int,
-                       input_name: str = "x"):
-    """Export a pre-norm causal decoder stack to SMF v3.
-
-    `blocks` is a list of dicts of float32 numpy arrays, one per layer:
-        ln1_g [D]; wq, wk, wv, wo [D, D]; ln2_g [D];
-        w_gate, w_up [D, F]; w_down [F, D]
-    `head` is {"lnf_g": [D], "w_head": [D, V]}. Rows of the runtime input
-    are pre-embedded hidden states [T = B*seq_len, D] (embedding lookup is
-    outside the update scope — the corpus carries embedded vectors).
-    Requires D % num_heads == 0 and (D // num_heads) % 2 == 0 (RoPE pairs).
-    """
-    import numpy as np
-
+def _decoder_dim(blocks, head, num_heads: int, caller: str) -> int:
     D = int(blocks[0]["wq"].shape[0]) if blocks else int(head["w_head"].shape[0])
     if D % num_heads != 0 or (D // num_heads) % 2 != 0:
-        raise ValueError("export_decoder_smf: num_heads must divide D and "
+        raise ValueError(f"{caller}: num_heads must divide D and "
                          "leave an even head width for RoPE")
+    return D
 
-    b = _SmfBuilder(input_name, D, seq_len=seq_len)
+
+def _emit_decoder_graph(b, blocks, head, num_heads: int, prev: str):
+    """Append the pre-norm block stack and lm head, reading rows from `prev`."""
+    import numpy as np
 
     def tensor(name, arr):
         a = np.ascontiguousarray(np.asarray(arr, dtype=np.float32))
         b.add_tensor(name, list(a.shape), a.tobytes())
         return name
 
-    prev = input_name
     for i, blk in enumerate(blocks):
         p = f"l{i}."
         tensor(p + "ln1_g", blk["ln1_g"])
@@ -216,10 +219,57 @@ def export_decoder_smf(blocks, head, path: str, seq_len: int, num_heads: int,
     tensor("w_head", head["w_head"])
     b.add_op(OP_MATMUL, "mm_head", ["nf", "w_head"], "logits")
 
+
+def export_decoder_smf(blocks, head, path: str, seq_len: int, num_heads: int,
+                       input_name: str = "x"):
+    """Export a pre-norm causal decoder stack to SMF v3.
+
+    `blocks` is a list of dicts of float32 numpy arrays, one per layer:
+        ln1_g [D]; wq, wk, wv, wo [D, D]; ln2_g [D];
+        w_gate, w_up [D, F]; w_down [F, D]
+    `head` is {"lnf_g": [D], "w_head": [D, V]}. Rows of the runtime input
+    are pre-embedded hidden states [T = B*seq_len, D] (embedding lookup is
+    outside the update scope — the corpus carries embedded vectors). For a
+    model that consumes raw token ids instead, use export_token_decoder_smf.
+    Requires D % num_heads == 0 and (D // num_heads) % 2 == 0 (RoPE pairs).
+    """
+    D = _decoder_dim(blocks, head, num_heads, "export_decoder_smf")
+    b = _SmfBuilder(input_name, D, seq_len=seq_len)
+    _emit_decoder_graph(b, blocks, head, num_heads, prev=input_name)
     with open(path, "wb") as f:
         f.write(b.serialize())
     print(f"wrote {path} ({len(blocks)} decoder blocks, seq_len={seq_len}, "
           f"heads={num_heads})")
+
+
+def export_token_decoder_smf(embedding, blocks, head, path: str, seq_len: int,
+                             num_heads: int, input_name: str = "x"):
+    """Export a token-native pre-norm causal decoder to SMF v4.
+
+    Same `blocks` / `head` dictionaries as export_decoder_smf, plus
+    `embedding`: a float32 [V, D] table. The exported model's input is a
+    rank-1 i32 row of token ids; the frozen table gathers on-device
+    (kEmbedding), so the corpus stays token ids (export_token_sds) and
+    never carries embedded vectors. The table itself is frozen — LoRA
+    adapters attach to the projection matmuls as usual.
+    """
+    import numpy as np
+
+    emb = np.ascontiguousarray(np.asarray(embedding, dtype=np.float32))
+    if emb.ndim != 2:
+        raise ValueError("export_token_decoder_smf: embedding must be [V, D]")
+    D = _decoder_dim(blocks, head, num_heads, "export_token_decoder_smf")
+    if int(emb.shape[1]) != D:
+        raise ValueError("export_token_decoder_smf: embedding width "
+                         f"{emb.shape[1]} does not match block width {D}")
+    b = _SmfBuilder(input_name, D, seq_len=seq_len, token_input=True)
+    b.add_tensor("emb", list(emb.shape), emb.tobytes())
+    b.add_op(OP_EMBEDDING, "embed", [input_name, "emb"], "e")
+    _emit_decoder_graph(b, blocks, head, num_heads, prev="e")
+    with open(path, "wb") as f:
+        f.write(b.serialize())
+    print(f"wrote {path} ({len(blocks)} decoder blocks, seq_len={seq_len}, "
+          f"heads={num_heads}, vocab={emb.shape[0]}, token-native)")
 
 
 def export_sds(inputs, labels, path: str, label_kind: int = 1):
@@ -252,6 +302,31 @@ def export_sds(inputs, labels, path: str, label_kind: int = 1):
     print(f"wrote {path} ({n} samples, input_dim={d}, label_kind={label_kind})")
 
 
+def export_token_sds(records, path: str):
+    """Export a token corpus to SDS v2 (for token-native SMF v4 models).
+
+    `records`: int32 array [N, S + 1] — N training records of S + 1 token
+    ids each, where S is the model's compiled seq_len. No labels are
+    stored: the runtime derives next-token class labels from the shifted
+    view (record[1:] labels record[:-1]).
+    """
+    import numpy as np
+
+    a = np.ascontiguousarray(np.asarray(records, dtype=np.int32))
+    if a.ndim != 2 or a.shape[1] < 2:
+        raise ValueError("export_token_sds: records must be [N, seq_len + 1]")
+    if a.shape[0] == 0:
+        raise ValueError("export_token_sds: no records — an empty corpus "
+                         "would only fail later, at on-device load")
+    if (a < 0).any():
+        raise ValueError("export_token_sds: negative token id")
+    n, s = a.shape[0], a.shape[1] - 1
+    with open(path, "wb") as f:
+        f.write(struct.pack("<IIQQIIQ", SDS_MAGIC, 2, n, s, 1, 1, 0))
+        f.write(a.tobytes())
+    print(f"wrote {path} ({n} records, seq_len={s}, token-native)")
+
+
 def _demo(out_dir: str):
     import numpy as np
     import torch
@@ -269,15 +344,55 @@ def _demo(out_dir: str):
     export_sds(x, y, f"{out_dir}/corpus.sds")
 
 
+def _demo_decoder(out_dir: str):
+    """A tiny token-native decoder plus a corpus it can actually learn:
+    a cyclic-successor language where token t is always followed by
+    (t + 3) % vocab. Needs NumPy only — no PyTorch."""
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    vocab, dim, heads, seq, ffn = 50, 32, 4, 8, 64
+
+    def mat(rows, cols):
+        return (rng.standard_normal((rows, cols)) * 0.15).astype(np.float32)
+
+    blocks = [{
+        "ln1_g": np.ones(dim, np.float32), "wq": mat(dim, dim),
+        "wk": mat(dim, dim), "wv": mat(dim, dim), "wo": mat(dim, dim),
+        "ln2_g": np.ones(dim, np.float32), "w_gate": mat(dim, ffn),
+        "w_up": mat(dim, ffn), "w_down": mat(ffn, dim),
+    } for _ in range(2)]
+    head = {"lnf_g": np.ones(dim, np.float32), "w_head": mat(dim, vocab)}
+    emb = (rng.standard_normal((vocab, dim)) * 0.5).astype(np.float32)
+    export_token_decoder_smf(emb, blocks, head, f"{out_dir}/decoder.smf",
+                             seq_len=seq, num_heads=heads)
+
+    starts = rng.integers(0, vocab, 192)
+    records = (starts[:, None] + 3 * np.arange(seq + 1)) % vocab
+    export_token_sds(records.astype(np.int32),
+                     f"{out_dir}/decoder_corpus.sds")
+    print(f"try: seeml-update-compile --source {out_dir}/decoder.smf"
+          f" --out {out_dir}/pkg/ --data-batch {4 * seq} --loss xent"
+          " --lora-rank 4 --lora-alpha 8 --optimizer adamw --lr 2e-3"
+          " --steps 600 --build")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--demo", metavar="OUT_DIR",
                         help="emit a demo model/teacher/corpus into OUT_DIR")
+    parser.add_argument("--demo-decoder", metavar="OUT_DIR",
+                        help="emit a token-native demo decoder/corpus "
+                             "into OUT_DIR (NumPy only, no PyTorch)")
     args = parser.parse_args()
-    if not args.demo:
+    if not args.demo and not args.demo_decoder:
         parser.print_help()
         sys.exit(0)
     import os
 
-    os.makedirs(args.demo, exist_ok=True)
-    _demo(args.demo)
+    if args.demo:
+        os.makedirs(args.demo, exist_ok=True)
+        _demo(args.demo)
+    if args.demo_decoder:
+        os.makedirs(args.demo_decoder, exist_ok=True)
+        _demo_decoder(args.demo_decoder)

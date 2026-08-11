@@ -18,10 +18,13 @@ tool/
 ## What each one is for
 
 **`export_model.py`** is the on-ramp: it converts a PyTorch `nn.Sequential`
-(or a decoder stack) into the SMF model container and turns arrays into an
-SDS corpus — the only Python in the product, and the only place PyTorch and
-NumPy are needed (`pip install -r tool/requirements.txt`). Everything
-downstream is dependency-free C++.
+(or a decoder stack — pre-embedded via `export_decoder_smf`, or token-native
+SMF v4 via `export_token_decoder_smf` + `export_token_sds`) into the SMF
+model container and turns arrays into an SDS corpus — the only Python in
+the product, and the only place PyTorch and NumPy are needed
+(`pip install -r tool/requirements.txt`; the token-native path and
+`--demo-decoder` need NumPy only). Everything downstream is
+dependency-free C++.
 
 **`seeml_update_compile.cc`** is the compiler itself as a command: source
 model in, `.seeu` plan (and optional self-contained native package) out. Its

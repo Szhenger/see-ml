@@ -106,6 +106,15 @@ class Dataset {
   /// replayed deterministically from the shuffle seed.
   void RestoreServingPos(ServingPos pos);
 
+  /// Advances the serving position as though `rows` batch rows had already
+  /// been served — the checkpoint-resume replay (the engine passes
+  /// restored_step × batch). The row-to-cursor exchange rate is the
+  /// dataset's own: token corpora serve one *record* per seq_len rows,
+  /// float corpora one sample per row. Token plans compile batch as a
+  /// whole number of sequences, so `rows` must divide into whole records;
+  /// a remainder is an error, never a silent truncation.
+  [[nodiscard]] std::expected<void, std::string> SkipServed(uint64_t rows);
+
   /// Splits off the LAST `fraction` of samples (before any shuffling) as a
   /// held-out validation set, removing them from this dataset. Deterministic:
   /// the same file and fraction always produce the same split. At least one
