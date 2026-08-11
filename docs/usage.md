@@ -16,6 +16,8 @@ Notice what does *not* travel to the device: PyTorch, Python, this repository. T
 
 ## Step 1: Export the Model (build host, PyTorch)
 
+The exporter needs Python 3 with PyTorch and NumPy on the build host — `pip install -r tool/requirements.txt` installs both. Nothing on the device side touches Python.
+
 The quickest start — a demo model, teacher, and synthetic corpus in one command:
 
 ```bash

@@ -20,6 +20,7 @@
 //       [--steps 1000]                 default step count baked into the plan
 //       [--report report.json]         machine-readable compile report
 //       [--build]                      run build.sh after emission
+//       [--version]                    print the release version
 //
 // Every numeric flag is parsed strictly: trailing garbage, overflow, or an
 // unknown flag is a hard error, never a silent default.
@@ -42,6 +43,7 @@
 #include "compiler/backend/trainer/native_emitter.h"
 #include "compiler/driver/update_compiler.h"
 #include "compiler/frontend/ingressor/model_reader.h"
+#include "source/identity/version.h"
 
 namespace {
 
@@ -62,7 +64,8 @@ void PrintUsage() {
                "  [--weight-decay WD] [--clip-norm C]\n"
                "  [--lr-schedule const|cosine] [--warmup N]\n"
                "  [--min-lr-factor F] [--quantize-base] [--steps N]\n"
-               "  [--no-fuse-epilogue] [--report out.json] [--build]\n");
+               "  [--no-fuse-epilogue] [--report out.json] [--build]\n"
+               "  [--version]\n");
 }
 
 /// Strict argument cursor: every flag must be known, every value must parse
@@ -193,6 +196,11 @@ int main(int argc, char** argv) {
 
   if (args.Take("--help") || args.Take("-h")) {
     PrintUsage();
+    return 0;
+  }
+
+  if (args.Take("--version")) {
+    std::printf("seeml-update-compile %s\n", kSeemlVersion);
     return 0;
   }
 
