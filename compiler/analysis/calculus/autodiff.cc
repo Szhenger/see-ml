@@ -14,13 +14,15 @@ namespace updating = seeml::diag::updating;
 
 namespace {
 
-/// Shared state threaded through the VJP rules.
+/// Shared state threaded through the VJP rules. Every member carries a
+/// default initializer: GCC's -Wextra (under -Werror) counts a field
+/// omitted from a designated initializer as missing unless it has one.
 struct AdContext {
-  sir::Block* block;
+  sir::Block* block = nullptr;
   // needs_grad: values on a path from a trainable parameter to the loss.
-  std::unordered_set<const sir::Value*> needs;
+  std::unordered_set<const sir::Value*> needs{};
   // adjoint environment: primal value -> current accumulated gradient value.
-  std::unordered_map<sir::Value*, sir::Value*> adjoint;
+  std::unordered_map<sir::Value*, sir::Value*> adjoint{};
   size_t fresh_counter = 0;
 
   bool Needs(const sir::Value* v) const { return needs.contains(v); }

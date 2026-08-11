@@ -27,10 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
-      CXX: clang++
+      CXX: clang++-18
       TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
     steps:
       - uses: actions/checkout@v4
+      - name: Pin the Linux toolchain
+        run: sudo apt-get update -q && sudo apt-get install -y -q clang-18
       - name: Configure
         run: >
           cmake -S . -B build-tsan
@@ -46,10 +48,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      CXX: clang++
-      CC: clang
+      CXX: clang++-18
+      CC: clang-18
     steps:
       - uses: actions/checkout@v4
+      - name: Pin the Linux toolchain
+        run: sudo apt-get update -q && sudo apt-get install -y -q clang-18
       - name: Restore corpus
         uses: actions/cache@v4
         with:
