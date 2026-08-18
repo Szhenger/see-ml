@@ -1,4 +1,4 @@
-# SeeML Technical Specification
+# SeeML Technical Documentation
 
 This document enumerates every programming language, framework, library, system
 interface, and piece of tooling used to build SeeML, and describes the compiler
