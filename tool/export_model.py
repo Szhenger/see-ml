@@ -13,6 +13,23 @@ Usage:
         Writes a token-native demo decoder.smf (SMF v4) and its
         decoder_corpus.sds (SDS v2, i32 token ids). NumPy only.
 
+    Every demo dimension, seed, and corpus size is a flag — defaults
+    reproduce the classic demos byte-for-byte:
+        --demo:          --width 32 --depth 1 --samples 2048 --seed 0
+                         --corpus-kind class|dense|none  (none = unlabeled,
+                         what --loss kl distillation wants)
+        --demo-decoder:  --width 32 --heads 4 --seq-len 8 --blocks 2
+                         --ffn 64 --vocab 50 --samples 192 --seed 0
+    A flag that cannot apply to the requested mode is a hard error (exit 2),
+    never silently ignored — the same discipline as seeml-update-compile.
+
+    python3 export_model.py --corpus data.npz out/corpus.sds
+        Converts arrays into an SDS corpus without writing Python. A .npz
+        with `records` [N, S+1] integer ids -> token corpus (SDS v2); with
+        `inputs` [N, D] f32 and optional `labels` (integer -> class, float
+        -> dense, absent -> unlabeled) -> feature corpus (SDS v1). A bare
+        .npy is treated as `records`.
+
     from export_model import export_smf, export_sds
         export_smf(torch_sequential, "model.smf")
         export_sds(inputs, labels, "corpus.sds")
@@ -327,31 +344,46 @@ def export_token_sds(records, path: str):
     print(f"wrote {path} ({n} records, seq_len={s}, token-native)")
 
 
-def _demo(out_dir: str):
+def _demo(out_dir: str, width: int = 32, depth: int = 1, samples: int = 2048,
+          seed: int = 0, corpus_kind: str = "class"):
     import numpy as np
     import torch
     import torch.nn as nn
 
-    torch.manual_seed(0)
-    student = nn.Sequential(nn.Linear(16, 32), nn.ReLU(), nn.Linear(32, 4))
-    teacher = nn.Sequential(nn.Linear(16, 64), nn.ReLU(), nn.Linear(64, 4))
-    export_smf(student, f"{out_dir}/model.smf")
-    export_smf(teacher, f"{out_dir}/teacher.smf")
+    def mlp(w):
+        layers = [nn.Linear(16, w), nn.ReLU()]
+        for _ in range(depth - 1):
+            layers += [nn.Linear(w, w), nn.ReLU()]
+        return nn.Sequential(*layers, nn.Linear(w, 4))
 
-    rng = np.random.default_rng(0)
-    x = rng.standard_normal((2048, 16), dtype=np.float32)
+    # One seed, student drawn before teacher — the classic defaults
+    # (width=32, depth=1, seed=0) reproduce the original demo byte-for-byte.
+    torch.manual_seed(seed)
+    export_smf(mlp(width), f"{out_dir}/model.smf")
+    export_smf(mlp(2 * width), f"{out_dir}/teacher.smf")
+
+    rng = np.random.default_rng(seed)
+    x = rng.standard_normal((samples, 16), dtype=np.float32)
     y = (x[:, :4].sum(axis=1) > 0).astype(np.int32) + 2 * (x[:, 0] > 0)
-    export_sds(x, y, f"{out_dir}/corpus.sds")
+    if corpus_kind == "class":
+        export_sds(x, y, f"{out_dir}/corpus.sds")
+    elif corpus_kind == "dense":
+        export_sds(x, np.eye(4, dtype=np.float32)[y], f"{out_dir}/corpus.sds",
+                   label_kind=2)
+    else:  # "none": unlabeled — the corpus a --loss kl distillation wants
+        export_sds(x, None, f"{out_dir}/corpus.sds")
 
 
-def _demo_decoder(out_dir: str):
+def _demo_decoder(out_dir: str, vocab: int = 50, dim: int = 32,
+                  heads: int = 4, seq: int = 8, ffn: int = 0,
+                  blocks_n: int = 2, samples: int = 192, seed: int = 0):
     """A tiny token-native decoder plus a corpus it can actually learn:
     a cyclic-successor language where token t is always followed by
     (t + 3) % vocab. Needs NumPy only — no PyTorch."""
     import numpy as np
 
-    rng = np.random.default_rng(0)
-    vocab, dim, heads, seq, ffn = 50, 32, 4, 8, 64
+    rng = np.random.default_rng(seed)
+    ffn = ffn or 2 * dim  # classic defaults (dim=32) give the original 64
 
     def mat(rows, cols):
         return (rng.standard_normal((rows, cols)) * 0.15).astype(np.float32)
@@ -361,13 +393,13 @@ def _demo_decoder(out_dir: str):
         "wk": mat(dim, dim), "wv": mat(dim, dim), "wo": mat(dim, dim),
         "ln2_g": np.ones(dim, np.float32), "w_gate": mat(dim, ffn),
         "w_up": mat(dim, ffn), "w_down": mat(ffn, dim),
-    } for _ in range(2)]
+    } for _ in range(blocks_n)]
     head = {"lnf_g": np.ones(dim, np.float32), "w_head": mat(dim, vocab)}
     emb = (rng.standard_normal((vocab, dim)) * 0.5).astype(np.float32)
     export_token_decoder_smf(emb, blocks, head, f"{out_dir}/decoder.smf",
                              seq_len=seq, num_heads=heads)
 
-    starts = rng.integers(0, vocab, 192)
+    starts = rng.integers(0, vocab, samples)
     records = (starts[:, None] + 3 * np.arange(seq + 1)) % vocab
     export_token_sds(records.astype(np.int32),
                      f"{out_dir}/decoder_corpus.sds")
@@ -377,22 +409,113 @@ def _demo_decoder(out_dir: str):
           " --steps 600 --build")
 
 
+def _export_corpus(data_path: str, out_path: str):
+    """Convert a .npz (or a bare .npy of token records) into an SDS corpus."""
+    import numpy as np
+
+    if data_path.endswith(".npy"):
+        export_token_sds(np.load(data_path), out_path)
+        return
+    z = np.load(data_path)
+    names = set(z.files)
+    if "records" in names:
+        export_token_sds(z["records"], out_path)
+    elif "inputs" in names:
+        labels = z["labels"] if "labels" in names else None
+        if labels is None:
+            export_sds(z["inputs"], None, out_path)
+        else:
+            kind = 1 if np.issubdtype(labels.dtype, np.integer) else 2
+            export_sds(z["inputs"], labels, out_path, label_kind=kind)
+    else:
+        raise ValueError("--corpus: expected array 'records' (token ids) or "
+                         f"'inputs' (+ optional 'labels') in {data_path}, "
+                         f"found {sorted(names)}")
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--demo", metavar="OUT_DIR",
                         help="emit a demo model/teacher/corpus into OUT_DIR")
     parser.add_argument("--demo-decoder", metavar="OUT_DIR",
                         help="emit a token-native demo decoder/corpus "
                              "into OUT_DIR (NumPy only, no PyTorch)")
+    parser.add_argument("--corpus", nargs=2, metavar=("DATA", "OUT_SDS"),
+                        help="convert a .npz/.npy into an SDS corpus "
+                             "(see the usage text above)")
+    parser.add_argument("--seed", type=int, metavar="N",
+                        help="demo RNG seed for weights and corpora (0)")
+    parser.add_argument("--samples", type=int, metavar="N",
+                        help="demo corpus size: samples for --demo (2048), "
+                             "records for --demo-decoder (192)")
+    parser.add_argument("--width", type=int, metavar="N",
+                        help="hidden width for --demo (32), model dim for "
+                             "--demo-decoder (32)")
+    parser.add_argument("--depth", type=int, metavar="N",
+                        help="--demo only: hidden Linear+ReLU layers (1)")
+    parser.add_argument("--corpus-kind", choices=("class", "dense", "none"),
+                        help="--demo only: labels — int32 classes for xent, "
+                             "one-hot floats for mse, none for distillation "
+                             "(class)")
+    parser.add_argument("--vocab", type=int, metavar="N",
+                        help="--demo-decoder only: vocabulary size (50)")
+    parser.add_argument("--heads", type=int, metavar="N",
+                        help="--demo-decoder only: attention heads (4)")
+    parser.add_argument("--seq-len", type=int, metavar="N",
+                        help="--demo-decoder only: compiled sequence "
+                             "length (8)")
+    parser.add_argument("--blocks", type=int, metavar="N",
+                        help="--demo-decoder only: decoder blocks (2)")
+    parser.add_argument("--ffn", type=int, metavar="N",
+                        help="--demo-decoder only: FFN width (2x width)")
     args = parser.parse_args()
-    if not args.demo and not args.demo_decoder:
+
+    if not args.demo and not args.demo_decoder and not args.corpus:
         parser.print_help()
         sys.exit(0)
+
+    # Strict-CLI discipline, as in seeml-update-compile: a knob that cannot
+    # apply to the requested mode is a hard error (exit 2), never silently
+    # ignored — a demo you didn't mean to configure is worse than one that
+    # refuses to start.
+    def _require(mode_ok, mode_name, **flags):
+        for name, value in flags.items():
+            if value is not None and not mode_ok:
+                parser.error(f"--{name.replace('_', '-')} requires "
+                             f"{mode_name}")
+    _require(args.demo, "--demo",
+             depth=args.depth, corpus_kind=args.corpus_kind)
+    _require(args.demo_decoder, "--demo-decoder", vocab=args.vocab,
+             heads=args.heads, seq_len=args.seq_len, blocks=args.blocks,
+             ffn=args.ffn)
+    _require(args.demo or args.demo_decoder, "--demo or --demo-decoder",
+             width=args.width, samples=args.samples, seed=args.seed)
+    for name in ("samples", "width", "depth", "vocab", "heads", "seq_len",
+                 "blocks", "ffn"):
+        v = getattr(args, name)
+        if v is not None and v < 1:
+            parser.error(f"--{name.replace('_', '-')} must be >= 1, got {v}")
+
     import os
 
     if args.demo:
         os.makedirs(args.demo, exist_ok=True)
-        _demo(args.demo)
+        _demo(args.demo, width=args.width or 32, depth=args.depth or 1,
+              samples=args.samples or 2048,
+              seed=args.seed if args.seed is not None else 0,
+              corpus_kind=args.corpus_kind or "class")
     if args.demo_decoder:
+        dim, heads = args.width or 32, args.heads or 4
+        if dim % heads != 0 or (dim // heads) % 2 != 0:
+            parser.error(f"--width {dim} with --heads {heads}: width must "
+                         "divide into heads with an even head width "
+                         "(RoPE pairs)")
         os.makedirs(args.demo_decoder, exist_ok=True)
-        _demo_decoder(args.demo_decoder)
+        _demo_decoder(args.demo_decoder, vocab=args.vocab or 50, dim=dim,
+                      heads=heads, seq=args.seq_len or 8, ffn=args.ffn or 0,
+                      blocks_n=args.blocks or 2, samples=args.samples or 192,
+                      seed=args.seed if args.seed is not None else 0)
+    if args.corpus:
+        _export_corpus(args.corpus[0], args.corpus[1])

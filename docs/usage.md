@@ -26,6 +26,8 @@ python3 tool/export_model.py --demo out/
 
 This writes `model.smf` (a small `Linear(16,32) → ReLU → Linear(32,4)` classifier), `teacher.smf` (a wider sibling, for distillation experiments), and `corpus.sds` (2,048 labeled samples). Everything downstream can be tried against these three files.
 
+Every demo dimension is a flag, so randomized experiments need no bespoke script: `--width`, `--depth`, `--samples`, `--seed`, and `--corpus-kind class|dense|none` (`none` writes the unlabeled corpus that `--loss kl` distillation wants) for `--demo`; add `--vocab`, `--heads`, `--seq-len`, `--blocks`, and `--ffn` for `--demo-decoder`. Defaults reproduce the classic demos byte-for-byte, and — as with `seeml-update-compile` — a flag that cannot apply to the requested mode is a hard error (exit 2), never silently ignored. There is also `--corpus data.npz out.sds`, which converts saved NumPy arrays (`records` for token corpora; `inputs` + optional `labels` for feature corpora) into an SDS file without writing any Python.
+
 For your own model, use the two functions the script exports:
 
 ```python
