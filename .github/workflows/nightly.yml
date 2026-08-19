@@ -35,7 +35,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin the Linux toolchain
-        run: wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all
+        timeout-minutes: 6
+        run: |
+          for i in 1 2 3; do
+            if wget -T 30 -t 1 -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all; then
+              exit 0
+            fi
+            echo "apt.llvm.org attempt $i failed; retrying" >&2
+            sleep 20
+          done
+          exit 1
       - name: Configure
         run: >
           cmake -S . -B build-tsan
@@ -56,7 +65,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin the Linux toolchain
-        run: wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all
+        timeout-minutes: 6
+        run: |
+          for i in 1 2 3; do
+            if wget -T 30 -t 1 -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all; then
+              exit 0
+            fi
+            echo "apt.llvm.org attempt $i failed; retrying" >&2
+            sleep 20
+          done
+          exit 1
       - name: Restore corpus
         uses: actions/cache@v4
         with:
@@ -95,7 +113,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin the Linux toolchain
-        run: wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all
+        timeout-minutes: 6
+        run: |
+          for i in 1 2 3; do
+            if wget -T 30 -t 1 -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all; then
+              exit 0
+            fi
+            echo "apt.llvm.org attempt $i failed; retrying" >&2
+            sleep 20
+          done
+          exit 1
       - name: Restore baseline
         uses: actions/cache@v4
         with:
