@@ -135,6 +135,52 @@ SmfModel MakeGatedNet(int64_t in_dim, int64_t hidden, int64_t out_dim,
   return m;
 }
 
+SmfModel MakeMlpStack(int64_t in_dim, int64_t hidden, int64_t layers,
+                      int64_t out_dim, uint64_t seed) {
+  std::mt19937_64 rng(seed);
+  std::normal_distribution<float> dist(0.0f, 0.5f);
+  auto randv = [&](size_t n) {
+    std::vector<float> v(n);
+    for (auto& x : v) x = dist(rng);
+    return v;
+  };
+
+  SmfModel m;
+  m.input_name = "x";
+  m.output_name = "logits";
+  m.tensors.push_back({.name = "x", .dims = {-1, in_dim}, .is_const = false});
+  std::string prev = "x";
+  int64_t prev_dim = in_dim;
+  auto linear = [&](int idx, int64_t width, const std::string& out) {
+    const std::string w = "w" + std::to_string(idx);
+    const std::string b = "b" + std::to_string(idx);
+    m.tensors.push_back({.name = w,
+                         .dims = {prev_dim, width},
+                         .is_const = true,
+                         .data = AsBytes(randv(prev_dim * width))});
+    m.tensors.push_back({.name = b,
+                         .dims = {width},
+                         .is_const = true,
+                         .data = AsBytes(randv(width))});
+    m.ops.push_back({SmfOpKind::kMatMul, "mm" + std::to_string(idx),
+                     {prev, w}, "z" + std::to_string(idx)});
+    m.ops.push_back({SmfOpKind::kAddBias, "ab" + std::to_string(idx),
+                     {"z" + std::to_string(idx), b}, out});
+    prev = out;
+    prev_dim = width;
+  };
+  for (int i = 1; i <= layers; ++i) {
+    linear(i, hidden, "zb" + std::to_string(i));
+    m.ops.push_back({SmfOpKind::kRelu, "relu" + std::to_string(i),
+                     {"zb" + std::to_string(i)}, "h" + std::to_string(i)});
+    prev = "h" + std::to_string(i);
+  }
+  linear(static_cast<int>(layers) + 1, out_dim, "logits");
+  for (auto& t : m.tensors)
+    if (t.is_const) t.byte_size = t.data.size();
+  return m;
+}
+
 SmfModel MakeTinyDecoder(int64_t dim, int64_t heads, int64_t seq, int64_t ffn,
                          int64_t vocab, uint64_t seed) {
   std::mt19937_64 rng(seed);
@@ -191,6 +237,83 @@ SmfModel MakeTinyDecoder(int64_t dim, int64_t heads, int64_t seq, int64_t ffn,
   m.ops.push_back({SmfOpKind::kMatMul, "mmd", {"mg", "wd"}, "dn"});
   m.ops.push_back({SmfOpKind::kAdd, "res2", {"x1", "dn"}, "x2"});
   m.ops.push_back({SmfOpKind::kRmsNorm, "lnf", {"x2", "gf"}, "nf"});
+  m.ops.push_back({SmfOpKind::kMatMul, "mmh", {"nf", "wh"}, "logits"});
+  return m;
+}
+
+SmfModel MakeDecoderStack(int64_t dim, int64_t heads, int64_t seq,
+                          int64_t ffn, int64_t vocab, int64_t blocks,
+                          uint64_t seed) {
+  std::mt19937_64 rng(seed);
+  std::normal_distribution<float> dist(0.0f, 0.5f);
+  auto randv = [&](size_t n) {
+    std::vector<float> v(n);
+    for (auto& x : v) x = dist(rng);
+    return v;
+  };
+
+  SmfModel m;
+  m.input_name = "x";
+  m.output_name = "logits";
+  m.seq_len = static_cast<uint64_t>(seq);
+  m.tensors.push_back({.name = "x", .dims = {-1, dim}, .is_const = false});
+  auto add_const = [&](const std::string& name, std::vector<int64_t> dims,
+                       std::vector<float> data) {
+    m.tensors.push_back({.name = name,
+                         .dims = std::move(dims),
+                         .is_const = true,
+                         .data = AsBytes(data)});
+    m.tensors.back().byte_size = m.tensors.back().data.size();
+  };
+  auto gain = [&](int64_t n) {
+    std::vector<float> g(n, 1.0f);
+    for (auto& v : g) v += 0.1f * dist(rng);  // non-trivial gains
+    return g;
+  };
+
+  const auto h = static_cast<uint32_t>(heads);
+  std::string prev = "x";
+  for (int64_t i = 0; i < blocks; ++i) {
+    const std::string p = "l" + std::to_string(i) + ".";
+    add_const(p + "g1", {dim}, gain(dim));
+    add_const(p + "wq", {dim, dim}, randv(dim * dim));
+    add_const(p + "wk", {dim, dim}, randv(dim * dim));
+    add_const(p + "wv", {dim, dim}, randv(dim * dim));
+    add_const(p + "wo", {dim, dim}, randv(dim * dim));
+    add_const(p + "g2", {dim}, gain(dim));
+    add_const(p + "wg", {dim, ffn}, randv(dim * ffn));
+    add_const(p + "wu", {dim, ffn}, randv(dim * ffn));
+    add_const(p + "wd", {ffn, dim}, randv(ffn * dim));
+    m.ops.push_back({SmfOpKind::kRmsNorm, p + "ln1", {prev, p + "g1"},
+                     p + "n1"});
+    for (const char* w : {"q", "k", "v"})
+      m.ops.push_back({SmfOpKind::kMatMul, p + "mm" + w,
+                       {p + "n1", p + "w" + std::string(w)}, p + w});
+    m.ops.push_back({SmfOpKind::kRope, p + "ropeq", {p + "q"}, p + "qr", h});
+    m.ops.push_back({SmfOpKind::kRope, p + "ropek", {p + "k"}, p + "kr", h});
+    m.ops.push_back({SmfOpKind::kAttention, p + "attn",
+                     {p + "qr", p + "kr", p + "v"}, p + "a", h});
+    m.ops.push_back({SmfOpKind::kMatMul, p + "mmo", {p + "a", p + "wo"},
+                     p + "o"});
+    m.ops.push_back({SmfOpKind::kAdd, p + "res1", {prev, p + "o"}, p + "x1"});
+    m.ops.push_back({SmfOpKind::kRmsNorm, p + "ln2", {p + "x1", p + "g2"},
+                     p + "n2"});
+    m.ops.push_back({SmfOpKind::kMatMul, p + "mmg", {p + "n2", p + "wg"},
+                     p + "gt"});
+    m.ops.push_back({SmfOpKind::kMatMul, p + "mmu", {p + "n2", p + "wu"},
+                     p + "u"});
+    m.ops.push_back({SmfOpKind::kSilu, p + "silu", {p + "gt"}, p + "s"});
+    m.ops.push_back({SmfOpKind::kMul, p + "swiglu", {p + "s", p + "u"},
+                     p + "mg"});
+    m.ops.push_back({SmfOpKind::kMatMul, p + "mmd", {p + "mg", p + "wd"},
+                     p + "dn"});
+    m.ops.push_back({SmfOpKind::kAdd, p + "res2", {p + "x1", p + "dn"},
+                     p + "x2"});
+    prev = p + "x2";
+  }
+  add_const("gf", {dim}, gain(dim));
+  add_const("wh", {dim, vocab}, randv(dim * vocab));
+  m.ops.push_back({SmfOpKind::kRmsNorm, "lnf", {prev, "gf"}, "nf"});
   m.ops.push_back({SmfOpKind::kMatMul, "mmh", {"nf", "wh"}, "logits"});
   return m;
 }

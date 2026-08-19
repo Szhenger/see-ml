@@ -79,14 +79,44 @@ steps to 0.7× loss in ~2 s; serial vs 8-thread committed models are
 bitwise identical (the determinism overhead is therefore *measurable as
 pure speedup*, no correctness tax).
 
-## What to build next for this program
+## The harness
 
-1. A `tool/seeml_bench.cc` harness: compiles the standard fixture set,
-   runs Tier A/B sweeps with pinned seeds, and emits one JSON per run —
-   the same strict-CLI discipline as the other tools.
-2. A CI `bench` job (nightly, not per-diff): runs the harness, diffs
-   against the cached baseline artifact, and fails on >10% regression in
-   any Tier A metric — the same trust model as the fuzz corpus cache.
-3. The step-latency instrumentation: three timestamps around the
-   train/eval/merge program boundaries in `ExecuteTrainOnce`, behind a
-   compile-time flag so the shipped runtime stays untouched.
+All three pieces of this program exist:
+
+1. **`tool/seeml_bench.cc`** compiles the standard fixture set in-process
+   (the seeded builders the test suites share — two MLP stacks, three
+   4-block decoders, one token-native decoder) and emits one JSON per run:
+
+   ```bash
+   cmake -B build -DSEEML_BENCH=ON && cmake --build build --target seeml-bench
+   # or: SEEML_BENCH=1 sh build/build.sh
+   ./build/seeml-bench --out bench.json --threads 1,2,4,8
+   ```
+
+   Per fixture, per thread width: per-step latency and fixed lifecycle
+   cost by **steps-regression** (train `--steps-lo` then `--steps-hi`;
+   slope = per-step, intercept = lifecycle — startup never pollutes the
+   step number), Tier A `rows_per_s`, effective GEMM GFLOP/s (the FLOPs
+   are summed from the plan's own instruction stream, 2·M·N·K over every
+   GEMM), the fwd/bwd/optimizer split, and the Tier D lifecycle numbers
+   (compile, load+validate, merge, checkpoint save). Medians of
+   `--repeats` (default 3); seeds and thread widths pinned. The CLI is
+   strict, like the other tools: an unknown flag or a flag that cannot
+   parse is exit 2, never a default.
+
+2. **The nightly `bench` CI job** restores the previous night's numbers
+   from the actions cache (the fuzz-corpus trust model), runs the harness,
+   and **fails on a >10% regression in any Tier A `rows_per_s`** via
+   `tool/bench_compare.py` — which also seeds the baseline on first run
+   and skips (never fails) fixtures that exist on only one side, so adding
+   a fixture can't fail the night it lands.
+
+3. **The step-latency instrumentation** lives in the engine behind
+   `-DSEEML_STEP_TIMING` (set by `-DSEEML_BENCH=ON` / `SEEML_BENCH=1`):
+   the training stream's phase boundaries — after the last loss-forward
+   instruction, and at the first clip/optimizer instruction — are scanned
+   once at load, and each step's wall clock is split across them into
+   `UpdateEngine::step_timings()`. Default builds, and every emitted
+   package, compile the exact untouched dispatch loop; the split answers
+   Tier A's "where does the next kernel dollar go" (if bwd ≫ 2×fwd,
+   attention backward or GEMM-TN is the target).

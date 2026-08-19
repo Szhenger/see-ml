@@ -1,6 +1,9 @@
 #include "runtime/engine/update_engine.h"
 
 #include <bit>
+#ifdef SEEML_STEP_TIMING
+#include <chrono>
+#endif
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -237,6 +240,27 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   train_program_ = std::move(train);
   merge_program_ = std::move(merge);
   eval_program_ = std::move(eval);
+#ifdef SEEML_STEP_TIMING
+  // Phase boundaries for the step-latency split (docs/benchmarks.md, Tier
+  // A): the forward pass ends after the LAST loss-forward instruction
+  // (kXEntPlusKL emits two, adjacent), and the optimizer phase starts at
+  // the FIRST clip/step instruction — everything between is the backward
+  // sweep. A missing family degrades to an empty range, never a bad split.
+  train_bwd_begin_ = train_program_.size();
+  train_opt_begin_ = train_program_.size();
+  for (size_t i = 0; i < train_program_.size(); ++i) {
+    const auto op = static_cast<up::OpCode>(train_program_[i].opcode);
+    if (op == up::OpCode::kSoftmaxXEntFwd || op == up::OpCode::kMseFwd ||
+        op == up::OpCode::kKLDistillFwd)
+      train_bwd_begin_ = i + 1;
+    if ((op == up::OpCode::kClipNorm || op == up::OpCode::kSgdStep ||
+         op == up::OpCode::kAdamWStep) &&
+        train_opt_begin_ == train_program_.size())
+      train_opt_begin_ = i;
+  }
+  if (train_opt_begin_ < train_bwd_begin_) train_opt_begin_ = train_bwd_begin_;
+  timings_ = {};
+#endif
   emit_table_ = std::move(emit);
   num_classes_ = num_classes;
   vocab_bound_ = vocab_bound;
@@ -252,7 +276,38 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
 }
 
 void UpdateEngine::Execute(const std::vector<up::UpdateInstruction>& program) {
-  for (const up::UpdateInstruction& ins : program) {
+  ExecuteRange(program, 0, program.size());
+}
+
+/// Executes the training stream, split at the phase boundaries scanned by
+/// Initialize, accumulating per-phase wall clock into timings_. Compiled to
+/// a plain Execute() unless the runtime is built with -DSEEML_STEP_TIMING
+/// (the benchmark-harness build), so the shipped runtime never reads a
+/// clock inside the step.
+void UpdateEngine::ExecuteTrainProgram() {
+#ifdef SEEML_STEP_TIMING
+  using clock = std::chrono::steady_clock;
+  const auto t0 = clock::now();
+  ExecuteRange(train_program_, 0, train_bwd_begin_);
+  const auto t1 = clock::now();
+  ExecuteRange(train_program_, train_bwd_begin_, train_opt_begin_);
+  const auto t2 = clock::now();
+  ExecuteRange(train_program_, train_opt_begin_, train_program_.size());
+  const auto t3 = clock::now();
+  ++timings_.steps;
+  timings_.fwd_seconds += std::chrono::duration<double>(t1 - t0).count();
+  timings_.bwd_seconds += std::chrono::duration<double>(t2 - t1).count();
+  timings_.opt_seconds += std::chrono::duration<double>(t3 - t2).count();
+#else
+  Execute(train_program_);
+#endif
+}
+
+void UpdateEngine::ExecuteRange(
+    const std::vector<up::UpdateInstruction>& program, size_t begin,
+    size_t end) {
+  for (size_t idx = begin; idx < end; ++idx) {
+    const up::UpdateInstruction& ins = program[idx];
     switch (static_cast<up::OpCode>(ins.opcode)) {
       case up::OpCode::kNop:
         break;
@@ -484,7 +539,7 @@ void UpdateEngine::ExecuteTrainOnce() {
   // adapter parameters, so deltas materialized by an earlier RunMerge are
   // stale and commit must re-merge first.
   merged_ = false;
-  Execute(train_program_);
+  ExecuteTrainProgram();
 }
 
 std::expected<void, std::string> UpdateEngine::ValidateDataset(
@@ -685,7 +740,7 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
       }
       step_ = s + 1;  // 1-indexed timestep for AdamW bias correction
       feeder.NextBatch(input_slot, label_slot);
-      Execute(train_program_);
+      ExecuteTrainProgram();
       ++executed;
 
       const float loss = LossValue();

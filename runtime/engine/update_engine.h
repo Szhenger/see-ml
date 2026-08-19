@@ -73,6 +73,21 @@ struct EvalMetrics {
   bool has_accuracy = false;
 };
 
+/// Accumulated wall-clock split of the training instruction stream, per
+/// phase: forward (stream start through the loss forward), backward, and
+/// clip + optimizer. Populated only when the runtime is built with
+/// -DSEEML_STEP_TIMING (the benchmark-harness build; see
+/// docs/benchmarks.md) — in every other build all fields stay zero and no
+/// clock is read inside the step, so the shipped runtime is untouched.
+/// The fields are unconditional so the header is identical under both
+/// builds (no ODR hazard between differently-configured objects).
+struct StepTimings {
+  uint64_t steps = 0;         // training-stream executions accumulated
+  double fwd_seconds = 0.0;
+  double bwd_seconds = 0.0;
+  double opt_seconds = 0.0;
+};
+
 struct TrainReport {
   uint64_t steps = 0;             // steps actually executed
   bool stopped_early = false;     // should_stop() interrupted the run
@@ -169,6 +184,11 @@ class UpdateEngine {
   /// I/O slots right now (no data feeding). Used for gradient verification.
   void ExecuteTrainOnce();
 
+  /// The step-latency accumulator (zeros unless built with
+  /// -DSEEML_STEP_TIMING; reset by every successful Load).
+  StepTimings step_timings() const { return timings_; }
+  void ResetStepTimings() { timings_ = {}; }
+
  private:
   /// Validates the candidate plan and commits engine state only if every
   /// contract passes: a rejected re-Load leaves the previous plan loaded
@@ -181,12 +201,22 @@ class UpdateEngine {
   [[nodiscard]] std::expected<void, std::string> ValidateDataset(
       Dataset& data) const;
   void Execute(const std::vector<seeml::update::UpdateInstruction>& program);
+  void ExecuteRange(const std::vector<seeml::update::UpdateInstruction>& program,
+                    size_t begin, size_t end);
+  /// Execute(train_program_), phase-timed under SEEML_STEP_TIMING.
+  void ExecuteTrainProgram();
 
   const float* ReadPtr(uint64_t ref) const;
   const int8_t* ReadPtrQ8(uint64_t ref) const;
   float* WritePtr(uint64_t ref);
 
   seeml::update::PlanHeader header_{};
+  // Step-latency instrumentation (SEEML_STEP_TIMING): phase boundaries of
+  // the training stream, scanned once at load; zeros/unused otherwise.
+  // Unconditional members keep the class layout build-independent.
+  StepTimings timings_{};
+  [[maybe_unused]] size_t train_bwd_begin_ = 0;  // first instr after loss fwd
+  [[maybe_unused]] size_t train_opt_begin_ = 0;  // first clip/optimizer instr
   std::vector<uint8_t> owned_plan_;       // file-loaded plans
   const uint8_t* plan_ = nullptr;         // borrowed or owned_plan_.data()
   size_t plan_size_ = 0;

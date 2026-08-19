@@ -36,6 +36,12 @@ endif()
 # -DSEEML_FUZZ=ON builds seeml_fuzz_formats.
 option(SEEML_FUZZ "Build the libFuzzer format-parser harness" OFF)
 
+# Benchmark harness (docs/benchmarks.md): -DSEEML_BENCH=ON builds the
+# seeml-bench tool and compiles the runtime with SEEML_STEP_TIMING, the
+# per-phase (fwd/bwd/optimizer) step clock. Default builds — and every
+# emitted package — carry neither.
+option(SEEML_BENCH "Build seeml-bench with step-latency instrumentation" OFF)
+
 include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 find_package(Threads REQUIRED)
@@ -172,6 +178,15 @@ target_link_libraries(seeml_testing PUBLIC seeml_update seeml_update_rt)
 # The emitter suite vendors runtime sources out of the repository checkout.
 target_compile_definitions(seeml_testing
     PUBLIC SEEML_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
+# The benchmark harness compiles the shared seeded fixtures, so it links
+# seeml_testing; it lives here, after that target, rather than with the
+# other tools. See docs/benchmarks.md for the metric program it measures.
+if(SEEML_BENCH)
+    target_compile_definitions(seeml_update_rt PRIVATE SEEML_STEP_TIMING)
+    add_executable(seeml-bench tool/seeml_bench.cc)
+    target_link_libraries(seeml-bench PRIVATE seeml_update seeml_testing)
+endif()
 
 function(seeml_add_test name src)
     add_executable(${name} ${src} test/framework/seetest_main.cc)

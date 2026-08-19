@@ -9,6 +9,9 @@
 #                     turning "bounded behavior" from assertion into proof
 #   extended fuzz     15 minutes over the four untrusted-input arms, with
 #                     the corpus carried between runs via the actions cache
+#   bench             the Tier A throughput gate: seeml-bench against the
+#                     previous night's cached baseline, >10% rows/s
+#                     regression fails (docs/benchmarks.md)
 #
 # A nightly failure is a regression on main itself, not on a diff — treat
 # it with the same severity as a red PR.
@@ -32,7 +35,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin the Linux toolchain
-        run: wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all
+        timeout-minutes: 6
+        run: |
+          for i in 1 2 3; do
+            if wget -T 30 -t 1 -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all; then
+              exit 0
+            fi
+            echo "apt.llvm.org attempt $i failed; retrying" >&2
+            sleep 20
+          done
+          exit 1
       - name: Configure
         run: >
           cmake -S . -B build-tsan
@@ -53,7 +65,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Pin the Linux toolchain
-        run: wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all
+        timeout-minutes: 6
+        run: |
+          for i in 1 2 3; do
+            if wget -T 30 -t 1 -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all; then
+              exit 0
+            fi
+            echo "apt.llvm.org attempt $i failed; retrying" >&2
+            sleep 20
+          done
+          exit 1
       - name: Restore corpus
         uses: actions/cache@v4
         with:
@@ -75,4 +96,56 @@ jobs:
         with:
           name: nightly-fuzz-crashes
           path: crash-*
+          if-no-files-found: ignore
+
+  # The Tier A regression gate of docs/benchmarks.md: run the harness, diff
+  # against the previous night's numbers (carried by the actions cache, the
+  # fuzz-corpus trust model), fail on a >10% rows/s regression, then store
+  # this run as the next baseline. Per-commit trend on one host class — a
+  # cloud runner is noisy, which is why the gate is 10%, medians-of-3, and
+  # nightly rather than per-diff.
+  bench:
+    name: bench (Tier A regression gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CXX: clang++-19
+    steps:
+      - uses: actions/checkout@v4
+      - name: Pin the Linux toolchain
+        timeout-minutes: 6
+        run: |
+          for i in 1 2 3; do
+            if wget -T 30 -t 1 -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all; then
+              exit 0
+            fi
+            echo "apt.llvm.org attempt $i failed; retrying" >&2
+            sleep 20
+          done
+          exit 1
+      - name: Restore baseline
+        uses: actions/cache@v4
+        with:
+          path: bench-baseline
+          key: bench-baseline-${{ github.run_id }}
+          restore-keys: bench-baseline-
+      - name: Configure
+        run: >
+          cmake -S . -B build-bench
+          -DCMAKE_BUILD_TYPE=Release
+          -DSEEML_BENCH=ON
+      - name: Build harness
+        run: cmake --build build-bench -j "$(nproc)" --target seeml-bench
+      - name: Bench
+        run: ./build-bench/seeml-bench --out bench.json --threads 1,2,4
+      - name: Gate against baseline
+        run: python3 tool/bench_compare.py bench-baseline/bench.json bench.json
+      - name: Store as next baseline
+        run: mkdir -p bench-baseline && cp bench.json bench-baseline/bench.json
+      - name: Upload run
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-bench
+          path: bench.json
           if-no-files-found: ignore
