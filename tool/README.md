@@ -23,7 +23,12 @@ SMF v4 via `export_token_decoder_smf` + `export_token_sds`) into the SMF
 model container and turns arrays into an SDS corpus — the only Python in
 the product, and the only place PyTorch and NumPy are needed
 (`pip install -r tool/requirements.txt`; the token-native path and
-`--demo-decoder` need NumPy only). Everything downstream is
+`--demo-decoder` need NumPy only). Its demo generators are fully
+parameterizable from the command line (`--width`, `--depth`, `--vocab`,
+`--seq-len`, `--blocks`, `--seed`, `--samples`, `--corpus-kind`), and
+`--corpus` converts saved NumPy arrays into an SDS corpus without writing
+Python; a flag that cannot apply to the requested mode is a hard error,
+matching the compiler CLI's discipline. Everything downstream is
 dependency-free C++.
 
 **`seeml_update_compile.cc`** is the compiler itself as a command: source
