@@ -13,6 +13,8 @@ tool/
   export_model.py         PyTorch model + data  ->  SMF / SDS files
   seeml_update_compile.cc the compiler CLI       ->  a .seeu update package
   seeml_seeu_dump.cc      the plan disassembler   (inspect any .seeu)
+  seeml_bench.cc          the benchmark harness  ->  one JSON per run
+  bench_compare.py        the nightly Tier A regression gate over two runs
 ```
 
 ## What each one is for
@@ -37,6 +39,15 @@ than one that refuses to start.
 verifies the integrity seal and prints the header and instruction streams in
 human-readable form — the tool you reach for when a plan misbehaves and you
 need to see what the compiler actually emitted.
+
+**`seeml_bench.cc`** is the metric program of
+[docs/benchmarks.md](../docs/benchmarks.md) as a command: it compiles the
+standard seeded fixture set in-process, measures per-step latency by
+steps-regression at every requested thread width (with the engine's
+fwd/bwd/optimizer split when built with `-DSEEML_BENCH=ON` or
+`SEEML_BENCH=1 sh build/build.sh`), and emits one JSON per run.
+`bench_compare.py` diffs two such runs and fails on a >10% Tier A
+regression — the nightly `bench` job's gate.
 
 ## Where to go next
 

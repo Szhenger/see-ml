@@ -5,6 +5,11 @@ set -e
 cd "$(dirname "$0")/.."
 CXX="${CXX:-c++}"
 FLAGS="-std=c++23 -O2 -Wall -Wextra -Werror -pthread -I. -DSEEML_SOURCE_DIR='\"$(pwd)\"'"
+# SEEML_BENCH=1 mirrors CMake's -DSEEML_BENCH=ON: compiles the runtime with
+# the per-phase step clock and links the seeml-bench harness at the end.
+if [ -n "${SEEML_BENCH:-}" ]; then
+  FLAGS="$FLAGS -DSEEML_STEP_TIMING"
+fi
 
 compile() { echo "  CXX $1"; eval "$CXX $FLAGS -c '$1' -o 'build/$2'"; }
 
@@ -111,6 +116,14 @@ eval "$CXX -pthread build/seeml_update_compile.o $LIBS -o build/seeml-update-com
 echo "  LINK seeml-seeu-dump"
 # PlanSelfHash (the v4 integrity seal) runs on the parallel substrate.
 eval "$CXX -pthread build/seeml_seeu_dump.o build/parallel_for.o -o build/seeml-seeu-dump"
+
+if [ -n "${SEEML_BENCH:-}" ]; then
+  echo "  CXX+LINK seeml-bench"
+  eval "$CXX $FLAGS -c tool/seeml_bench.cc -o build/seeml_bench.o"
+  eval "$CXX -pthread build/seeml_bench.o build/fixtures_models.o \
+        build/fixtures_corpora.o build/fixtures_probes.o \
+        $LIBS $METAL_OBJS $METAL_LDFLAGS -o build/seeml-bench"
+fi
 
 for suite in \
     source/identity/hash_test source/parallel/parallel_for_test \

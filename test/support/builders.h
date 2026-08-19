@@ -35,6 +35,13 @@ std::vector<float> RandnVector(size_t n, uint64_t seed, float stddev = 1.0f);
 update::SmfModel MakeMlp(int64_t in_dim, int64_t hidden, int64_t out_dim,
                          uint64_t seed);
 
+/// MakeMlp generalized to `layers` hidden Linear+ReLU layers of `hidden`
+/// width — the benchmark harness's feature-plan shapes:
+///   in -> [hidden (relu)] x layers -> out
+/// Layer i's tensors/ops carry the suffix i+1 (w1/b1/mm1/ab1/relu1, ...).
+update::SmfModel MakeMlpStack(int64_t in_dim, int64_t hidden, int64_t layers,
+                              int64_t out_dim, uint64_t seed);
+
 /// A two-layer net whose MatMuls share one square weight tensor "w"
 /// (weight tying):  x[?,dim] @ w -> relu -> @ w -> y.
 update::SmfModel MakeTiedMlp(int64_t dim, uint64_t seed);
@@ -56,6 +63,13 @@ update::SmfModel MakeGatedNet(int64_t in_dim, int64_t hidden, int64_t out_dim,
 ///   x2 = x1 + (silu(n2@wg) * (n2@wu))@wd; logits = rms_norm(x2, gf)@wh
 update::SmfModel MakeTinyDecoder(int64_t dim, int64_t heads, int64_t seq,
                                  int64_t ffn, int64_t vocab, uint64_t seed);
+
+/// MakeTinyDecoder generalized to `blocks` stacked pre-norm blocks (one
+/// shared final-norm + vocab head) — the benchmark harness's decoder
+/// shapes. Block i's tensors/ops carry the prefix "l<i>.".
+update::SmfModel MakeDecoderStack(int64_t dim, int64_t heads, int64_t seq,
+                                  int64_t ffn, int64_t vocab, int64_t blocks,
+                                  uint64_t seed);
 
 /// A one-block token-native decoder (SMF v4): rank-1 dynamic i32 input →
 /// Embedding[vocab, dim] → the pre-norm attention/SwiGLU block of
