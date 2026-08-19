@@ -42,10 +42,10 @@ The exporter accepts an `nn.Sequential` of `Linear`, `ReLU`, `GELU`, `SiLU`, and
 from export_model import export_token_decoder_smf, export_token_sds
 export_token_decoder_smf(embedding, blocks, head, "decoder.smf",
                          seq_len=S, num_heads=H)   # embedding: [V, D] f32
-export_token_sds(records, "corpus.sds")            # records: [N, S+1] i32
+export_token_sds(records, "decoder_corpus.sds")    # records: [N, S+1] i32
 ```
 
-Each corpus record is `S + 1` ids: the runtime feeds the first `S` and derives next-token labels from the shifted view, and the embedding gathers on-device. `python3 tool/export_model.py --demo-decoder out/` writes a working example of both files (NumPy only — no PyTorch needed). Remember that `--data-batch` counts *rows* (tokens), so it must be a multiple of `seq_len`.
+Each corpus record is `S + 1` ids: the runtime feeds the first `S` and derives next-token labels from the shifted view, and the embedding gathers on-device. `python3 tool/export_model.py --demo-decoder out/` writes a working example of both files — `decoder.smf` and `decoder_corpus.sds` (NumPy only — no PyTorch needed); the corpus is deliberately *not* named `corpus.sds`, so both demos can share one output directory. Pass those names to the compile and update steps below in place of `model.smf` / `corpus.sds`. Remember that `--data-batch` counts *rows* (tokens), so it must be a multiple of `seq_len`.
 
 ## Step 2: Compile the Update Plan (build host)
 
@@ -69,6 +69,8 @@ seeml-update-compile \
 **How to optimize.** `--optimizer adamw|sgd` (default adamw), `--lr` (default 1e-3), `--weight-decay` (default 0.01), and `--clip-norm` (default 0 = off; a positive value bakes per-tensor gradient clipping instructions into the stream). The schedule — `--lr-schedule const|cosine`, `--warmup N`, `--min-lr-factor F` — travels in the plan header and is evaluated per step on the device.
 
 **How big.** `--quantize-base` stores eligible frozen weights as int8 in the plan (4× smaller, dequantization fused into the GEMM for free) — and, because commit patches the *original file's* floats, quantization error never reaches the committed model. `--steps` (default 1000) is the default step count baked into the plan (the device may override it).
+
+**How it's optimized.** By default the compiler fuses each frozen `X@W → +bias → activation` chain into a single matmul instruction with a fused write-back epilogue, so an MLP layer's three arena round-trips become one. Fusion is bitwise-neutral by construction: it only matches chains no backward instruction reads (the frozen teacher subgraph, the bias step of unadapted layers), and the runtime applies the epilogue with the same per-element expressions as the standalone kernels. `--no-fuse-epilogue` disables the pass — the plan gets more instructions and more transient arena, never different bits; useful when diffing `seeml-seeu-dump` output across compiler versions or isolating a kernel while debugging.
 
 **What comes out.** The emitted `pkg/` is **self-contained**: the plan (`update_plan.seeu`), the same plan embedded as a C array, a generated driver `main`, the vendored runtime sources, and a `build.sh`. `--build` runs that script immediately; on any machine, `sh pkg/build.sh` builds the `model_update` binary with nothing but a C++23 compiler — set `CXX` to cross-compile for the device. `--report pkg/report.json` writes a machine-readable summary (arena bytes, instruction counts, per-adapter shapes and scales) worth archiving with each release.
 
