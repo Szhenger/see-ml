@@ -226,7 +226,15 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
 
   // The single allocation of the update: the pre-planned arena. Its size was
   // known at compile time — the device's resource contract.
-  const size_t arena_bytes = (header.arena_size + 63) & ~size_t{63};
+  // Bound before rounding: on a 32-bit host a u64 arena_size past SIZE_MAX
+  // would otherwise truncate into a small allocation the validator's
+  // (u64) bounds proof does not cover — the feeder guards the same class.
+  if (header.arena_size > SIZE_MAX - 64)
+    return diag::executing::Error(
+        "plan arena of " + std::to_string(header.arena_size) +
+        " bytes exceeds this host's address space");
+  const size_t arena_bytes =
+      (static_cast<size_t>(header.arena_size) + 63) & ~size_t{63};
   uint8_t* arena = static_cast<uint8_t*>(std::aligned_alloc(64, arena_bytes));
   if (!arena) return diag::executing::Error("arena allocation failed");
   std::memset(arena, 0, arena_bytes);

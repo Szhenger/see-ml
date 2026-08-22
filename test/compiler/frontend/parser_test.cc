@@ -4,6 +4,7 @@
 // teacher-prefix namespacing used by distillation.
 // =============================================================================
 
+#include <bit>
 #include <cstdint>
 #include <string>
 #include <thread>
@@ -458,6 +459,52 @@ TEST(ForwardBuilder, RejectsBatchNotWholeSequences) {
   build.input = block.addArgument(sir::DataType::F32, sir::Shape{6, 8});
   EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, 6, build),
                         "whole number of sequences");
+}
+
+TEST(ForwardBuilder, RopeBaseAttributeComesFromAttr1) {
+  // v5 attr1 carries the rotary base as f32 bits; zero (every pre-v5 file)
+  // means the classic 10000. Autodiff copies "base" onto the backward and
+  // lowering packs it into kRopeFwd/kRopeBwd out[2] — so the whole θ path
+  // starts here.
+  SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 7);
+  for (SmfOp& op : model.ops)
+    if (op.kind == SmfOpKind::kRope && op.name == "ropeq")
+      op.attr1 = std::bit_cast<uint32_t>(500000.0f);
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::F32, sir::Shape{8, 8});
+  ASSERT_OK(BuildForward(block, model, "", build.input, 8, build));
+  size_t seen = 0;
+  block.walk([&](sir::Operation* op) {
+    if (op->mnemonic() != "sc_high.rope") return;
+    ++seen;
+    const float base = op->getAttrAs<float>("base").value_or(-1.0f);
+    if (op->result(0)->id() == "qr")
+      EXPECT_EQ(base, 500000.0f);
+    else
+      EXPECT_EQ(base, 10000.0f);
+  });
+  EXPECT_EQ(seen, 2u);
+}
+
+TEST(ForwardBuilder, RejectsRopeWithDegenerateBase) {
+  SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 7);
+  for (SmfOp& op : model.ops)
+    if (op.kind == SmfOpKind::kRope) op.attr1 = std::bit_cast<uint32_t>(1.0f);
+  sir::Block block;
+  GraphBuild build;
+  build.input = block.addArgument(sir::DataType::F32, sir::Shape{8, 8});
+  EXPECT_ERROR_CONTAINS(BuildForward(block, model, "", build.input, 8, build),
+                        "rotary base");
+  SmfModel nan_model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 7);
+  for (SmfOp& op : nan_model.ops)
+    if (op.kind == SmfOpKind::kRope) op.attr1 = 0x7FC00000u;  // quiet NaN
+  sir::Block block2;
+  GraphBuild build2;
+  build2.input = block2.addArgument(sir::DataType::F32, sir::Shape{8, 8});
+  EXPECT_ERROR_CONTAINS(
+      BuildForward(block2, nan_model, "", build2.input, 8, build2),
+      "rotary base");
 }
 
 TEST(ForwardBuilder, RejectsRopeWithOddHeadWidth) {

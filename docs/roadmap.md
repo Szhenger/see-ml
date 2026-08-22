@@ -230,16 +230,79 @@ the backend choice must be recorded wherever results are compared (the
 regression gate, checkpoints do not care — the persistent segment is
 backend-neutral f32).
 
-**Phase G1b — engine integration (M).** A backend switch in the engine
-dispatch: GEMM-family opcodes route to the Metal runner, everything else
-stays on CPU (unified memory makes mixed dispatch cheap). Requires
-zero-copy arena buffers (`newBufferWithBytesNoCopy` over a page-aligned
-arena allocation) and batched command encoding instead of G1a's
-one-synchronous-command-per-call harness. **Phase G1c — vendoring (M).**
-The emitted package gains the `.metal` source, the runner TU, and an
-Apple-only branch in the generated `build.sh`, making GPU training a
-run-time flag of `model_update`. Linux GPU (Vulkan) is out of scope until
-a product target needs it.
+> **Status: G1b/G1c PLANNED for v1.3.0 (2026-08-22)** — tracked as
+> milestone *v1.3.0 — GPU fine-tuning* on GitHub: epic #59, phases
+> #60–#64, release gate #65, with #66/#67 on the CPU side. The plan below
+> is priced by the v1.2.4 field report (SeeML CPU 80 tok/s vs MLX GPU
+> 1,605 tok/s on SmolLM-135M) and a Metal-vs-CPU GEMM crossover probe run
+> through the G1a harness at the e2e shapes (table in #59).
+
+**Goal and invariant.** The emitted `model_update` fine-tunes on the GPU
+when one is present, *without loss of generality on CPUs*: the CPU path
+stays the bitwise-deterministic reference, builds anywhere with a C++
+compiler alone, and is bit-identical to v1.2.4 under `--backend cpu`; the
+GPU is an opt-in backend verified against the CPU at tolerance.
+
+**What the probe says (and why the phases are ordered this way).** Through
+the G1a harness — copies and one synchronous command buffer per call — the
+GPU only beats 8 CPU threads above ≈0.3 GFLOP per GEMM (dec_wide-class
+shapes): a ≈0.7 ms per-call floor loses at dec_mid, and SmolLM per-layer
+GEMMs win just 1.0–1.4×. The emitted 16×16 scalar-FMA tile tops out near
+260 GFLOP/s, ≈6 % of the M4's 4.26 TFLOPS — the same "<30 % of peak" band
+the CPU kernels occupy. So zero-copy residency and batched encoding are
+prerequisites, not polish, and `simdgroup_matrix` tiles are on the critical
+path to the 10–20× the frontier comparison prices. A side finding: CPU
+`GemmNT` (the dX backward) runs a serial dot-product chain and is 3–5×
+slower than `GemmNN` at equal FLOPs — most of the bwd/fwd 3.4–4.5× ratio,
+and fixable deterministically on the CPU (#66).
+
+**Phase G1b-1 — backend abstraction (M, #60).** An `ExecutorBackend`
+interface over the opcode families; `CpuBackend` wraps today's kernels
+unchanged; engine dispatch goes through it. `TrainOptions::backend` and a
+`--backend cpu|metal|auto` flag (default `cpu`) in the generated driver,
+`SEEML_BACKEND` env, backend + device recorded in the log banner and
+`report.json` — the per-backend determinism doctrine requires that the
+backend be named wherever results are compared.
+
+**Phase G1b-2 — zero-copy residency (M, #61).** Page-aligned arena
+allocation wrapped once with `newBufferWithBytesNoCopy`; rodata either
+copied once at load or — preferred — the embedded plan page-aligned and
+wrapped no-copy, keeping RSS/(arena+plan) ≈ 1.0. Validator-proven refs
+become `(buffer, offset)`.
+
+**Phase G1b-3 — batched encoding and sync (M, #62).** Consecutive
+GPU-resident instructions encode into one command buffer; a CPU
+instruction touching a region a pending GPU instruction writes (or reads
+a region it writes) forces a flush — the dependency test reuses the
+validator's operand-extent machinery. Tests: Metal run-to-run bitwise on a
+full train program; Metal-vs-CPU loss curves at a stated tolerance; a
+fuzz-style CPU/GPU interleaving test against the pure-CPU run.
+
+**Phase G1b-4 — kernel coverage and quality (L, #63).** In priority
+order: `simdgroup_matrix` GEMM tiles (target ≥ 1.5 TFLOP/s at dec_wide);
+v5 epilogue flags in the write-back; the Q8 GEMMs (the frontier config is
+a q8 base); the attention family; then trivially parallel elementwise /
+norm / RoPE / optimizer kernels so a step has no forced CPU round trips.
+The autotuner learns GPU tile arms.
+
+**Phase G1c — vendoring (M, #64).** The package gains the emitted
+`.metal` source, the runner TU and the backend TU, an Apple-only branch in
+the generated `build.sh` (MSL is JIT-compiled at run time, so no Metal
+toolchain is required), and the `--backend` flag in `update_main.cc`.
+Bundled with it, the field-report P2 fix: **`.incbin` plan embedding**
+(an assembly TU with `.balign 16384` + `.incbin`, decimal `.cc` fallback)
+— the 948 MB decimal TU at 135M parameters took clang 16.5 min; at 1B it
+would not build on a 16 GB host. Page alignment doubles as G1b-2's
+no-copy prerequisite. Linux packages compile exactly the sources they do
+today.
+
+**Release gate (#65).** SmolLM-135M q8 fine-tune: `--backend cpu`
+byte-identical to v1.2.4; `--backend metal` val loss within tolerance and
+≥ 800 tok/s (≥ 10× CPU; MLX is 1,605); package build < 2 min;
+`seeml-bench --backend` baseline rows; docs (runtime, usage,
+SPECIFICATION §7, this file).
+
+Linux GPU (Vulkan) stays out of scope until a product target needs it.
 
 ## Sequencing
 
@@ -247,11 +310,16 @@ a product target needs it.
 2. ~~**4/T1 transformer coverage**~~ — shipped; SMF v3 + plan v6 are in.
 3. ~~**5/G1a Metal dispatch harness**~~ — shipped; the MSL is
    hardware-validated.
-4. **5/G1b engine integration** — the throughput unlock now that the
-   kernels are proven; then **4/T2** scale passes ride it.
-5. **2a gradient accumulation** — unlocks larger effective batches on the
-   devices the memory gate now honestly bounds.
-6. **3 decision (A or B)** — cheap to decide, removes standing dishonesty
+4. **5/G1b-1 → G1b-4, then G1c** (milestone v1.3.0, epic #59) — the
+   throughput unlock, in the dependency order above; **#66 `GemmNT`** and
+   **#67 gate hardening** run alongside on the CPU side.
+5. **4/T2 HF import (#69)** — unblocked by SMF v5's RoPE-base field; rides
+   the GPU backend for frontier-model validation (milestone v1.4.0).
+6. **2a gradient accumulation (#70)** — once the GPU removes the compute
+   wall, activation memory bounds the effective batch on 16 GB devices.
+7. **3 decision (A or B)** — cheap to decide, removes standing dishonesty
    either way.
-7. **2b rematerialization**, then **1b chain fusion**, then **2c bf16** —
-   each contingent on profiling evidence from the phases before it.
+8. **2b rematerialization**, then **1b chain fusion**, then **2c bf16
+   (#71)** — each contingent on profiling evidence from the phases before
+   it; the G1b-4 kernels are written element-type-templated so bf16
+   storage slots in without a second kernel family.

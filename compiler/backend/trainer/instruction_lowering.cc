@@ -1,4 +1,5 @@
 #include "compiler/backend/trainer/instruction_lowering.h"
+#include "source/language/model_format.h"
 
 #include <bit>
 
@@ -221,7 +222,10 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
         ins.in[1] = ref(op->result(0));
         ins.out[0] = bs;
         ins.out[1] = hd;
-        ins.out[2] = F32Bits(op->getAttrAs<float>("base").value_or(10000.0f));
+        // The parser always sets "base" (SMF v5 attr1, or the format
+        // default); the fallback only covers SIR built by hand in tests.
+        ins.out[2] = F32Bits(
+            op->getAttrAs<float>("base").value_or(kSmfDefaultRopeBase));
       } else if (m == "sc_high.attention") {
         set(OpCode::kAttnFwd);
         ins.in[0] = ref(op->operand(0));   // q

@@ -5,6 +5,7 @@
 // regression that every instruction the compiler emits validates.
 // =============================================================================
 
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -151,10 +152,36 @@ TEST(PlanValidator, RopeRequiresEvenHeadWidth) {
   rope.in[1] = up::MakeArenaRef(96);
   rope.out[0] = (uint64_t{1} << 32) | 2;  // B=1, S=2
   rope.out[1] = (uint64_t{2} << 32) | 3;  // H=2, d=3: odd head width
+  rope.out[2] = std::bit_cast<uint32_t>(10000.0f);
   EXPECT_ERROR(ValidateInstruction(rope, kArena, kRodata, up::kSeeuVersion));
   rope.out[1] = (uint64_t{2} << 32) | 4;  // d=4 with disjoint in/out
   rope.in[1] = up::MakeArenaRef(512);
   EXPECT_OK(ValidateInstruction(rope, kArena, kRodata, up::kSeeuVersion));
+}
+
+TEST(PlanValidator, RopeBaseMustBeAUsableFloat) {
+  // out[2] carries the rotary base as f32 bits (SMF v5 attr1 → lowering).
+  // A zero, NaN, infinite, or <= 1 base makes every angle degenerate; a
+  // stray high word means the word was not written by this lowering.
+  up::UpdateInstruction rope;
+  rope.opcode = static_cast<uint16_t>(up::OpCode::kRopeBwd);
+  rope.in[0] = up::MakeArenaRef(0);
+  rope.in[1] = up::MakeArenaRef(512);
+  rope.out[0] = (uint64_t{1} << 32) | 2;  // B=1, S=2
+  rope.out[1] = (uint64_t{2} << 32) | 4;  // H=2, d=4
+  for (const float ok_base : {10000.0f, 500000.0f, 1000000.0f, 1.5f}) {
+    rope.out[2] = std::bit_cast<uint32_t>(ok_base);
+    EXPECT_OK(ValidateInstruction(rope, kArena, kRodata, up::kSeeuVersion));
+  }
+  for (const uint64_t bad : {uint64_t{0}, uint64_t{0x7FC00000u},
+                             uint64_t{0x7F800000u},
+                             uint64_t{std::bit_cast<uint32_t>(1.0f)},
+                             uint64_t{std::bit_cast<uint32_t>(-10000.0f)},
+                             (uint64_t{1} << 32) |
+                                 std::bit_cast<uint32_t>(10000.0f)}) {
+    rope.out[2] = bad;
+    EXPECT_ERROR(ValidateInstruction(rope, kArena, kRodata, up::kSeeuVersion));
+  }
 }
 
 TEST(PlanValidator, RejectsReadsPastTheArena) {
