@@ -6,6 +6,10 @@ Usage:
 
 Compares the Tier A throughput metric — rows_per_s, per fixture per thread
 width — and exits 1 if any pair regressed by more than --max-regression
+(rows_per_s is MLX-LM's "Tokens/sec" under its own definition — every row
+of a SeeML batch is a loss target — and schema-2 reports also carry it as
+tokens_per_s / samples_per_s; the gate keeps the schema-1 key so a baseline
+stored before the rename still compares)
 (default 0.10, the >10% gate of docs/benchmarks.md). A missing baseline
 file exits 0 with a note: the first run of a new host seeds the baseline
 rather than failing it. Fixtures or thread widths present on only one side
