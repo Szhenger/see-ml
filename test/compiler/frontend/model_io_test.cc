@@ -3,6 +3,7 @@
 // rejection of malformed files (the binary-format hardening surface).
 // =============================================================================
 
+#include <bit>
 #include <cstdint>
 #include <fstream>
 #include <string>
@@ -163,6 +164,40 @@ TEST(Smf, SaveLoadRoundTripsV3TransformerFields) {
     EXPECT_EQ(loaded.ops[i].kind, model.ops[i].kind);
     EXPECT_EQ(loaded.ops[i].attr0, model.ops[i].attr0);
   }
+}
+
+TEST(Smf, SaveLoadRoundTripsV5RopeBase) {
+  // The v5 addition — per-op attr1, the rotary base as f32 bits on kRope —
+  // must survive the byte round trip on every op, exactly as written.
+  ScopedTempDir dir;
+  SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 9);
+  const uint32_t llama3_base = std::bit_cast<uint32_t>(500000.0f);
+  for (SmfOp& op : model.ops)
+    if (op.kind == SmfOpKind::kRope) op.attr1 = llama3_base;
+  const std::string path = dir.File("decoder_v5.smf");
+  ASSERT_OK(SaveSmf(path, model));
+
+  ASSERT_OK_AND_ASSIGN(SmfModel loaded, LoadSmf(path));
+  ASSERT_EQ(loaded.ops.size(), model.ops.size());
+  size_t rope_ops = 0;
+  for (size_t i = 0; i < model.ops.size(); ++i) {
+    EXPECT_EQ(loaded.ops[i].attr1, model.ops[i].attr1);
+    if (loaded.ops[i].kind == SmfOpKind::kRope) {
+      ++rope_ops;
+      EXPECT_EQ(loaded.ops[i].attr1, llama3_base);
+    } else {
+      EXPECT_EQ(loaded.ops[i].attr1, 0u);
+    }
+  }
+  EXPECT_EQ(rope_ops, 2u);
+  // The writer stamps the current version.
+  std::ifstream f(path, std::ios::binary);
+  uint32_t magic = 0, version = 0;
+  f.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+  f.read(reinterpret_cast<char*>(&version), sizeof(version));
+  EXPECT_EQ(magic, kSmfMagic);
+  EXPECT_EQ(version, kSmfVersion);
+  EXPECT_EQ(version, 5u);
 }
 
 TEST(Smf, SaveComputesAlignedNonOverlappingOffsets) {

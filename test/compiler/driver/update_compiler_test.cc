@@ -4,6 +4,7 @@
 // selection, and the compile-time error surface.
 // =============================================================================
 
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -47,6 +48,29 @@ size_t CountOpcode(const std::vector<UpdateInstruction>& instrs, OpCode oc) {
   for (const UpdateInstruction& ins : instrs)
     if (ins.opcode == static_cast<uint16_t>(oc)) ++n;
   return n;
+}
+
+TEST(UpdateCompiler, RopeBaseReachesForwardAndBackwardInstructions) {
+  // SMF v5 attr1 → parser "base" attribute → autodiff copy → lowering
+  // out[2] on both kRopeFwd and kRopeBwd. A Llama-3-class θ=500k must not
+  // silently lower to 10000 anywhere in the train program.
+  SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 9);
+  const float theta = 500000.0f;
+  for (SmfOp& op : model.ops)
+    if (op.kind == SmfOpKind::kRope) op.attr1 = std::bit_cast<uint32_t>(theta);
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(BaseConfig(8)).Compile(model));
+  const auto instrs = TrainProgramOf(compiled);
+  size_t fwd = 0, bwd = 0;
+  for (const UpdateInstruction& ins : instrs) {
+    const auto op = static_cast<OpCode>(ins.opcode);
+    if (op != OpCode::kRopeFwd && op != OpCode::kRopeBwd) continue;
+    (op == OpCode::kRopeFwd ? fwd : bwd)++;
+    EXPECT_EQ(static_cast<uint32_t>(ins.out[2]),
+              std::bit_cast<uint32_t>(theta));
+  }
+  EXPECT_EQ(fwd, 2u);
+  EXPECT_GE(bwd, 1u);
 }
 
 TEST(UpdateCompiler, PlanHeaderContract) {

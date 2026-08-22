@@ -1,5 +1,8 @@
 #include "runtime/validator/plan_validator.h"
 
+#include <bit>
+#include <cmath>
+
 #include "runtime/diagnostics/validating/error.h"
 
 namespace seeml::update_rt {
@@ -274,6 +277,13 @@ std::expected<void, std::string> ValidateInstruction(
       if (!attn_geometry(d0, d1, &td, &pn)) return fail();
       // The rotation pairs (2c, 2c+1) require an even head width.
       if ((d1 & 0xFFFFFFFFu) % 2 != 0) return fail();
+      // The rotary base rides out[2] as f32 bits (SMF v5 attr1, or the
+      // lowering default). A non-finite or <= 1 base would make every
+      // angle degenerate or NaN — reject it here, not as a NaN loss later.
+      const float base =
+          std::bit_cast<float>(static_cast<uint32_t>(ins.out[2]));
+      if ((ins.out[2] >> 32) != 0 || !std::isfinite(base) || base <= 1.0f)
+        return fail();
       if (!ref_ok(ins.in[0], td, false) || !ref_ok(ins.in[1], td, true))
         return fail();
       return disjoint();

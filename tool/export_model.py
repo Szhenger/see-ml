@@ -53,7 +53,8 @@ import struct
 import sys
 
 SMF_MAGIC = 0x31464D53  # "SMF1"
-SMF_VERSION = 3         # v3: transformer op kinds, seq_len, per-op attr0
+SMF_VERSION = 5         # v5: per-op attr1 (RoPE base as f32 bits) after attr0
+DEFAULT_ROPE_BASE = 10000.0  # what attr1 == 0 means on a Rope op
 SDS_MAGIC = 0x31534453  # "SDS1"
 ALIGN = 64
 
@@ -77,9 +78,10 @@ class _SmfBuilder:
         self.input_name = input_name
         self.output_name = input_name
         self.seq_len = seq_len  # rows per sequence; 0 = non-sequential
-        # A token-native model (SMF v4) declares a rank-1 dynamic input:
-        # one i32 token id per row, gathered on-device by kEmbedding.
-        self.version = 4 if token_input else SMF_VERSION
+        # A token-native model (SMF v4+) declares a rank-1 dynamic input:
+        # one i32 token id per row, gathered on-device by kEmbedding. Every
+        # file is written at the current version; readers accept v1..v5.
+        self.version = SMF_VERSION
         dims = [-1] if token_input else [-1, input_dim]
         self.tensors = [dict(name=input_name, dims=dims, const=False, data=b"")]
         self.ops = []
@@ -87,9 +89,10 @@ class _SmfBuilder:
     def add_tensor(self, name, dims, data: bytes):
         self.tensors.append(dict(name=name, dims=list(dims), const=True, data=data))
 
-    def add_op(self, kind, name, inputs, output, attr0: int = 0):
+    def add_op(self, kind, name, inputs, output, attr0: int = 0,
+               attr1: int = 0):
         self.ops.append(dict(kind=kind, name=name, inputs=inputs,
-                             output=output, attr0=attr0))
+                             output=output, attr0=attr0, attr1=attr1))
         self.output_name = output
 
     def serialize(self) -> bytes:
@@ -111,6 +114,7 @@ class _SmfBuilder:
                     out += _s(i)
                 out += _s(op["output"])
                 out += struct.pack("<I", op["attr0"])
+                out += struct.pack("<I", op["attr1"])  # v5
             return out
 
         meta_size = len(meta({}))
@@ -195,9 +199,26 @@ def _decoder_dim(blocks, head, num_heads: int, caller: str) -> int:
     return D
 
 
-def _emit_decoder_graph(b, blocks, head, num_heads: int, prev: str):
+def _rope_base_bits(rope_base: float) -> int:
+    """attr1 encoding of a rotary base: its IEEE-754 single bits, exactly as
+    the on-device kernel will read them (0 would mean the 10000 default)."""
+    import math
+    base = float(rope_base)
+    if not math.isfinite(base) or base <= 1.0:
+        raise ValueError(f"rope_base must be a finite float > 1, got {rope_base}")
+    # Round-trip through f32 so the exporter's notion of θ matches the
+    # kernel's: a base that is not exactly representable is rounded once,
+    # here, and the rounded value is what gets written.
+    bits = struct.unpack("<I", struct.pack("<f", base))[0]
+    return bits
+
+
+def _emit_decoder_graph(b, blocks, head, num_heads: int, prev: str,
+                        rope_base: float = DEFAULT_ROPE_BASE):
     """Append the pre-norm block stack and lm head, reading rows from `prev`."""
     import numpy as np
+
+    base_bits = _rope_base_bits(rope_base)
 
     def tensor(name, arr):
         a = np.ascontiguousarray(np.asarray(arr, dtype=np.float32))
@@ -211,8 +232,10 @@ def _emit_decoder_graph(b, blocks, head, num_heads: int, prev: str):
         for w in ("wq", "wk", "wv"):
             tensor(p + w, blk[w])
             b.add_op(OP_MATMUL, p + "mm_" + w, [p + "n1", p + w], p + w[1])
-        b.add_op(OP_ROPE, p + "rope_q", [p + "q"], p + "qr", attr0=num_heads)
-        b.add_op(OP_ROPE, p + "rope_k", [p + "k"], p + "kr", attr0=num_heads)
+        b.add_op(OP_ROPE, p + "rope_q", [p + "q"], p + "qr", attr0=num_heads,
+                 attr1=base_bits)
+        b.add_op(OP_ROPE, p + "rope_k", [p + "k"], p + "kr", attr0=num_heads,
+                 attr1=base_bits)
         b.add_op(OP_ATTENTION, p + "attn", [p + "qr", p + "kr", p + "v"],
                  p + "a", attr0=num_heads)
         tensor(p + "wo", blk["wo"])
@@ -238,8 +261,13 @@ def _emit_decoder_graph(b, blocks, head, num_heads: int, prev: str):
 
 
 def export_decoder_smf(blocks, head, path: str, seq_len: int, num_heads: int,
-                       input_name: str = "x"):
-    """Export a pre-norm causal decoder stack to SMF v3.
+                       input_name: str = "x",
+                       rope_base: float = DEFAULT_ROPE_BASE):
+    """Export a pre-norm causal decoder stack to SMF v5.
+
+    `rope_base` is the rotary θ (HF `rope_theta`): 10000 for GPT-NeoX /
+    SmolLM-v1, 100000 for SmolLM2, 500000 for Llama 3.x, 1000000 for Qwen.
+    It is written per Rope op (attr1) and lowered into the plan verbatim.
 
     `blocks` is a list of dicts of float32 numpy arrays, one per layer:
         ln1_g [D]; wq, wk, wv, wo [D, D]; ln2_g [D];
@@ -252,16 +280,18 @@ def export_decoder_smf(blocks, head, path: str, seq_len: int, num_heads: int,
     """
     D = _decoder_dim(blocks, head, num_heads, "export_decoder_smf")
     b = _SmfBuilder(input_name, D, seq_len=seq_len)
-    _emit_decoder_graph(b, blocks, head, num_heads, prev=input_name)
+    _emit_decoder_graph(b, blocks, head, num_heads, prev=input_name,
+                        rope_base=rope_base)
     with open(path, "wb") as f:
         f.write(b.serialize())
     print(f"wrote {path} ({len(blocks)} decoder blocks, seq_len={seq_len}, "
-          f"heads={num_heads})")
+          f"heads={num_heads}, rope_base={float(rope_base):g})")
 
 
 def export_token_decoder_smf(embedding, blocks, head, path: str, seq_len: int,
-                             num_heads: int, input_name: str = "x"):
-    """Export a token-native pre-norm causal decoder to SMF v4.
+                             num_heads: int, input_name: str = "x",
+                             rope_base: float = DEFAULT_ROPE_BASE):
+    """Export a token-native pre-norm causal decoder to SMF v5.
 
     Same `blocks` / `head` dictionaries as export_decoder_smf, plus
     `embedding`: a float32 [V, D] table. The exported model's input is a
@@ -282,11 +312,13 @@ def export_token_decoder_smf(embedding, blocks, head, path: str, seq_len: int,
     b = _SmfBuilder(input_name, D, seq_len=seq_len, token_input=True)
     b.add_tensor("emb", list(emb.shape), emb.tobytes())
     b.add_op(OP_EMBEDDING, "embed", [input_name, "emb"], "e")
-    _emit_decoder_graph(b, blocks, head, num_heads, prev="e")
+    _emit_decoder_graph(b, blocks, head, num_heads, prev="e",
+                        rope_base=rope_base)
     with open(path, "wb") as f:
         f.write(b.serialize())
     print(f"wrote {path} ({len(blocks)} decoder blocks, seq_len={seq_len}, "
-          f"heads={num_heads}, vocab={emb.shape[0]}, token-native)")
+          f"heads={num_heads}, vocab={emb.shape[0]}, token-native, "
+          f"rope_base={float(rope_base):g})")
 
 
 def export_sds(inputs, labels, path: str, label_kind: int = 1):
@@ -329,7 +361,20 @@ def export_token_sds(records, path: str):
     """
     import numpy as np
 
-    a = np.ascontiguousarray(np.asarray(records, dtype=np.int32))
+    raw = np.asarray(records)
+    if np.issubdtype(raw.dtype, np.floating):
+        # A float array here is almost always a mistake (a logits/embedding
+        # array handed where ids belong); silently truncating 3.7 → 3 would
+        # train on garbage labels. Exact integers in float dtype are fine.
+        if not np.all(np.isfinite(raw)) or not np.all(np.mod(raw, 1) == 0):
+            raise ValueError("export_token_sds: records must be integer "
+                             "token ids (got non-integral float values)")
+    elif not (np.issubdtype(raw.dtype, np.integer) or raw.size == 0):
+        raise ValueError("export_token_sds: records must be integer token "
+                         f"ids (got dtype {raw.dtype})")
+    if raw.size and raw.max() > np.iinfo(np.int32).max:
+        raise ValueError("export_token_sds: token id exceeds int32")
+    a = np.ascontiguousarray(raw.astype(np.int32))
     if a.ndim != 2 or a.shape[1] < 2:
         raise ValueError("export_token_sds: records must be [N, seq_len + 1]")
     if a.shape[0] == 0:
@@ -376,7 +421,8 @@ def _demo(out_dir: str, width: int = 32, depth: int = 1, samples: int = 2048,
 
 def _demo_decoder(out_dir: str, vocab: int = 50, dim: int = 32,
                   heads: int = 4, seq: int = 8, ffn: int = 0,
-                  blocks_n: int = 2, samples: int = 192, seed: int = 0):
+                  blocks_n: int = 2, samples: int = 192, seed: int = 0,
+                  rope_base: float = DEFAULT_ROPE_BASE):
     """A tiny token-native decoder plus a corpus it can actually learn:
     a cyclic-successor language where token t is always followed by
     (t + 3) % vocab. Needs NumPy only — no PyTorch."""
@@ -397,7 +443,7 @@ def _demo_decoder(out_dir: str, vocab: int = 50, dim: int = 32,
     head = {"lnf_g": np.ones(dim, np.float32), "w_head": mat(dim, vocab)}
     emb = (rng.standard_normal((vocab, dim)) * 0.5).astype(np.float32)
     export_token_decoder_smf(emb, blocks, head, f"{out_dir}/decoder.smf",
-                             seq_len=seq, num_heads=heads)
+                             seq_len=seq, num_heads=heads, rope_base=rope_base)
 
     starts = rng.integers(0, vocab, samples)
     records = (starts[:, None] + 3 * np.arange(seq + 1)) % vocab
@@ -470,7 +516,13 @@ if __name__ == "__main__":
                         help="--demo-decoder only: decoder blocks (2)")
     parser.add_argument("--ffn", type=int, metavar="N",
                         help="--demo-decoder only: FFN width (2x width)")
+    parser.add_argument("--rope-base", type=float, metavar="THETA",
+                        help="--demo-decoder only: rotary base θ (HF "
+                             "rope_theta; default 10000 — 500000 for Llama 3, "
+                             "1000000 for Qwen)")
     args = parser.parse_args()
+    if args.rope_base is not None and not args.rope_base > 1.0:
+        parser.error(f"--rope-base must be > 1, got {args.rope_base}")
 
     if not args.demo and not args.demo_decoder and not args.corpus:
         parser.print_help()
@@ -516,6 +568,8 @@ if __name__ == "__main__":
         _demo_decoder(args.demo_decoder, vocab=args.vocab or 50, dim=dim,
                       heads=heads, seq=args.seq_len or 8, ffn=args.ffn or 0,
                       blocks_n=args.blocks or 2, samples=args.samples or 192,
-                      seed=args.seed if args.seed is not None else 0)
+                      seed=args.seed if args.seed is not None else 0,
+                      rope_base=(args.rope_base if args.rope_base is not None
+                                 else DEFAULT_ROPE_BASE))
     if args.corpus:
         _export_corpus(args.corpus[0], args.corpus[1])

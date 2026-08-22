@@ -1,5 +1,7 @@
 #include "compiler/frontend/parser/sema.h"
 
+#include <bit>
+#include <cmath>
 #include <string_view>
 #include <unordered_set>
 
@@ -243,9 +245,25 @@ std::expected<void, std::string> CheckSeqGeometry(const char* unit,
 
 }  // namespace
 
+float RopeBaseOf(uint32_t base_bits) {
+  return base_bits == 0 ? kSmfDefaultRopeBase : std::bit_cast<float>(base_bits);
+}
+
 std::expected<void, std::string> CheckRope(const SmfOp& op, const sir::Value& x,
-                                           uint32_t heads, uint64_t seq_len) {
-  return CheckSeqGeometry("Rope", op, x, heads, seq_len, /*even_head=*/true);
+                                           uint32_t heads, uint64_t seq_len,
+                                           uint32_t base_bits) {
+  if (auto ok = CheckSeqGeometry("Rope", op, x, heads, seq_len,
+                                 /*even_head=*/true);
+      !ok)
+    return ok;
+  // The base feeds pow(base, -2i/d): anything non-finite, non-positive, or
+  // <= 1 makes the rotation angles degenerate (or NaN) rather than a
+  // different positional encoding.
+  const float base = RopeBaseOf(base_bits);
+  if (!std::isfinite(base) || base <= 1.0f)
+    return parsing::OpError("Rope", op.name,
+                            "rotary base (attr1) must be a finite float > 1");
+  return {};
 }
 
 std::expected<void, std::string> CheckEmbedding(const SmfOp& op,

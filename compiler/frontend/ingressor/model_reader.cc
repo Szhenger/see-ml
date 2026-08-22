@@ -193,6 +193,7 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     for (uint8_t k = 0; k < n_in; ++k) op.inputs.push_back(r.ReadStr());
     op.output = r.ReadStr();
     if (version >= 3) op.attr0 = r.Read<uint32_t>();
+    if (version >= 5) op.attr1 = r.Read<uint32_t>();
     model.ops.push_back(std::move(op));
   }
 
