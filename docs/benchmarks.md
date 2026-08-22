@@ -18,6 +18,42 @@ keeps numbers comparable across commits.
 - **Per-commit trend, not absolutes.** The gate is regression against the
   previous commit's number on the same host (CI can carry the baseline as
   an artifact the way the fuzz corpus is cached).
+- **External definitions, not house units.** Every headline number is
+  reported under the definition an outside harness already prints for it
+  (next section). A metric only this repository defines cannot be set
+  beside an MLX-LM or llama.cpp log, so it cannot answer "how far behind
+  the frontier are we" — the question the whole program exists to answer.
+
+## External standards the harness reports in
+
+`seeml-bench` emits each Tier A/C cell twice: once under the internal key
+the regression gate has always compared (`rows_per_s`), and once under the
+key and definition the external tool uses. The numbers are identical by
+construction where the definitions coincide; the point is that a reader
+of an `mlx_lm.lora` log or a `llama-bench` table needs no unit translation.
+
+| field | external standard | definition here | note |
+|---|---|---|---|
+| `tokens_per_s` (token/decoder fixtures), `samples_per_s` (feature fixtures) | MLX-LM `lora` **Tokens/sec** | loss-target rows per wall second of training | MLX counts loss-masked target tokens only; every row of a SeeML batch is a target (next-token label per position), so this is exactly `rows_per_s` — the gate key is unchanged, the unit is now named |
+| `it_per_s` | MLX-LM **It/sec** | optimizer steps per second = `1000 / step_ms` | per-step, from the steps-regression slope, so lifecycle cost is excluded as MLX's warm iterations exclude it |
+| `step_ms_min` / `step_ms_max` | `llama-bench` **t/s ± σ** | spread of the per-step slope across `--repeats` | medians stay the headline; the spread says whether a delta is signal |
+| `train_loss_first` / `train_loss_last`, `trained_tokens` | MLX-LM **Train loss**, **Trained Tokens** | first/last windowed mean training loss over the whole sweep; rows trained | a sanity anchor that the timed work was real training, not a stalled loop |
+| `peak_rss_bytes`, `rss_over_planned` | MLX-LM **Peak mem**; Tier C "peak RSS vs arena" | OS-observed peak resident set (`getrusage`); ratio to `arena + plan` | process-cumulative, so it rises monotonically across fixtures; on the MB-scale fixtures the ~20 MB process floor dominates the ratio, so read it at model scale (where the field audits found 1.00–1.13×) |
+| `mfu` (only with `--peak-gflops F`) | PaLM / Megatron **model-FLOPs utilization** | achieved GEMM FLOP/s ÷ the host peak you pass | the harness never guesses a peak — a guessed denominator is not a standard. Published anchors (arXiv 2502.05317): Apple M4 GPU ≈ 2.9 TFLOP/s measured, M-series CPU AMX ≈ 1.49, NEON-only ≈ 0.84 |
+| `gemm_gflops` | (internal) | `gemm_flops_per_step / step_ms`, FLOPs summed as 2·M·N·K over the plan's own GEMM instructions | the numerator of `mfu`; kept because it needs no external input |
+| `host` | every standard's "report the machine" rule | `uname` sysname + machine | the JSON is self-describing; a number without its host string is not a benchmark |
+
+What is deliberately *not* reported: a validation perplexity. The fixtures
+train on seeded synthetic corpora, so a val loss here would be an internal
+number dressed as lm-eval output. Quality metrics against a real model
+(SmolLM-135M val loss/accuracy vs the torch reference) live in the
+validation field reports, where the corpus is real text.
+
+Reference frontier numbers for the same host class, for scale: on Apple
+M4, `mlx_lm.lora` on SmolLM-135M (bf16, r8, GPU) reports ~6.4 It/sec and
+~1,600 Tokens/sec at 1.28 GB peak; `torch.compile` on CPU reaches ~40% MFU
+against the AMX peak. SeeML's CPU path sits at 4–13% MFU on the same
+shapes — the gap the C2 SIMD and G1b Metal projects are priced against.
 
 ## Tier A — Training throughput (the headline numbers)
 
@@ -99,10 +135,14 @@ All three pieces of this program exist:
    step number), Tier A `rows_per_s`, effective GEMM GFLOP/s (the FLOPs
    are summed from the plan's own instruction stream, 2·M·N·K over every
    GEMM), the fwd/bwd/optimizer split, and the Tier D lifecycle numbers
-   (compile, load+validate, merge, checkpoint save). Medians of
-   `--repeats` (default 3); seeds and thread widths pinned. The CLI is
-   strict, like the other tools: an unknown flag or a flag that cannot
-   parse is exit 2, never a default.
+   (compile, load+validate, merge, checkpoint save), plus the
+   external-standard fields of the table above (`tokens_per_s`,
+   `it_per_s`, spread, train loss, peak RSS, and `mfu` when
+   `--peak-gflops` names the host peak). Medians of `--repeats`
+   (default 3); seeds and thread widths pinned. The CLI is strict, like
+   the other tools: an unknown flag or a flag that cannot parse is exit 2,
+   never a default. Report schema is 2; every schema-1 key is unchanged,
+   so stored baselines stay comparable.
 
 2. **The nightly `bench` CI job** restores the previous night's numbers
    from the actions cache (the fuzz-corpus trust model), runs the harness,
