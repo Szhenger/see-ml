@@ -200,6 +200,18 @@ TEST(Smf, SaveLoadRoundTripsV5RopeBase) {
   EXPECT_EQ(version, 5u);
 }
 
+TEST(Smf, LoadRejectsAttr1OnKindsThatDoNotDefineIt) {
+  // attr1 is reserved (zero) on every kind but kRope; a file setting it
+  // elsewhere is refused rather than carrying an undefined meaning.
+  ScopedTempDir dir;
+  SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 9);
+  for (SmfOp& op : model.ops)
+    if (op.kind == SmfOpKind::kAttention) op.attr1 = 1;
+  const std::string path = dir.File("attr1_on_attention.smf");
+  ASSERT_OK(SaveSmf(path, model));
+  EXPECT_ERROR_CONTAINS(LoadSmf(path), "nonzero attr1");
+}
+
 TEST(Smf, SaveComputesAlignedNonOverlappingOffsets) {
   ScopedTempDir dir;
   SmfModel model = MakeMlp(4, 8, 2, 2);

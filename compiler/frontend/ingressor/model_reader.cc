@@ -194,6 +194,13 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     op.output = r.ReadStr();
     if (version >= 3) op.attr0 = r.Read<uint32_t>();
     if (version >= 5) op.attr1 = r.Read<uint32_t>();
+    // attr1 is defined only for kRope (the rotary base); on every other
+    // kind it is reserved and must be zero, so a future meaning can never
+    // be silently misread by a reader that predates it.
+    if (op.attr1 != 0 && op.kind != SmfOpKind::kRope)
+      return tokenizing::Error("op '" + op.name + "' carries a nonzero attr1, "
+                               "which its kind does not define, in '" + path +
+                               "'");
     model.ops.push_back(std::move(op));
   }
 
