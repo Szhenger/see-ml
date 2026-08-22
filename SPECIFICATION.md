@@ -239,7 +239,7 @@ raise the oldest-readable floor; newer-than-reader is always rejected):
 
 | Format | Magic | Current version | Implemented in |
 |---|---|---|---|
-| SMF (model container) | `"SMF1"` | v4 (readers accept v1–v4) | `source/language/model_format.*`, `compiler/frontend/ingressor/model_{reader,writer}.cc`, Python writer in `tool/export_model.py` |
+| SMF (model container) | `"SMF1"` | v5 (readers accept v1–v5; writers emit the lowest version the model needs) | `source/language/model_format.*`, `compiler/frontend/ingressor/model_{reader,writer}.cc`, Python writer in `tool/export_model.py` |
 | SDS (dataset) | `"SDS1"` | v1 (feature rows) / v2 (token records) | `runtime/feeder/dataset.cc`, Python writer |
 | SEEU (update plan) | `"SEEU"` | v7, oldest-readable v4 | written by `compiler/backend/trainer/*` + driver; read/validated by `runtime/validator` + `runtime/engine`; disassembled by `seeml-seeu-dump` |
 | SEKP (checkpoint) | `"SEKP"` | v3 | `runtime/custodian/checkpoint.cc` |

@@ -23,6 +23,14 @@ on:
   schedule:
     - cron: "17 7 * * *"
   workflow_dispatch:
+    inputs:
+      reseed_baseline:
+        description: >-
+          Skip the Tier A gate and store this run as the new rolling
+          baseline (after a fixture/metric rename the fail-closed gate
+          would otherwise stay red; the epoch baseline is left alone).
+        type: boolean
+        default: false
 
 jobs:
   tsan:
@@ -148,12 +156,18 @@ jobs:
       - name: Bench
         run: ./build-bench/seeml-bench --out bench.json --threads 1,2,4
       - name: Gate against baseline
+        if: ${{ !inputs.reseed_baseline }}
         run: >
           python3 tool/bench_compare.py bench-baseline/bench.json bench.json
           --epoch-baseline bench-epoch/bench.json
       - name: Store as next baseline
         run: mkdir -p bench-baseline && cp bench.json bench-baseline/bench.json
-      - name: Seed the epoch baseline (first night only)
+      # Seeded from the first GREEN night (actions/cache saves only when the
+      # job succeeds, and the seed step does not run after a failed gate),
+      # so the drift reference is never a run that already regressed. A
+      # reseed run never touches it; bump the key suffix to start an epoch.
+      - name: Seed the epoch baseline (first green night only)
+        if: ${{ !inputs.reseed_baseline }}
         run: |
           if [ ! -f bench-epoch/bench.json ]; then
             mkdir -p bench-epoch && cp bench.json bench-epoch/bench.json

@@ -55,6 +55,10 @@ import sys
 SMF_MAGIC = 0x31464D53  # "SMF1"
 SMF_VERSION = 5         # v5: per-op attr1 (RoPE base as f32 bits) after attr0
 DEFAULT_ROPE_BASE = 10000.0  # what attr1 == 0 means on a Rope op
+# The writer emits the LOWEST version that can carry the model: v3 for a
+# feature-input model, v4 for a token-native one, v5 only when some Rope op
+# carries a non-default base (attr1 != 0). Files that use nothing newer keep
+# loading on older compilers, and the classic demos stay byte-for-byte.
 SDS_MAGIC = 0x31534453  # "SDS1"
 ALIGN = 64
 
@@ -79,9 +83,8 @@ class _SmfBuilder:
         self.output_name = input_name
         self.seq_len = seq_len  # rows per sequence; 0 = non-sequential
         # A token-native model (SMF v4+) declares a rank-1 dynamic input:
-        # one i32 token id per row, gathered on-device by kEmbedding. Every
-        # file is written at the current version; readers accept v1..v5.
-        self.version = SMF_VERSION
+        # one i32 token id per row, gathered on-device by kEmbedding.
+        self.min_version = 4 if token_input else 3
         dims = [-1] if token_input else [-1, input_dim]
         self.tensors = [dict(name=input_name, dims=dims, const=False, data=b"")]
         self.ops = []
@@ -95,9 +98,16 @@ class _SmfBuilder:
                              output=output, attr0=attr0, attr1=attr1))
         self.output_name = output
 
+    @property
+    def version(self) -> int:
+        needs_v5 = any(op["attr1"] != 0 for op in self.ops)
+        return max(self.min_version, 5 if needs_v5 else 3)
+
     def serialize(self) -> bytes:
+        version = self.version
+
         def meta(offsets):
-            out = struct.pack("<IIII", SMF_MAGIC, self.version,
+            out = struct.pack("<IIII", SMF_MAGIC, version,
                               len(self.tensors), len(self.ops))
             out += _s(self.input_name) + _s(self.output_name)
             out += struct.pack("<Q", self.seq_len)
@@ -114,7 +124,8 @@ class _SmfBuilder:
                     out += _s(i)
                 out += _s(op["output"])
                 out += struct.pack("<I", op["attr0"])
-                out += struct.pack("<I", op["attr1"])  # v5
+                if version >= 5:
+                    out += struct.pack("<I", op["attr1"])
             return out
 
         meta_size = len(meta({}))
@@ -208,9 +219,21 @@ def _rope_base_bits(rope_base: float) -> int:
         raise ValueError(f"rope_base must be a finite float > 1, got {rope_base}")
     # Round-trip through f32 so the exporter's notion of θ matches the
     # kernel's: a base that is not exactly representable is rounded once,
-    # here, and the rounded value is what gets written.
-    bits = struct.unpack("<I", struct.pack("<f", base))[0]
-    return bits
+    # here, and the rounded value is what gets written — so the checks
+    # must hold for the ROUNDED value (1 + 2^-24 rounds to exactly 1.0f;
+    # > FLT_MAX rounds to inf), or the compiler's sema would be the first
+    # to notice.
+    try:
+        packed = struct.pack("<f", base)
+    except OverflowError:
+        raise ValueError(f"rope_base {rope_base} exceeds float32 range")
+    rounded = struct.unpack("<f", packed)[0]
+    if not math.isfinite(rounded) or rounded <= 1.0:
+        raise ValueError(f"rope_base {rope_base} rounds to {rounded} in "
+                         "float32, which is not a usable base (> 1)")
+    if rounded == DEFAULT_ROPE_BASE:
+        return 0  # the format default; keeps such files at SMF v3/v4
+    return struct.unpack("<I", packed)[0]
 
 
 def _emit_decoder_graph(b, blocks, head, num_heads: int, prev: str,
@@ -372,8 +395,9 @@ def export_token_sds(records, path: str):
     elif not (np.issubdtype(raw.dtype, np.integer) or raw.size == 0):
         raise ValueError("export_token_sds: records must be integer token "
                          f"ids (got dtype {raw.dtype})")
-    if raw.size and raw.max() > np.iinfo(np.int32).max:
-        raise ValueError("export_token_sds: token id exceeds int32")
+    if raw.size and (raw.max() > np.iinfo(np.int32).max or
+                     raw.min() < np.iinfo(np.int32).min):
+        raise ValueError("export_token_sds: token id does not fit int32")
     a = np.ascontiguousarray(raw.astype(np.int32))
     if a.ndim != 2 or a.shape[1] < 2:
         raise ValueError("export_token_sds: records must be [N, seq_len + 1]")
@@ -521,8 +545,11 @@ if __name__ == "__main__":
                              "rope_theta; default 10000 — 500000 for Llama 3, "
                              "1000000 for Qwen)")
     args = parser.parse_args()
-    if args.rope_base is not None and not args.rope_base > 1.0:
-        parser.error(f"--rope-base must be > 1, got {args.rope_base}")
+    if args.rope_base is not None:
+        try:
+            _rope_base_bits(args.rope_base)
+        except ValueError as e:
+            parser.error(f"--rope-base: {e}")
 
     if not args.demo and not args.demo_decoder and not args.corpus:
         parser.print_help()
@@ -541,7 +568,7 @@ if __name__ == "__main__":
              depth=args.depth, corpus_kind=args.corpus_kind)
     _require(args.demo_decoder, "--demo-decoder", vocab=args.vocab,
              heads=args.heads, seq_len=args.seq_len, blocks=args.blocks,
-             ffn=args.ffn)
+             ffn=args.ffn, rope_base=args.rope_base)
     _require(args.demo or args.demo_decoder, "--demo or --demo-decoder",
              width=args.width, samples=args.samples, seed=args.seed)
     for name in ("samples", "width", "depth", "vocab", "heads", "seq_len",

@@ -54,7 +54,9 @@ double Median(std::vector<double> v) {
   const size_t n = v.size();
   // Even counts take the mean of the two middle samples — the textbook
   // median, rather than a biased upper-middle. Odd counts (the default
-  // repeats=3) are unaffected, so stored baselines stay comparable.
+  // repeats=3, which CI uses) are unaffected. A baseline recorded with an
+  // EVEN --repeats by an older binary is not comparable to this one —
+  // re-seed it (nightly: workflow_dispatch with reseed_baseline=true).
   return n % 2 == 1 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
 }
 
