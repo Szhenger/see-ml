@@ -66,7 +66,7 @@ keeps numbers comparable across commits.
 |---|---|---|
 | **CI wall time per job** | each ci.yml job's duration trend | the per-diff feedback loop; when build-and-test crosses ~10 min, precompiled-header or unity-build work pays |
 | **full local build time** | `build/build.sh` clean | same loop locally; the single biggest dev-speed lever in a -O2 -Werror tree |
-| **suite runtime top-10** | slowest tests trend | keeps the 251-test suite honest — one 60 s test taxes every diff forever |
+| **suite runtime top-10** | slowest tests trend | keeps the 345-test suite honest — one 60 s test taxes every diff forever |
 | **fuzz corpus coverage** | edges covered nightly (libFuzzer `-print_final_stats`) | whether the fourth arm (compile-of-SMF) is still finding new ground or needs structure-aware mutators |
 
 ## Reference points from this branch (not benchmarks — sanity anchors)
@@ -109,7 +109,12 @@ All three pieces of this program exist:
    and **fails on a >10% regression in any Tier A `rows_per_s`** via
    `tool/bench_compare.py` — which also seeds the baseline on first run
    and skips (never fails) fixtures that exist on only one side, so adding
-   a fixture can't fail the night it lands.
+   a fixture can't fail the night it lands. Two fail-closed rules keep the
+   gate honest: a comparison with **zero overlapping keys is an error**
+   (a renamed metric must re-seed deliberately, not pass silently), and a
+   **pinned epoch baseline** (`--epoch-baseline`, cache key `bench-epoch-v1`,
+   saved once and never rolled forward) is diffed at a 15% threshold so a
+   sub-10%/night drift cannot compound unnoticed.
 
 3. **The step-latency instrumentation** lives in the engine behind
    `-DSEEML_STEP_TIMING` (set by `-DSEEML_BENCH=ON` / `SEEML_BENCH=1`):

@@ -263,7 +263,11 @@ dispatch path: synchronous copy-in/copy-out GEMM via shared-mode
 compiler-emitted source string. Contracts: bitwise-reproducible on the same
 device, but *not* bitwise-equal to CPU kernels (different FMA contraction) —
 cross-backend comparison is tolerance-based. The training engine does not yet
-dispatch to it, and the file is excluded from vendored packages.
+dispatch to it, and the file is excluded from vendored packages. The path from
+harness to backend — engine backend switch, zero-copy residency, batched
+encoding, `simdgroup_matrix` kernels, package vendoring — is scoped as
+milestone v1.3.0 in `docs/roadmap.md` (Project 5; GitHub epic #59), with the
+CPU kept as the bitwise-deterministic reference backend.
 
 ---
 

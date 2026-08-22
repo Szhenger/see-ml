@@ -348,18 +348,30 @@ int main(int argc, char** argv) {
   }
 
   if (want_instrs) {
-    auto stream = [&](uint64_t off) {
-      return reinterpret_cast<const UpdateInstruction*>(plan.data() + off);
+    // Copy each stream out before decoding: a corrupt header may place an
+    // offset at any alignment, and a reinterpret_cast there is UB (and a
+    // real SIGBUS on strict-alignment targets). The dumper's job is to
+    // describe bad plans, not to crash on them.
+    std::vector<UpdateInstruction> copy;
+    auto stream = [&](uint64_t off, uint64_t count) {
+      copy.resize(static_cast<size_t>(count));
+      if (count)
+        std::memcpy(copy.data(), plan.data() + off,
+                    static_cast<size_t>(count) * sizeof(UpdateInstruction));
+      return copy.data();
     };
     if (SectionInBounds(h.train_instr_offset, h.train_instr_count,
                         sizeof(UpdateInstruction), plan.size()))
-      Disassemble("train", stream(h.train_instr_offset), h.train_instr_count);
+      Disassemble("train", stream(h.train_instr_offset, h.train_instr_count),
+                  h.train_instr_count);
     if (SectionInBounds(h.eval_instr_offset, h.eval_instr_count,
                         sizeof(UpdateInstruction), plan.size()))
-      Disassemble("eval", stream(h.eval_instr_offset), h.eval_instr_count);
+      Disassemble("eval", stream(h.eval_instr_offset, h.eval_instr_count),
+                  h.eval_instr_count);
     if (SectionInBounds(h.merge_instr_offset, h.merge_instr_count,
                         sizeof(UpdateInstruction), plan.size()))
-      Disassemble("merge", stream(h.merge_instr_offset), h.merge_instr_count);
+      Disassemble("merge", stream(h.merge_instr_offset, h.merge_instr_count),
+                  h.merge_instr_count);
   }
   // The dump above is still useful forensics for a corrupt plan, but a
   // script must not need to parse text to learn the seal failed.

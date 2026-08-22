@@ -51,7 +51,11 @@ double MsSince(Clock::time_point t0) {
 
 double Median(std::vector<double> v) {
   std::sort(v.begin(), v.end());
-  return v[v.size() / 2];
+  const size_t n = v.size();
+  // Even counts take the mean of the two middle samples — the textbook
+  // median, rather than a biased upper-middle. Odd counts (the default
+  // repeats=3) are unaffected, so stored baselines stay comparable.
+  return n % 2 == 1 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
 }
 
 // --- The standard fixture set -----------------------------------------------
@@ -145,7 +149,10 @@ std::expected<uint64_t, std::string> ParseU64(const std::string& flag,
   for (char c : v) {
     if (c < '0' || c > '9')
       return std::unexpected(flag + ": '" + v + "' is not a whole number");
-    out = out * 10 + static_cast<uint64_t>(c - '0');
+    const auto digit = static_cast<uint64_t>(c - '0');
+    if (out > (UINT64_MAX - digit) / 10)
+      return std::unexpected(flag + ": '" + v + "' does not fit 64 bits");
+    out = out * 10 + digit;
   }
   if (out == 0) return std::unexpected(flag + " must be >= 1");
   return out;
@@ -230,8 +237,25 @@ int main(int argc, char** argv) {
     }
   }
 
-  FILE* out = std::fopen(out_path->c_str(), "w");
-  if (!out) return Fail("cannot open '" + *out_path + "' for writing");
+  // Stage the report beside its destination and rename it into place only
+  // when every fixture completed: a failed run must not leave a truncated
+  // bench.json that a later gate could mistake for a report (nor a stray
+  // checkpoint temp), so both are cleaned up on any early return.
+  const std::string tmp_path = *out_path + ".tmp";
+  struct Staging {
+    std::string tmp, ckpt;
+    FILE* file = nullptr;
+    bool committed = false;
+    ~Staging() {
+      if (committed) return;
+      if (file) std::fclose(file);
+      std::remove(tmp.c_str());
+      if (!ckpt.empty()) std::remove(ckpt.c_str());
+    }
+  } staging{tmp_path, "", nullptr, false};
+  FILE* out = std::fopen(tmp_path.c_str(), "w");
+  if (!out) return Fail("cannot open '" + tmp_path + "' for writing");
+  staging.file = out;
   std::fprintf(out,
                "{\n  \"seeml_version\": \"%s\",\n  \"schema\": 1,\n"
                "  \"config\": {\"steps_lo\": %" PRIu64 ", \"steps_hi\": %"
@@ -338,11 +362,13 @@ int main(int argc, char** argv) {
       return Fail(f->name + (": " + ok.error()));
     const double merge_ms = MsSince(t_merge);
     const std::string ckpt = *out_path + "." + f->name + ".ckpt.tmp";
+    staging.ckpt = ckpt;
     const auto t_ckpt = Clock::now();
     if (auto ok = engine.SaveCheckpoint(ckpt); !ok)
       return Fail(f->name + (": " + ok.error()));
     const double ckpt_ms = MsSince(t_ckpt);
     std::remove(ckpt.c_str());
+    staging.ckpt.clear();
     std::fprintf(out,
                  "\n      },\n      \"merge_ms\": %.3f, "
                  "\"checkpoint_save_ms\": %.3f\n    }",
@@ -352,8 +378,14 @@ int main(int argc, char** argv) {
   std::fprintf(out, "\n  }\n}\n");
   // A truncated report must not exit 0 — same discipline as --report in
   // seeml-update-compile.
-  if (std::ferror(out) || std::fclose(out) != 0)
-    return Fail("failed writing '" + *out_path + "'");
+  const bool write_failed = std::ferror(out) != 0;
+  const bool close_failed = std::fclose(out) != 0;
+  staging.file = nullptr;
+  if (write_failed || close_failed)
+    return Fail("failed writing '" + tmp_path + "'");
+  if (std::rename(tmp_path.c_str(), out_path->c_str()) != 0)
+    return Fail("cannot move '" + tmp_path + "' to '" + *out_path + "'");
+  staging.committed = true;
   std::fprintf(stderr, "seeml-bench: wrote %s\n", out_path->c_str());
   return 0;
 }

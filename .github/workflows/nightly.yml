@@ -129,6 +129,15 @@ jobs:
           path: bench-baseline
           key: bench-baseline-${{ github.run_id }}
           restore-keys: bench-baseline-
+      # The pinned epoch: a fixed cache key is saved once and never
+      # overwritten, so the gate also diffs against a reference that does
+      # not roll forward (a <10%/night drift cannot compound past it).
+      # Bump the key suffix to start a new epoch deliberately.
+      - name: Restore epoch baseline
+        uses: actions/cache@v4
+        with:
+          path: bench-epoch
+          key: bench-epoch-v1
       - name: Configure
         run: >
           cmake -S . -B build-bench
@@ -139,9 +148,16 @@ jobs:
       - name: Bench
         run: ./build-bench/seeml-bench --out bench.json --threads 1,2,4
       - name: Gate against baseline
-        run: python3 tool/bench_compare.py bench-baseline/bench.json bench.json
+        run: >
+          python3 tool/bench_compare.py bench-baseline/bench.json bench.json
+          --epoch-baseline bench-epoch/bench.json
       - name: Store as next baseline
         run: mkdir -p bench-baseline && cp bench.json bench-baseline/bench.json
+      - name: Seed the epoch baseline (first night only)
+        run: |
+          if [ ! -f bench-epoch/bench.json ]; then
+            mkdir -p bench-epoch && cp bench.json bench-epoch/bench.json
+          fi
       - name: Upload run
         if: always()
         uses: actions/upload-artifact@v4
