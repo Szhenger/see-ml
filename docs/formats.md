@@ -38,7 +38,7 @@ The dependency-free model container consumed by `seeml-update-compile` (source a
 
 ```
 u32 magic  "SMF1" (0x31464D53)
-u32 version         1..4 accepted; writer emits 4
+u32 version         1..5 accepted; writer emits 5
 u32 num_tensors
 u32 num_ops
 str input_name      (str = u16 length + bytes, no terminator)
@@ -61,7 +61,8 @@ ops[num_ops] (topologically ordered):
   u8   num_inputs
   str  inputs[num_inputs]
   str  output
-  u32  attr0        (v3 only) num_heads for Rope/Attention, else 0
+  u32  attr0        (v3+) num_heads for Rope/Attention, else 0
+  u32  attr1        (v5+) Rope: rotary base θ as IEEE-754 f32 bits (0 = 10000); else 0
 ```
 
 Op signatures: `MatMul(x, W)`, `AddBias(x, b)`, unary activations `(x)`, `Mul(x, y)` / `Add(x, y)` (same shape), `LayerNorm(x, gamma, beta)` and `RmsNorm(x, gamma)` over the last dim, `Rope(x)` (rotary position embedding), and causal `Attention(q, k, v)` (v3, with model-level `seq_len`), plus `Embedding(tokens, table)` (v4). For a token-native model, the graph input is a rank-1 dynamic (`{-1}`) non-const tensor meaning i32 token ids, consumed *only* by embedding ops that gather rows of a constant `[vocab, dim]` table.

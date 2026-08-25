@@ -162,11 +162,16 @@ std::expected<sir::Value*, std::string> BuildForward(
           return parsing::OpError("Rope", op.name, "needs 1 input");
         auto x = resolver.Resolve(op.inputs[0]);
         if (!x) return std::unexpected(x.error());
-        if (auto ok = sema::CheckRope(op, **x, op.attr0, model.seq_len); !ok)
+        if (auto ok = sema::CheckRope(op, **x, op.attr0, model.seq_len,
+                                      op.attr1);
+            !ok)
           return std::unexpected(ok.error());
         sir::Operation* r = block.appendOp("sc_high.rope");
         r->setAttribute("heads", static_cast<int64_t>(op.attr0));
         r->setAttribute("seq", static_cast<int64_t>(model.seq_len));
+        // v5 attr1: the rotary base, lowered into kRopeFwd's out[2] and
+        // copied onto the backward by autodiff. Pre-v5 files mean 10000.
+        r->setAttribute("base", sema::RopeBaseOf(op.attr1));
         r->addOperand(*x);
         resolver.Bind(op.output,
                       r->addResult(prefix + op.output, sir::DataType::F32,
@@ -232,6 +237,14 @@ std::expected<sir::Value*, std::string> BuildForward(
                       sir::Shape{rows});
         break;
       }
+      default:
+        // The reader bounds kinds per file version, so this is unreachable
+        // from a loaded file; an in-memory model with a kind this parser
+        // does not know must still get a diagnostic naming the op, not a
+        // silently unbound output blamed on "never produced".
+        return parsing::OpError("Op", op.name,
+                                "unsupported op kind " +
+                                    std::to_string(static_cast<int>(op.kind)));
     }
   }
 

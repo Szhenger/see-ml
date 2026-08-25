@@ -33,6 +33,7 @@
 //   ops[num_ops] (topologically ordered):
 //     u8 kind; str name; u8 num_inputs; str inputs[num_inputs]; str output;
 //     u32 attr0                                  (v3+ only; per-kind meaning)
+//     u32 attr1                                  (v5+ only; per-kind meaning)
 //   data section: each constant tensor's f32 blob at its 64-aligned data_offset
 //
 // The absolute data_offset of every weight is preserved through compilation —
@@ -49,9 +50,13 @@ inline constexpr uint32_t kSmfMagic = 0x31464D53;  // "SMF1" little-endian
 // output name, and a per-op u32 attr0 word after the output (heads for
 // Rope/Attention, 0 elsewhere). v4 adds kEmbedding — with it, a model may
 // declare a rank-1 dynamic ({-1}) non-const input, meaning i32 token ids
-// consumed exclusively by embedding ops; the byte layout is v3's.
-// Readers accept v1..v4; the writer emits v4.
-inline constexpr uint32_t kSmfVersion = 4;
+// consumed exclusively by embedding ops; the byte layout is v3's. v5 adds
+// a second per-op u32 attr1 after attr0: for kRope it carries the IEEE-754
+// bits of the rotary base θ (0 = the classic 10000); 0 elsewhere. Without
+// it a Llama-3 (θ=500k) or Qwen (θ=1M) port compiled cleanly to the wrong
+// rotation — "unsupported" silently became "wrong".
+// Readers accept v1..v5; the writer emits v5.
+inline constexpr uint32_t kSmfVersion = 5;
 inline constexpr uint32_t kSmfMinVersion = 1;
 
 // SMF is read/written by memcpy of host integers; the documented on-disk
@@ -105,7 +110,14 @@ struct SmfOp {
   // v3: per-kind scalar attribute — num_heads for kRope/kAttention, 0
   // elsewhere (and for every op of a pre-v3 file).
   uint32_t attr0 = 0;
+  // v5: second per-kind scalar — for kRope the f32 bits of the rotary base
+  // θ (0 = kSmfDefaultRopeBase); 0 elsewhere (and for every pre-v5 file).
+  uint32_t attr1 = 0;
 };
+
+/// The rotary base a kRope op means when its attr1 is zero (pre-v5 files,
+/// and v5 writers that leave the default).
+inline constexpr float kSmfDefaultRopeBase = 10000.0f;
 
 /// Immutable once loaded: every consumer (parser, resource analyzer, rodata
 /// packing) takes it by const reference, so one loaded model may be shared

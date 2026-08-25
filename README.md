@@ -79,6 +79,7 @@ What SeeML can train today, stated up front:
   operator kinds: `MatMul`, `AddBias`, `Relu`, `Gelu`, `Silu`, `Mul`,
   `LayerNorm` (SMF v2), `Add`, `RmsNorm`, `Rope`, and causal `Attention`
   (SMF v3, with model-level sequence geometry), plus `Embedding` (SMF v4)
+  and a per-op RoPE base θ (SMF v5)
   — token-native decoders train end to end: the corpus carries i32 token
   ids (SDS v2), next-token labels are derived from the shifted view, and
   the frozen embedding gathers on-device. The PyTorch exporter accepts an

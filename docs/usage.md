@@ -26,7 +26,7 @@ python3 tool/export_model.py --demo out/
 
 This writes `model.smf` (a small `Linear(16,32) → ReLU → Linear(32,4)` classifier), `teacher.smf` (a wider sibling, for distillation experiments), and `corpus.sds` (2,048 labeled samples). Everything downstream can be tried against these three files.
 
-Every demo dimension is a flag, so randomized experiments need no bespoke script: `--width`, `--depth`, `--samples`, `--seed`, and `--corpus-kind class|dense|none` (`none` writes the unlabeled corpus that `--loss kl` distillation wants) for `--demo`; add `--vocab`, `--heads`, `--seq-len`, `--blocks`, and `--ffn` for `--demo-decoder`. Defaults reproduce the classic demos byte-for-byte, and — as with `seeml-update-compile` — a flag that cannot apply to the requested mode is a hard error (exit 2), never silently ignored. There is also `--corpus data.npz out.sds`, which converts saved NumPy arrays (`records` for token corpora; `inputs` + optional `labels` for feature corpora) into an SDS file without writing any Python.
+Every demo dimension is a flag, so randomized experiments need no bespoke script: `--width`, `--depth`, `--samples`, `--seed`, and `--corpus-kind class|dense|none` (`none` writes the unlabeled corpus that `--loss kl` distillation wants) for `--demo`; add `--vocab`, `--heads`, `--seq-len`, `--blocks`, `--ffn`, and `--rope-base` (the rotary θ — 10000 by default, 500000 for Llama 3, 1000000 for Qwen; written per Rope op as SMF v5 `attr1` and lowered into the plan verbatim) for `--demo-decoder`. Defaults reproduce the classic demos byte-for-byte, and — as with `seeml-update-compile` — a flag that cannot apply to the requested mode is a hard error (exit 2), never silently ignored. There is also `--corpus data.npz out.sds`, which converts saved NumPy arrays (`records` for token corpora; `inputs` + optional `labels` for feature corpora) into an SDS file without writing any Python.
 
 For your own model, use the two functions the script exports:
 
@@ -38,7 +38,7 @@ export_sds(inputs, labels, "corpus.sds")    # labels: int32 classes, dense f32, 
 
 The exporter accepts an `nn.Sequential` of `Linear`, `ReLU`, `GELU`, `SiLU`, and `LayerNorm` modules — anything else is a loud `ValueError`, not a silent skip. One detail worth knowing so the format makes sense later: PyTorch stores a `Linear`'s weight as `[out, in]`, but SMF's `MatMul(x, W)` wants `[in, out]`, so the exporter transposes on the way out. Labels: pass int32 class indices for cross-entropy, dense float vectors for MSE, or `None` for a distillation corpus (the teacher provides the targets).
 
-**Token-native decoders.** For a decoder transformer that consumes raw token ids (SMF v4), export the frozen embedding table alongside the blocks, and a corpus of plain ids — no labels, no embedded vectors:
+**Token-native decoders.** For a decoder transformer that consumes raw token ids (SMF v4+; the writer emits v5, which adds the per-op RoPE base), export the frozen embedding table alongside the blocks, and a corpus of plain ids — no labels, no embedded vectors:
 
 ```python
 from export_model import export_token_decoder_smf, export_token_sds
