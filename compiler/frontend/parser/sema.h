@@ -60,10 +60,14 @@ namespace seeml::update::sema {
     const seeml::sir::Value& gamma);
 
 /// RoPE: rank-2 input; heads (attr0) divides the width into an even head
-/// width; the model declares a seq_len that divides the row count.
+/// width; the model declares a seq_len that divides the row count; the
+/// rotary base (attr1 as f32 bits, 0 = default) is finite and > 1.
 [[nodiscard]] std::expected<void, std::string> CheckRope(
     const SmfOp& op, const seeml::sir::Value& x, uint32_t heads,
-    uint64_t seq_len);
+    uint64_t seq_len, uint32_t base_bits);
+
+/// The rotary base a kRope op's attr1 encodes (kSmfDefaultRopeBase for 0).
+float RopeBaseOf(uint32_t base_bits);
 
 /// Embedding: tokens are the rank-1 i32 graph input; table is rank-2.
 [[nodiscard]] std::expected<void, std::string> CheckEmbedding(
