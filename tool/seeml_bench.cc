@@ -302,8 +302,25 @@ int main(int argc, char** argv) {
     }
   }
 
-  FILE* out = std::fopen(out_path->c_str(), "w");
-  if (!out) return Fail("cannot open '" + *out_path + "' for writing");
+  // Stage the report beside its destination and rename it into place only
+  // when every fixture completed: a failed run must not leave a truncated
+  // bench.json that a later gate could mistake for a report (nor a stray
+  // checkpoint temp), so both are cleaned up on any early return.
+  const std::string tmp_path = *out_path + ".tmp";
+  struct Staging {
+    std::string tmp, ckpt;
+    FILE* file = nullptr;
+    bool committed = false;
+    ~Staging() {
+      if (committed) return;
+      if (file) std::fclose(file);
+      std::remove(tmp.c_str());
+      if (!ckpt.empty()) std::remove(ckpt.c_str());
+    }
+  } staging{tmp_path, "", nullptr, false};
+  FILE* out = std::fopen(tmp_path.c_str(), "w");
+  if (!out) return Fail("cannot open '" + tmp_path + "' for writing");
+  staging.file = out;
   // Schema 2 adds the external-standard fields (see the header comment);
   // every schema-1 key is unchanged, so stored baselines remain comparable.
   std::fprintf(out,
@@ -461,6 +478,7 @@ int main(int argc, char** argv) {
       return Fail(f->name + (": " + ok.error()));
     const double ckpt_ms = MsSince(t_ckpt);
     std::remove(ckpt.c_str());
+    staging.ckpt.clear();
     // Tier C's "peak RSS vs arena" and MLX-LM's "Peak mem", measured rather
     // than asserted: the OS-observed peak over (arena + plan).
     const uint64_t peak_rss = PeakRssBytes();
