@@ -112,7 +112,7 @@ ensure_field() {  # ensure_field <name> <comma-separated options>
   fi
 }
 ensure_field "Plane"    "Python plane,Core plane,GPU backend,Gates & docs"
-ensure_field "Origin"   "Performance audit,Frontier bridge,Both audits,Nightly eval,Roadmap"
+ensure_field "Origin"   "Performance audit,Frontier bridge,Both audits,Nightly eval,Roadmap,Seam review"
 ensure_field "Priority" "P0,P1,P2"
 
 fields_json=$(gh project field-list "$proj_num" --owner "$OWNER" --format json)

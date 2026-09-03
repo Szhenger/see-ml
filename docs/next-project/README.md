@@ -79,6 +79,7 @@ The partition rule for every audit finding:
 | P3 | Bitwise contract forbids reduction reassociation (≤2× on every reduction; attention QK^T is the largest) | `tool/certify_numerics.py` + opt-in relaxed-reduction opcode family |
 | P4 | Zero-dependency forbids Accelerate → AMX ceiling ≈1.8× is unpriced on our shapes | `tool/frontier_exec.py` — plan-level PyTorch/MLX reference executor + differential-test oracle |
 | P5 | Determinism-grade regression gate undone by runner variance (Nightly #20–#23) | calibration-ratio normalization in `tool/bench_compare.py` |
+| P6 | Every Python↔C++ contract (SMF, SDS, SEEU, `bench.json`, `--report`) is two hand-maintained copies checked only by one PyTorch demo; Python has no test gate while C++ has six (seam review, 2026-09-03) | ABI manifest + golden bytes, `tool/seeml/` package with dependency tiers, Python CI parity, `seeml-seeu-dump --json` as P4's only decoder |
 
 ### Algorithmic root causes → core-plane redesign
 
@@ -93,7 +94,11 @@ The partition rule for every audit finding:
 
 ## Sequencing
 
-P1 and E2 first (they interact at emission — coordinate, don't collide),
+P6 lands first or alongside P1 — its ABI manifest, golden fixtures, and
+Python CI job are what every later Python-plane subsystem is verified
+against (and it keeps P1's default compile path Python-free: `.incbin` is
+a C++ emitter change; the packer is for the G1c extras). Then
+P1 and E2 (they interact at emission — coordinate, don't collide),
 with E1 stage 1 (the free bitwise m-hoist) alongside; then P5/P2 so every
 later claim is measured trustworthily; E3/E5 as fill; P4 before P3 (the
 executor is the oracle certification needs); E4 last, per the roadmap's own
