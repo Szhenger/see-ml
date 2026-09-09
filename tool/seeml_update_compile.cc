@@ -22,8 +22,8 @@
 //       [--build]                      run build.sh after emission
 //       [--version]                    print the release version
 //
-// Every numeric flag is parsed strictly: trailing garbage, overflow, or an
-// unknown flag is a hard error, never a silent default.
+// Every numeric flag is parsed strictly: trailing garbage, overflow, NaN/Inf,
+// or an unknown flag is a hard error, never a silent default.
 //
 // Output: update_plan.seeu + generated TUs + vendored runtime sources +
 // build.sh; with --build, the linked self-contained `model_update` binary.
@@ -31,6 +31,7 @@
 
 #include <cerrno>
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -144,11 +145,15 @@ bool ParseU64(const std::string& s, uint64_t* out) {
   return true;
 }
 
+// Finite only: strtof accepts "nan", "inf" and "infinity", and every range
+// check below is a comparison a NaN silently passes, so a `--lr nan` would
+// otherwise bake NaN into the plan header and poison the first step.
 bool ParseF32(const std::string& s, float* out) {
   errno = 0;
   char* end = nullptr;
   const float v = std::strtof(s.c_str(), &end);
-  if (errno != 0 || end == s.c_str() || *end != '\0') return false;
+  if (errno != 0 || end == s.c_str() || *end != '\0' || !std::isfinite(v))
+    return false;
   *out = v;
   return true;
 }
