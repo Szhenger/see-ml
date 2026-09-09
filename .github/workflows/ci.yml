@@ -46,6 +46,10 @@ jobs:
   # times, and an unbounded fetch turns that stall into the whole job
   # budget (observed 2026-08-19: four jobs dead at their ceilings without
   # compiling a line). A stall now costs minutes and usually self-heals.
+  #
+  # Each install step first drops the runner image's third-party apt
+  # sources (Google Chrome, Microsoft): none are needed, and a stale index
+  # on one fails every apt-get update, including the one inside llvm.sh.
   build-and-test:
     name: test (${{ matrix.os }}, ${{ matrix.cxx }})
     strategy:
@@ -65,6 +69,13 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 8
         run: |
+          # The runner image ships third-party apt sources (Google Chrome,
+          # Microsoft) that nothing here needs, and a stale index on any of
+          # them fails every apt-get update -- including the one inside
+          # llvm.sh (observed 2026-09-09: a dl.google.com "Hash Sum
+          # mismatch" took down all seven Linux jobs). Keep Ubuntu's own
+          # archive only; llvm.sh adds its source afterwards.
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
           for i in 1 2 3; do
             if sudo apt-get update -q && sudo apt-get install -y -q g++-14 &&
                wget -T 30 -t 1 -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all; then
@@ -103,6 +114,13 @@ jobs:
       - name: Pin the Linux toolchain
         timeout-minutes: 6
         run: |
+          # The runner image ships third-party apt sources (Google Chrome,
+          # Microsoft) that nothing here needs, and a stale index on any of
+          # them fails every apt-get update -- including the one inside
+          # llvm.sh (observed 2026-09-09: a dl.google.com "Hash Sum
+          # mismatch" took down all seven Linux jobs). Keep Ubuntu's own
+          # archive only; llvm.sh adds its source afterwards.
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
           for i in 1 2 3; do
             if wget -T 30 -t 1 -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all; then
               exit 0
@@ -145,6 +163,13 @@ jobs:
       - name: Pin the Linux toolchain
         timeout-minutes: 6
         run: |
+          # The runner image ships third-party apt sources (Google Chrome,
+          # Microsoft) that nothing here needs, and a stale index on any of
+          # them fails every apt-get update -- including the one inside
+          # llvm.sh (observed 2026-09-09: a dl.google.com "Hash Sum
+          # mismatch" took down all seven Linux jobs). Keep Ubuntu's own
+          # archive only; llvm.sh adds its source afterwards.
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
           for i in 1 2 3; do
             if wget -T 30 -t 1 -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all; then
               exit 0
@@ -179,6 +204,13 @@ jobs:
       - name: Pin the Linux toolchain
         timeout-minutes: 6
         run: |
+          # The runner image ships third-party apt sources (Google Chrome,
+          # Microsoft) that nothing here needs, and a stale index on any of
+          # them fails every apt-get update -- including the one inside
+          # llvm.sh (observed 2026-09-09: a dl.google.com "Hash Sum
+          # mismatch" took down all seven Linux jobs). Keep Ubuntu's own
+          # archive only; llvm.sh adds its source afterwards.
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
           for i in 1 2 3; do
             if wget -T 30 -t 1 -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all; then
               exit 0
@@ -226,6 +258,13 @@ jobs:
       - name: Pin the Linux toolchain
         timeout-minutes: 6
         run: |
+          # The runner image ships third-party apt sources (Google Chrome,
+          # Microsoft) that nothing here needs, and a stale index on any of
+          # them fails every apt-get update -- including the one inside
+          # llvm.sh (observed 2026-09-09: a dl.google.com "Hash Sum
+          # mismatch" took down all seven Linux jobs). Keep Ubuntu's own
+          # archive only; llvm.sh adds its source afterwards.
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
           for i in 1 2 3; do
             if wget -T 30 -t 1 -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all; then
               exit 0
