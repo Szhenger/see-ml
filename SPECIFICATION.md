@@ -70,11 +70,15 @@ Build host only, in two dependency tiers. `tool/export_model.py` (model
 export) imports `torch`/`numpy` function-locally so it byte-compiles
 without them; `tool/pack_update.py` (the package assembler) and
 `tool/bench_compare.py` (the bench gate) are standard-library only and run
-under a bare interpreter. CI pins Python 3.12 for the e2e job and runs the
-torch-free `python-tools` job (byte-compile of every script plus the
-packer's unit suite) on every diff. Nothing on the device path touches
-Python: the packer's output is an assembly stub the package's own
-`build.sh` assembles.
+under a bare interpreter. The Python plane is developed and gated on the
+pinned stack in `tool/requirements-pinned.txt` — **CPython 3.14.7, torch
+2.14.0, NumPy 2.5.3** — and stays runnable down to the floors in
+`tool/requirements.txt` (Python 3.9, NumPy 1.17, torch 1.7): no 3.10+
+syntax in any tool, and CI runs the tools on both 3.9 and 3.14.7
+(`python-tools`), the exporter's byte-oracle suite on NumPy 1.x/3.9 and
+NumPy 2.5/3.14.7 (`exporter-compat`), and the e2e job on the pinned stack.
+Nothing on the device path touches Python: the packer's output is an
+assembly stub the package's own `build.sh` assembles.
 
 ---
 
@@ -92,8 +96,17 @@ surface is the C++23 standard library plus POSIX file I/O.
 
 ### Python: two packages, export-only
 
-`tool/requirements.txt`: `torch>=1.7` (bound set by `nn.SiLU`) and
-`numpy>=1.17` (bound set by `np.random.Generator`).
+`tool/requirements.txt` states the floors: `torch>=1.7` (bound set by
+`nn.SiLU`) and `numpy>=1.17` (bound set by `np.random.Generator`).
+`tool/requirements-pinned.txt` states the gated stack (`torch==2.14.0`,
+`numpy==2.5.3`, on CPython 3.14.7). The exporter writes every multi-byte
+field with an explicit little-endian dtype, streams the SMF container
+(header, then each tensor straight from the array that holds it, at its
+64-byte offset) and writes SDS corpora as chunked packed records, so a
+model exports at about its own size in memory and a corpus at constant
+memory; `test/tool/export_model_test.py` holds the original per-row and
+whole-blob algorithms as byte oracles, and pins the default demos'
+digests (`test/tool/demo_digests.json`).
 
 ### System interfaces (all direct, no wrapper libraries)
 
@@ -306,11 +319,14 @@ CPU kept as the bitwise-deterministic reference backend.
 `build-and-test` matrix {ubuntu/g++-14, ubuntu/clang++-19, macOS/clang++};
 `determinism` (full suites at `SEEML_THREADS` ∈ {1, 3, 8});
 `asan-ubsan`; `fuzz-smoke` (90 s, crash artifacts uploaded);
-`e2e-package` (Python 3.12 + CPU torch wheels: export → compile → package
+`e2e-package` (Python 3.14.7 + the pinned CPU torch 2.14 stack: exporter
+suite → export → compile → package
 build → plan-seal grep → device run → serial re-run → `cmp` bitwise, with an
 exit-3 gate-rejection retry path, then the `--no-embed` + `pack_update.py`
 route whose stub-built binary must commit the same bytes); `python-tools`
-(torch-free `py_compile` of every script + the packer's unit suite). Linux jobs install clang 19 from apt.llvm.org (see toolchain
+(torch-free `py_compile` of every script + the packer's unit suite, on
+3.9 and 3.14.7); `exporter-compat` (NumPy-only exporter suite on NumPy 1.x
+/ 3.9 and NumPy 2.5 / 3.14.7). Linux jobs install clang 19 from apt.llvm.org (see toolchain
 floor, §3). `nightly.yml`: TSan full suite; 900 s fuzz with an
 ever-accumulating corpus via `actions/cache` restore-key chaining. There is
 no release automation; versioning is a manual edit of

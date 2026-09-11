@@ -24,9 +24,14 @@ tool/
 (or a decoder stack — pre-embedded via `export_decoder_smf`, or token-native
 SMF v4 via `export_token_decoder_smf` + `export_token_sds`) into the SMF
 model container and turns arrays into an SDS corpus — the only place
-PyTorch and NumPy are needed
-(`pip install -r tool/requirements.txt`; the token-native path and
-`--demo-decoder` need NumPy only). Its demo generators are fully
+PyTorch and NumPy are needed (`pip install -r tool/requirements-pinned.txt`
+for the stack it is gated on, CPython 3.14.7 with torch 2.14 and NumPy 2.5;
+`tool/requirements.txt` states the floors it still runs on, down to Python
+3.9; the token-native path and `--demo-decoder` need NumPy only). It
+streams: the container is written header-first with each tensor produced
+straight from the framework's array as it goes out, and corpora go out as
+chunked packed records, so export memory is about the model's own size and
+corpus size does not matter. Its demo generators are fully
 parameterizable from the command line (`--width`, `--depth`, `--vocab`,
 `--seq-len`, `--blocks`, `--seed`, `--samples`, `--corpus-kind`), and
 `--corpus` converts saved NumPy arrays into an SDS corpus without writing

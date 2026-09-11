@@ -1,0 +1,16 @@
+{
+  "_comment": "SHA-256 of the default demos (test/tool/export_model_test.py). --demo-decoder is NumPy-only and pinned on every host; --demo's corpus.sds is NumPy-only too, while its model/teacher come from torch's CPU RNG and are pinned per torch release.",
+  "--demo-decoder": {
+    "decoder.smf": "983f178bd212295c48c084354ccc81caac868293fd0869a04cac1230d76cb0fb",
+    "decoder_corpus.sds": "44119ce4caf3e0e416bf43ebc938a75d44b247e18fc039d201cb6d92050a3945"
+  },
+  "--demo": {
+    "corpus.sds": "daeb76a4a1df3f0f3bafc65db063e97f301ad5eba1c0b1c9651ca07e29b8b196",
+    "models": {
+      "2.14.0": {
+        "model.smf": "cc86690d6516698f9ecade2cf0d7176ba8d570c2a156a4230c4914ef737b720f",
+        "teacher.smf": "7de6a578c46bc55deed9f63d07d4a8dd0ad662d4fa8d3d24f927aaa1a76d5277"
+      }
+    }
+  }
+}

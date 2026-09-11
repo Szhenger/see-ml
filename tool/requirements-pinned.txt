@@ -1,0 +1,7 @@
+# The build-host stack the Python plane is developed and gated on: CPython
+# 3.14.7 with these exact releases (CI installs this file; the CPU wheel
+# index is enough). tool/requirements.txt states the compatibility floors
+# instead — the tools run down to Python 3.9 / NumPy 1.17 / torch 1.7 and
+# the C++ compiler reads every SMF/SDS the exporter has ever written.
+torch==2.14.0
+numpy==2.5.3

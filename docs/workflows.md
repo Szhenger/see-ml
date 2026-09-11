@@ -138,7 +138,8 @@ named promise**:
 | ci.yml | `asan-ubsan` | correctness (memory / UB) |
 | ci.yml | `fuzz-smoke` | boundedness (hostile input) |
 | ci.yml | `e2e-package` | correctness + determinism of the *product* |
-| ci.yml | `python-tools` | correctness (the Python plane: syntax + the packer suite) |
+| ci.yml | `python-tools` (3.9 and 3.14.7) | correctness (the Python plane: syntax + the packer suite, on the floor and the pinned interpreter) |
+| ci.yml | `exporter-compat` (NumPy 1.x / 2.5) | correctness + compatibility (the exporter's bytes, against its own oracles, across the NumPy floor) |
 | nightly.yml | `tsan` | boundedness (races) |
 | nightly.yml | `fuzz-extended` | boundedness (hostile input, deeper) |
 | codeql.yml | `analyze` | correctness (paths the tests never run) |
@@ -274,9 +275,11 @@ operationally.
 
 This job performs the entire documented user journey, for real:
 
-1. `pip install torch` (CPU build) and export the demo model + corpus
-   with `tool/export_model.py --demo` — the Python/C++ format seam,
-   exercised end to end.
+1. Install the pinned build-host stack (`tool/requirements-pinned.txt`:
+   CPython 3.14.7, torch 2.14, NumPy 2.5, CPU wheels), run the exporter's
+   byte-oracle suite, and export the demo model + corpus with
+   `tool/export_model.py --demo` — the Python/C++ format seam, exercised
+   end to end.
 2. Compile the plan and emit the package; `--build` then compiles the
    package *using its own generated `build.sh`*, exactly as a user
    would on a device.
@@ -306,7 +309,7 @@ checks, decide up front which outcomes are failures and which are
 merely *answers* — conflating them produces flaky CI, and flaky CI
 trains humans to ignore red, which destroys the entire enterprise.
 
-### 3.6 `python-tools` — the cheapest possible tripwire, plus one suite
+### 3.6 `python-tools` and `exporter-compat` — the cheapest possible tripwire, plus two suites
 
 `python3 -m py_compile` over every script in `tool/`. Five seconds. It
 catches exactly one class of regression — a tool no longer parses — and
@@ -314,14 +317,25 @@ costs nearly nothing. Not every check needs to be deep; it needs to be
 *proportionate*. (Deliberately absent: installing PyTorch here — the
 e2e job already exercises the exporter for real.)
 
-The same job runs `test/tool/pack_update_test.py` under the runner's bare
-interpreter. That placement is the point: the package assembler is on
+The job is a two-interpreter matrix — the pinned 3.14.7 and the 3.9
+floor — so a tool cannot quietly grow a `match` statement or a stdlib API
+the oldest supported build host lacks. It runs `test/tool/pack_update_test.py`
+under the bare interpreter. That placement is the point: the package assembler is on
 the compile path and declared *tier 0* — standard library only — so a
 stray NumPy or torch import fails here, where nothing is installed. The
 suite also assembles and links the `.incbin` stub for real with the
 runner's `g++`, so the ELF spelling of the stub (`%object`,
 `.note.GNU-stack`) is checked on every diff, not only the Mach-O one a
 developer's Mac exercises.
+
+`exporter-compat` is the backward-compatibility gate for the on-ramp. The
+exporter streams its container and vectorizes its corpus writer for
+speed, but the bytes are a contract the compiler reads; so the suite
+keeps the *original* per-row and whole-blob algorithms as oracles and
+asserts equality, once on NumPy 1.x under the Python 3.9 floor and once
+on NumPy 2.5 under 3.14.7 — with the default demos' digests pinned in
+`test/tool/demo_digests.json`, which is what "byte-for-byte" means as a
+test rather than a sentence.
 
 ---
 
