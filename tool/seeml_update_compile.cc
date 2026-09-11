@@ -19,6 +19,8 @@
 //       [--quantize-base]              int8-quantize frozen weights in rodata
 //       [--steps 1000]                 default step count baked into the plan
 //       [--report report.json]         machine-readable compile report
+//       [--no-embed]                   skip the decimal byte-array TU; embed
+//                                      the plan with tool/pack_update.py
 //       [--build]                      run build.sh after emission
 //       [--version]                    print the release version
 //
@@ -27,6 +29,9 @@
 //
 // Output: update_plan.seeu + generated TUs + vendored runtime sources +
 // build.sh; with --build, the linked self-contained `model_update` binary.
+// --no-embed leaves the plan on disk once (the .seeu) and no embedded TU:
+// `python3 tool/pack_update.py <out> --build` then embeds it as an .incbin
+// assembly stub, which is the route that scales past 100M parameters.
 // =============================================================================
 
 #include <cerrno>
@@ -65,8 +70,8 @@ void PrintUsage() {
                "  [--weight-decay WD] [--clip-norm C]\n"
                "  [--lr-schedule const|cosine] [--warmup N]\n"
                "  [--min-lr-factor F] [--quantize-base] [--steps N]\n"
-               "  [--no-fuse-epilogue] [--report out.json] [--build]\n"
-               "  [--version]\n");
+               "  [--no-fuse-epilogue] [--report out.json]\n"
+               "  [--no-embed] [--build] [--version]\n");
 }
 
 /// Strict argument cursor: every flag must be known, every value must parse
@@ -304,12 +309,19 @@ int main(int argc, char** argv) {
 
   const auto teacher_path = args.TakeValue("--teacher");
   const auto report_path = args.TakeValue("--report");
+  const bool no_embed = args.Take("--no-embed");
   const bool want_build = args.Take("--build");
 
   if (const auto& m = args.MissingValue())
     return Fail(*m + " requires a value");
   if (auto unknown = args.FirstUnknown())
     return Fail("unknown argument '" + *unknown + "' (see --help)");
+  // Without an embedded TU the generated build.sh has nothing to link the
+  // plan from; the packer is the step that supplies it, and it drives the
+  // build itself. Refuse here rather than let build.sh fail after emission.
+  if (no_embed && want_build)
+    return Fail("--build needs the embedded plan TU that --no-embed skips; "
+                "run `python3 tool/pack_update.py <out> --build` instead");
 
   // --- Ingest ---------------------------------------------------------------
   // Student and teacher load concurrently: one file's read overlaps the
@@ -344,20 +356,34 @@ int main(int argc, char** argv) {
   // --- Emit ------------------------------------------------------------------
   const std::string repo_root =
       std::filesystem::path(argv[0]).parent_path().parent_path().string();
+  EmitOptions emit_options;
+  emit_options.embed_plan_tu = !no_embed;
   auto paths = EmitNativePackage(
       compiled->plan, *out_dir,
       repo_root.empty() || !std::filesystem::exists(repo_root + "/source")
           ? "."
-          : repo_root);
+          : repo_root,
+      emit_options);
   if (!paths) return Fail(paths.error());
 
   std::fprintf(stderr, "seeml-update-compile: emitted %s\n",
                paths->plan_file.c_str());
+  if (no_embed)
+    std::fprintf(stderr,
+                 "seeml-update-compile: no embedded TU (--no-embed); next:"
+                 " python3 tool/pack_update.py %s --build\n",
+                 out_dir->c_str());
 
   // --- Machine-readable report -------------------------------------------------
   if (report_path) {
     std::FILE* f = std::fopen(report_path->c_str(), "w");
     if (!f) return Fail("cannot write report '" + *report_path + "'");
+    // null when no embedded TU was written (--no-embed): the packer's stub
+    // is the package's TU then, and the emitter has no path to report.
+    const std::string embedded_tu_json =
+        paths->embedded_tu.empty()
+            ? "null"
+            : "\"" + JsonEscape(paths->embedded_tu) + "\"";
     std::fprintf(f,
                  "{\n"
                  "  \"plan_file\": \"%s\",\n"
@@ -368,13 +394,15 @@ int main(int argc, char** argv) {
                  "  \"eval_instructions\": %" PRIu64 ",\n"
                  "  \"merge_instructions\": %" PRIu64 ",\n"
                  "  \"quantized_base\": %s,\n"
+                 "  \"embedded_tu\": %s,\n"
                  "  \"adapters\": [",
                  JsonEscape(paths->plan_file).c_str(), compiled->arena_size,
                  compiled->persistent_size, compiled->rodata_size,
                  compiled->train_instruction_count,
                  compiled->eval_instruction_count,
                  compiled->merge_instruction_count,
-                 config.quantize_base ? "true" : "false");
+                 config.quantize_base ? "true" : "false",
+                 embedded_tu_json.c_str());
     for (size_t i = 0; i < compiled->adapters.size(); ++i) {
       const auto& a = compiled->adapters[i];
       std::fprintf(f,

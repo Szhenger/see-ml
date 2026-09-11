@@ -289,12 +289,15 @@ The autotuner learns GPU tile arms.
 `.metal` source, the runner TU and the backend TU, an Apple-only branch in
 the generated `build.sh` (MSL is JIT-compiled at run time, so no Metal
 toolchain is required), and the `--backend` flag in `update_main.cc`.
-Bundled with it, the field-report P2 fix: **`.incbin` plan embedding**
-(an assembly TU with `.balign 16384` + `.incbin`, decimal `.cc` fallback)
-— the 948 MB decimal TU at 135M parameters took clang 16.5 min; at 1B it
-would not build on a 16 GB host. Page alignment doubles as G1b-2's
-no-copy prerequisite. Linux packages compile exactly the sources they do
-today.
+The field-report P2 fix that used to be bundled here — **`.incbin` plan
+embedding** (an assembly TU with `.balign 16384` + `.incbin`, decimal
+`.cc` fallback) — is owned by the Two-Plane Overhaul's P1 (#75) and has
+landed as `tool/pack_update.py` + `seeml-update-compile --no-embed`: the
+948 MB decimal TU at 135M parameters took clang 16.5 min; the stub
+assembles in under a second at any size. Its page alignment doubles as
+G1b-2's no-copy prerequisite, and the Apple branch of `build.sh` this
+phase adds assembles the same stub. Linux packages compile exactly the
+sources they do today.
 
 **Release gate (#65).** SmolLM-135M q8 fine-tune: `--backend cpu`
 byte-identical to v1.2.4; `--backend metal` val loss within tolerance and

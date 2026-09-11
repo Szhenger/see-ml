@@ -35,6 +35,8 @@ test/
     update_system_test
   fuzz/                 libFuzzer harnesses (built with -DSEEML_FUZZ=ON)
     binary_formats.cc
+  tool/                 the Python plane (unittest, standard library only)
+    pack_update_test.py
 ```
 
 ## Why an in-tree harness?
@@ -62,3 +64,5 @@ Every suite is one executable (`seeml_<basename>`), built by both `build/build.s
 ```
 
 Suites include only the façades (`test/framework/seetest.h`, `test/support/builders.h`); the split units behind them can be reorganized without touching any suite — the same façade discipline as the code under test.
+
+The Python-plane tools have their own suite under `test/tool/`, run with `python3 -m unittest discover -s test/tool -p '*_test.py'` and needing nothing beyond the standard library (plus a C++ driver on `PATH` for the one test that assembles the packer's `.incbin` stub for real).

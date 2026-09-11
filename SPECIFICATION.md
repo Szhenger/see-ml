@@ -66,10 +66,15 @@ which uses POSIX `${VAR-default}` expansion for the tile-flag override).
 
 ### Python 3
 
-One file: `tool/export_model.py` (model export, build host only). CI pins
-Python 3.12; the module imports `torch`/`numpy` function-locally so it
-byte-compiles without them (CI exploits this with a torch-free
-`py_compile` job). Nothing on the device path touches Python.
+Build host only, in two dependency tiers. `tool/export_model.py` (model
+export) imports `torch`/`numpy` function-locally so it byte-compiles
+without them; `tool/pack_update.py` (the package assembler) and
+`tool/bench_compare.py` (the bench gate) are standard-library only and run
+under a bare interpreter. CI pins Python 3.12 for the e2e job and runs the
+torch-free `python-tools` job (byte-compile of every script plus the
+packer's unit suite) on every diff. Nothing on the device path touches
+Python: the packer's output is an assembly stub the package's own
+`build.sh` assembles.
 
 ---
 
@@ -303,8 +308,9 @@ CPU kept as the bitwise-deterministic reference backend.
 `asan-ubsan`; `fuzz-smoke` (90 s, crash artifacts uploaded);
 `e2e-package` (Python 3.12 + CPU torch wheels: export → compile → package
 build → plan-seal grep → device run → serial re-run → `cmp` bitwise, with an
-exit-3 gate-rejection retry path); `exporter-syntax` (torch-free
-`py_compile`). Linux jobs install clang 19 from apt.llvm.org (see toolchain
+exit-3 gate-rejection retry path, then the `--no-embed` + `pack_update.py`
+route whose stub-built binary must commit the same bytes); `python-tools`
+(torch-free `py_compile` of every script + the packer's unit suite). Linux jobs install clang 19 from apt.llvm.org (see toolchain
 floor, §3). `nightly.yml`: TSan full suite; 900 s fuzz with an
 ever-accumulating corpus via `actions/cache` restore-key chaining. There is
 no release automation; versioning is a manual edit of
@@ -323,6 +329,13 @@ no release automation; versioning is a manual edit of
   instruction streams with symbolic opcode names. Depends only on
   `source/plan` + `source/identity` (and the parallel lib for the hash) so it
   builds anywhere.
+- **`tool/pack_update.py`** — the package assembler (Two-Plane Overhaul
+  P1): embeds `update_plan.seeu` as a page-aligned `.incbin` assembly stub
+  (`update_plan_embedded.S`) in place of the decimal C-array TU the compiler
+  emits by default (`seeml-update-compile --no-embed` skips that TU), and
+  with `--build` drives the package's `build.sh`, which assembles the stub
+  when present. Stdlib only; strict CLI (exit 2); atomic temp-and-rename
+  writes; exit 1 on any packaging or build failure.
 - **`tool/export_model.py`** — PyTorch/NumPy → SMF/SDS exporters
   (`export_smf`, `export_decoder_smf`, `export_token_decoder_smf`,
   `export_sds`, `export_token_sds`) plus `--demo` / `--demo-decoder`

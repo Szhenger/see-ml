@@ -74,7 +74,16 @@ seeml-update-compile \
 
 **How it's optimized.** By default the compiler fuses each frozen `X@W → +bias → activation` chain into a single matmul instruction with a fused write-back epilogue, so an MLP layer's three arena round-trips become one. Fusion is bitwise-neutral by construction: it only matches chains no backward instruction reads (the frozen teacher subgraph, the bias step of unadapted layers), and the runtime applies the epilogue with the same per-element expressions as the standalone kernels. `--no-fuse-epilogue` disables the pass — the plan gets more instructions and more transient arena, never different bits; useful when diffing `seeml-seeu-dump` output across compiler versions or isolating a kernel while debugging.
 
-**What comes out.** The emitted `pkg/` is **self-contained**: the plan (`update_plan.seeu`), the same plan embedded as a C array, a generated driver `main`, the vendored runtime sources, and a `build.sh`. `--build` runs that script immediately; on any machine, `sh pkg/build.sh` builds the `model_update` binary with nothing but a C++23 compiler — set `CXX` to cross-compile for the device. `--report pkg/report.json` writes a machine-readable summary (arena bytes, instruction counts, per-adapter shapes and scales) worth archiving with each release.
+**What comes out.** The emitted `pkg/` is **self-contained**: the plan (`update_plan.seeu`), the same plan embedded as a C array, a generated driver `main`, the vendored runtime sources, and a `build.sh`. `--build` runs that script immediately; on any machine, `sh pkg/build.sh` builds the `model_update` binary with nothing but a C++23 compiler — set `CXX` to cross-compile for the device. `--report pkg/report.json` writes a machine-readable summary (arena bytes, instruction counts, per-adapter shapes and scales, and which embedded TU the package carries) worth archiving with each release.
+
+**Big plans: embed with `.incbin` instead.** The C-array embedding renders every plan byte as ~4 characters of C++ that the host compiler must parse at `-O2` — fine at kilobytes, but a 135M-parameter plan becomes a ~950 MB translation unit and a 16-minute `--build`. For anything past a few tens of megabytes, pass `--no-embed` (no C array is written; `--build` is refused, since there is nothing yet to link) and let the build-host packer embed the plan as an assembly stub that splices the `.seeu` in verbatim:
+
+```bash
+seeml-update-compile --source model.smf --out pkg/ ... --no-embed
+python3 tool/pack_update.py pkg/ --build          # writes update_plan_embedded.S, runs build.sh
+```
+
+The packer is standard-library Python on the build host only; the package it leaves behind is the same dependency-free C++ (the stub needs only the preprocessor and assembler every C++ toolchain carries), the `.seeu` is untouched, and the binary trains the very same bits as the C-array build — CI asserts all three on every change. The embedded plan is page-aligned (`--page-align`, default 16 KiB), which is also what zero-copy GPU residency will want. `build.sh` prefers the stub whenever one is present, so `pack_update.py` also upgrades an unmodified package emitted before `--no-embed` existed (it rewrites the one compile line and drops the old C array); a hand-edited `build.sh` is refused rather than guessed at.
 
 Compilation is also your first line of defense: infeasible memory footprints, shape mismatches, a loss that can't see any trainable parameter — all fail *here*, on the build host, with a one-line `"<unit>: <message>"` diagnostic.
 

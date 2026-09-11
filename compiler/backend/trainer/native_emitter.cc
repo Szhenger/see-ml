@@ -380,7 +380,21 @@ std::string BuildScript(const GemmTiling* tiling) {
   s += "# batch feeder; SEEML_THREADS=1 at run time restores fully serial\n";
   s += "# execution (with bit-identical results — chunking is fixed).\n";
   s += "FLAGS=\"-std=c++23 -O2 -Wall -Wextra -pthread -I. $TILE_FLAGS\"\n";
-  s += "$CXX $FLAGS -c update_plan_embedded.cc -o update_plan_embedded.o\n";
+  s += "# The plan reaches the binary through one of two translation units:\n";
+  s += "# update_plan_embedded.S, the .incbin stub tool/pack_update.py writes\n";
+  s += "# (page-aligned, assembles in seconds at any plan size; it needs only\n";
+  s += "# the preprocessor and assembler, so it takes no C++ flags), or the\n";
+  s += "# compiler's default decimal byte-array update_plan_embedded.cc.\n";
+  s += "if [ -f update_plan_embedded.S ]; then\n";
+  s += "  $CXX -c update_plan_embedded.S -o update_plan_embedded.o\n";
+  s += "elif [ -f update_plan_embedded.cc ]; then\n";
+  s += "  $CXX $FLAGS -c update_plan_embedded.cc -o update_plan_embedded.o\n";
+  s += "else\n";
+  s += "  echo \"build.sh: no embedded-plan TU here (update_plan_embedded.S"
+       " or .cc);\" \\\n";
+  s += "       \"run tool/pack_update.py on this directory first\" >&2\n";
+  s += "  exit 1\n";
+  s += "fi\n";
   s += "$CXX $FLAGS -c update_main.cc -o update_main.o\n";
   s += "$CXX $FLAGS -c source/parallel/parallel_for.cc -o parallel_for.o\n";
   s += "for unit in executor/gemm executor/elementwise executor/activation "
@@ -406,7 +420,7 @@ std::string BuildScript(const GemmTiling* tiling) {
 
 std::expected<EmitPaths, std::string> EmitNativePackage(
     const std::vector<uint8_t>& plan, const std::string& out_dir,
-    const std::string& repo_root) {
+    const std::string& repo_root, const EmitOptions& options) {
   std::error_code ec;
   std::filesystem::create_directories(out_dir, ec);
   if (ec)
@@ -415,7 +429,8 @@ std::expected<EmitPaths, std::string> EmitNativePackage(
 
   EmitPaths paths{
       .plan_file = out_dir + "/update_plan.seeu",
-      .embedded_tu = out_dir + "/update_plan_embedded.cc",
+      .embedded_tu =
+          options.embed_plan_tu ? out_dir + "/update_plan_embedded.cc" : "",
       .main_tu = out_dir + "/update_main.cc",
       .build_script = out_dir + "/build.sh",
   };
@@ -432,8 +447,19 @@ std::expected<EmitPaths, std::string> EmitNativePackage(
       return generating::FileError(generating::kNativeEmitter,
                                    "short write to", paths.plan_file);
   }
-  if (auto r = WriteFile(paths.embedded_tu, EmbedPlanAsTU(plan)); !r)
-    return std::unexpected(r.error());
+  // A package carries exactly one embedded-plan TU, so build.sh's choice is
+  // never ambiguous: whichever of the pair this emission does not write is
+  // removed, in case an earlier emission into the same directory (or the
+  // packer) left it behind. Otherwise a stale .incbin stub from a previous
+  // pack would silently win over the fresh decimal TU, or a stale decimal
+  // TU would ship beside the stub the packer is about to add.
+  if (options.embed_plan_tu) {
+    if (auto r = WriteFile(paths.embedded_tu, EmbedPlanAsTU(plan)); !r)
+      return std::unexpected(r.error());
+    std::filesystem::remove(out_dir + "/update_plan_embedded.S", ec);
+  } else {
+    std::filesystem::remove(out_dir + "/update_plan_embedded.cc", ec);
+  }
   if (auto r = WriteFile(paths.main_tu, kMainTU); !r)
     return std::unexpected(r.error());
 
