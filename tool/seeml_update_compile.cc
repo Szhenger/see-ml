@@ -378,6 +378,12 @@ int main(int argc, char** argv) {
   if (report_path) {
     std::FILE* f = std::fopen(report_path->c_str(), "w");
     if (!f) return Fail("cannot write report '" + *report_path + "'");
+    // null when no embedded TU was written (--no-embed): the packer's stub
+    // is the package's TU then, and the emitter has no path to report.
+    const std::string embedded_tu_json =
+        paths->embedded_tu.empty()
+            ? "null"
+            : "\"" + JsonEscape(paths->embedded_tu) + "\"";
     std::fprintf(f,
                  "{\n"
                  "  \"plan_file\": \"%s\",\n"
@@ -388,7 +394,7 @@ int main(int argc, char** argv) {
                  "  \"eval_instructions\": %" PRIu64 ",\n"
                  "  \"merge_instructions\": %" PRIu64 ",\n"
                  "  \"quantized_base\": %s,\n"
-                 "  \"embedded_tu\": %s%s%s,\n"
+                 "  \"embedded_tu\": %s,\n"
                  "  \"adapters\": [",
                  JsonEscape(paths->plan_file).c_str(), compiled->arena_size,
                  compiled->persistent_size, compiled->rodata_size,
@@ -396,9 +402,7 @@ int main(int argc, char** argv) {
                  compiled->eval_instruction_count,
                  compiled->merge_instruction_count,
                  config.quantize_base ? "true" : "false",
-                 no_embed ? "" : "\"",
-                 no_embed ? "null" : JsonEscape(paths->embedded_tu).c_str(),
-                 no_embed ? "" : "\"");
+                 embedded_tu_json.c_str());
     for (size_t i = 0; i < compiled->adapters.size(); ++i) {
       const auto& a = compiled->adapters[i];
       std::fprintf(f,

@@ -40,8 +40,12 @@ TEST(NativeEmitter, EmitsCompletePackage) {
 
   const std::string out_dir = (dir.path() / "pkg").string();
   std::filesystem::create_directories(out_dir);
+  // A stub the packer left from an earlier pack of this directory must not
+  // outlive a fresh decimal emission: build.sh would prefer it.
+  std::ofstream(out_dir + "/update_plan_embedded.S") << "stale";
   ASSERT_OK_AND_ASSIGN(EmitPaths paths,
                        EmitNativePackage(compiled.plan, out_dir, RepoRoot()));
+  EXPECT_FALSE(std::filesystem::exists(out_dir + "/update_plan_embedded.S"));
 
   for (const std::string& p :
        {paths.plan_file, paths.embedded_tu, paths.main_tu,

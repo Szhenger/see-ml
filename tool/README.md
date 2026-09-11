@@ -51,7 +51,7 @@ of the decimal C-array TU, and with `--build` runs the package's own
 package builds in seconds instead of minutes and the plan lands on disk
 once. Standard library only (it sits on the compile path), strict CLI
 (exit 2 on any unknown flag), atomic writes. `build.sh` prefers the stub
-when present, so it also upgrades packages from older compilers.
+when present, so it also upgrades unmodified packages from older compilers.
 
 **`seeml_seeu_dump.cc`** is the disassembler: point it at any plan and it
 verifies the integrity seal and prints the header and instruction streams in

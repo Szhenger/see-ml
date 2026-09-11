@@ -9,7 +9,9 @@ assembles the stub for real is skipped when no C++ driver is on PATH.
 """
 
 import io
+import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -18,7 +20,8 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "tool"))
+REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+sys.path.insert(0, os.path.join(REPO, "tool"))
 
 import pack_update as pu  # noqa: E402
 
@@ -40,16 +43,19 @@ MODERN_BUILD_SH = (
     "else\n  exit 1\nfi\n")
 
 
-def which_cxx():
-    return os.environ.get("CXX") or shutil.which("c++") or shutil.which("clang++") \
-        or shutil.which("g++")
+CXX = (os.environ.get("CXX") or shutil.which("c++") or shutil.which("clang++")
+       or shutil.which("g++"))
+
+
+def repo_file(rel):
+    with open(os.path.join(REPO, rel), encoding="utf-8") as f:
+        return f.read()
 
 
 class PackageDir:
     """A fabricated package directory."""
 
-    def __init__(self, build_sh=MODERN_BUILD_SH, plan=b"SEEU" + bytes(range(256)) * 3,
-                 decimal_tu=True):
+    def __init__(self, build_sh=MODERN_BUILD_SH, plan=b"SEEU" + bytes(range(256)) * 3):
         self.dir = tempfile.mkdtemp(prefix="pack_update_test-")
         self.plan = plan
         with open(os.path.join(self.dir, pu.PLAN_FILE), "wb") as f:
@@ -57,9 +63,8 @@ class PackageDir:
         with open(os.path.join(self.dir, pu.BUILD_SCRIPT), "w") as f:
             f.write(build_sh)
         os.chmod(os.path.join(self.dir, pu.BUILD_SCRIPT), 0o755)
-        if decimal_tu:
-            with open(os.path.join(self.dir, pu.DECIMAL_TU), "w") as f:
-                f.write("const unsigned char kSeemlUpdatePlan[] = {0};\n")
+        with open(os.path.join(self.dir, pu.DECIMAL_TU), "w") as f:
+            f.write("const unsigned char kSeemlUpdatePlan[] = {0};\n")
 
     def path(self, name):
         return os.path.join(self.dir, name)
@@ -79,9 +84,38 @@ def run_main(argv):
     return rc, err.getvalue()
 
 
+class SeamTest(unittest.TestCase):
+    """The packer restates three facts the C++ side owns. Until P6's ABI
+    manifest carries them, these tests are the machine check that the
+    copies agree (they read the repository sources, so they run only from
+    a checkout)."""
+
+    def test_build_script_lines_match_the_emitters_template(self):
+        emitter = repo_file("compiler/backend/trainer/native_emitter.cc")
+        # C++ string literals: the trailing newline is spelled \n.
+        for line in (pu.STUB_COMPILE_LINE, pu.DECIMAL_COMPILE_LINE):
+            self.assertIn(line[:-1] + "\\n", emitter, line)
+        self.assertIn("if [ -f update_plan_embedded.S ]; then", emitter)
+
+    def test_stub_symbols_match_the_generated_drivers_externs(self):
+        emitter = repo_file("compiler/backend/trainer/native_emitter.cc")
+        self.assertIn("extern const unsigned char kSeemlUpdatePlan[];", emitter)
+        self.assertIn("extern const size_t kSeemlUpdatePlanSize;", emitter)
+        stub = pu.render_stub(16384)
+        self.assertIn(".globl SEEML_SYM(kSeemlUpdatePlan)\n", stub)
+        self.assertIn(".globl SEEML_SYM(kSeemlUpdatePlanSize)\n", stub)
+
+    def test_plan_magic_matches_the_plan_schema(self):
+        schema = repo_file("source/plan/schema.h")
+        m = re.search(r"kSeeuMagic\s*=\s*0x([0-9A-Fa-f]+)", schema)
+        self.assertIsNotNone(m)
+        self.assertEqual(int(m.group(1), 16),
+                         int.from_bytes(pu.PLAN_MAGIC, "little"))
+
+
 class StubTest(unittest.TestCase):
     def test_declares_the_drivers_symbols_page_aligned(self):
-        stub = pu.render_stub("update_plan.seeu", 16384)
+        stub = pu.render_stub(16384)
         self.assertIn('.incbin "update_plan.seeu"', stub)
         self.assertIn(".balign 16384", stub)
         self.assertIn("SEEML_SYM(kSeemlUpdatePlan):", stub)
@@ -97,15 +131,10 @@ class StubTest(unittest.TestCase):
         self.assertNotIn(".globl SEEML_SYM(kSeemlUpdatePlan_end)", stub)
         # Only C comments: the preprocessor strips them on every target,
         # while the assembler's own comment character differs per ISA.
-        self.assertNotIn("//", stub.replace("__TEXT,__const", ""))
+        self.assertNotIn("//", stub)
+        self.assertNotIn("#!", stub)
 
-    def test_refuses_a_plan_path_with_directories_or_quotes(self):
-        with self.assertRaises(ValueError):
-            pu.render_stub("sub/update_plan.seeu", 4096)
-        with self.assertRaises(ValueError):
-            pu.render_stub('bad".seeu', 4096)
-
-    @unittest.skipIf(which_cxx() is None, "no C++ driver on PATH")
+    @unittest.skipIf(CXX is None, "no C++ driver on PATH")
     def test_assembles_links_and_matches_the_plan_bytes(self):
         """The contract, end to end on this host's toolchain: the stub
         assembles under the C++ driver, links against the exact extern
@@ -115,23 +144,23 @@ class StubTest(unittest.TestCase):
         pkg = PackageDir(plan=b"SEEU" + os.urandom(100003 - 4))
         self.addCleanup(pkg.cleanup)
         with open(pkg.path(pu.STUB_FILE), "w") as f:
-            f.write(pu.render_stub(pu.PLAN_FILE, 16384))
+            f.write(pu.render_stub(16384))
         probe = r"""
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <fstream>
-#include <iterator>
-#include <string>
+#include <vector>
 extern const unsigned char kSeemlUpdatePlan[];
 extern const size_t kSeemlUpdatePlanSize;
 int main() {
-  std::ifstream f("update_plan.seeu", std::ios::binary);
-  std::string want((std::istreambuf_iterator<char>(f)),
-                   std::istreambuf_iterator<char>());
-  const bool same = want.size() == kSeemlUpdatePlanSize &&
-      std::memcmp(want.data(), kSeemlUpdatePlan, want.size()) == 0;
+  std::FILE* f = std::fopen("update_plan.seeu", "rb");
+  if (!f) return 2;
+  std::vector<unsigned char> want(kSeemlUpdatePlanSize + 1);
+  const size_t got = std::fread(want.data(), 1, want.size(), f);
+  std::fclose(f);
+  const bool same = got == kSeemlUpdatePlanSize &&
+      std::memcmp(want.data(), kSeemlUpdatePlan, got) == 0;
   std::printf("%zu %zu %d\n", kSeemlUpdatePlanSize,
               (size_t)(reinterpret_cast<uintptr_t>(kSeemlUpdatePlan) % 16384),
               same ? 1 : 0);
@@ -140,11 +169,10 @@ int main() {
 """
         with open(pkg.path("probe.cc"), "w") as f:
             f.write(probe)
-        cxx = which_cxx()
         # Exactly the build.sh recipe: the stub takes no C++ flags.
-        subprocess.run([cxx, "-c", pu.STUB_FILE, "-o", "stub.o"],
+        subprocess.run([CXX, "-c", pu.STUB_FILE, "-o", "stub.o"],
                        cwd=pkg.dir, check=True)
-        subprocess.run([cxx, "-std=c++23", "probe.cc", "stub.o", "-o", "probe"],
+        subprocess.run([CXX, "-std=c++17", "probe.cc", "stub.o", "-o", "probe"],
                        cwd=pkg.dir, check=True)
         out = subprocess.run(["./probe"], cwd=pkg.dir, check=True,
                              capture_output=True, text=True).stdout.split()
@@ -185,11 +213,22 @@ class BuildScriptTest(unittest.TestCase):
         self.assertIsNone(pu.adapt_build_script(MODERN_BUILD_SH))
 
     def test_refuses_a_script_it_does_not_recognize(self):
-        with self.assertRaisesRegex(pu.PackError, "not a seeml-update-compile"):
+        with self.assertRaisesRegex(pu.PackError, "not an unmodified seeml-update-compile"):
             pu.adapt_build_script("#!/bin/sh\nmake\n")
         # Two compile lines is not the emitter's script either.
         with self.assertRaisesRegex(pu.PackError, "refusing"):
-            pu.adapt_build_script(LEGACY_BUILD_SH + pu.LEGACY_COMPILE_LINE)
+            pu.adapt_build_script(LEGACY_BUILD_SH + pu.DECIMAL_COMPILE_LINE)
+        # A user-edited decimal line (extra flags) is refused, not guessed.
+        edited = LEGACY_BUILD_SH.replace("-c update_plan_embedded.cc",
+                                         "-march=native -c update_plan_embedded.cc")
+        with self.assertRaisesRegex(pu.PackError, "unmodified"):
+            pu.adapt_build_script(edited)
+
+    def test_a_comment_naming_the_stub_does_not_count_as_support(self):
+        commented = "# built from update_plan_embedded.S one day\n" + LEGACY_BUILD_SH
+        out = pu.adapt_build_script(commented)
+        self.assertIsNotNone(out)
+        self.assertIn(pu.STUB_COMPILE_LINE, out)
 
 
 class AtomicWriteTest(unittest.TestCase):
@@ -231,13 +270,6 @@ class PackTest(unittest.TestCase):
         self.assertEqual(pkg.read(pu.BUILD_SCRIPT), MODERN_BUILD_SH)
         # The plan itself is never rewritten.
         self.assertEqual(pkg.read(pu.PLAN_FILE, "rb"), pkg.plan)
-
-    def test_keep_decimal_tu_flag(self):
-        pkg = PackageDir()
-        self.addCleanup(pkg.cleanup)
-        rc, _ = run_main([pkg.dir, "--keep-decimal-tu"])
-        self.assertEqual(rc, 0)
-        self.assertTrue(os.path.exists(pkg.path(pu.DECIMAL_TU)))
 
     def test_adapts_a_legacy_package(self):
         pkg = PackageDir(build_sh=LEGACY_BUILD_SH)
@@ -281,8 +313,8 @@ class PackTest(unittest.TestCase):
 
     def test_build_runs_the_packages_script_with_cxx(self):
         script = ("#!/bin/sh\nset -e\ncd \"$(dirname \"$0\")\"\n"
-                  "if [ -f update_plan_embedded.S ]; then :; fi\n"
                   "printf '%s' \"$CXX\" > cxx.txt\n"
+                  "CXX=:\n" + pu.STUB_COMPILE_LINE +
                   "printf '#!/bin/sh\\n' > model_update\nchmod +x model_update\n")
         pkg = PackageDir(build_sh=script)
         self.addCleanup(pkg.cleanup)
@@ -291,7 +323,6 @@ class PackTest(unittest.TestCase):
         self.assertEqual(rc, 0, err)
         self.assertEqual(pkg.read("cxx.txt"), "my-cross-c++")
         self.assertIn("built", err)
-        import json
         report = json.loads(pkg.read("pack.json"))
         self.assertEqual(report["schema"], 1)
         self.assertTrue(report["built"])
@@ -299,8 +330,7 @@ class PackTest(unittest.TestCase):
         self.assertIsInstance(report["build_seconds"], float)
 
     def test_failing_build_is_exit_1(self):
-        script = ("#!/bin/sh\nif [ -f update_plan_embedded.S ]; then :; fi\n"
-                  "exit 7\n")
+        script = "#!/bin/sh\nCXX=:\n" + pu.STUB_COMPILE_LINE + "exit 7\n"
         pkg = PackageDir(build_sh=script)
         self.addCleanup(pkg.cleanup)
         rc, err = run_main([pkg.dir, "--build"])
@@ -308,7 +338,7 @@ class PackTest(unittest.TestCase):
         self.assertIn("exit 7", err)
 
     def test_build_that_leaves_no_binary_is_exit_1(self):
-        script = "#!/bin/sh\nif [ -f update_plan_embedded.S ]; then :; fi\n"
+        script = "#!/bin/sh\nCXX=:\n" + pu.STUB_COMPILE_LINE
         pkg = PackageDir(build_sh=script)
         self.addCleanup(pkg.cleanup)
         rc, err = run_main([pkg.dir, "--build"])
@@ -337,6 +367,7 @@ class CliTest(unittest.TestCase):
         self.assert_exit_2([pkg.dir, "--page-align", "big"])
         self.assert_exit_2([pkg.dir, "--cxx"])
         self.assert_exit_2([pkg.dir, "--cxx", "--build"])
+        self.assert_exit_2([pkg.dir, "--keep-decimal-tu"])   # no such flag
         self.assert_exit_2([pkg.path("absent")])
         self.assert_exit_2([pkg.path(pu.PLAN_FILE)])      # a file, not a dir
 

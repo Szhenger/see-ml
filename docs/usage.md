@@ -83,7 +83,7 @@ seeml-update-compile --source model.smf --out pkg/ ... --no-embed
 python3 tool/pack_update.py pkg/ --build          # writes update_plan_embedded.S, runs build.sh
 ```
 
-The packer is standard-library Python on the build host only; the package it leaves behind is the same dependency-free C++ (the stub needs only the preprocessor and assembler every C++ toolchain carries), the `.seeu` is untouched, and the binary trains the very same bits as the C-array build — CI asserts all three on every change. The embedded plan is page-aligned (`--page-align`, default 16 KiB), which is also what zero-copy GPU residency will want. `build.sh` prefers the stub whenever one is present, so `pack_update.py` also upgrades packages emitted before `--no-embed` existed (`--keep-decimal-tu` leaves the old C array beside it).
+The packer is standard-library Python on the build host only; the package it leaves behind is the same dependency-free C++ (the stub needs only the preprocessor and assembler every C++ toolchain carries), the `.seeu` is untouched, and the binary trains the very same bits as the C-array build — CI asserts all three on every change. The embedded plan is page-aligned (`--page-align`, default 16 KiB), which is also what zero-copy GPU residency will want. `build.sh` prefers the stub whenever one is present, so `pack_update.py` also upgrades an unmodified package emitted before `--no-embed` existed (it rewrites the one compile line and drops the old C array); a hand-edited `build.sh` is refused rather than guessed at.
 
 Compilation is also your first line of defense: infeasible memory footprints, shape mismatches, a loss that can't see any trainable parameter — all fail *here*, on the build host, with a one-line `"<unit>: <message>"` diagnostic.
 

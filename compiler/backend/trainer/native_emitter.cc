@@ -447,14 +447,17 @@ std::expected<EmitPaths, std::string> EmitNativePackage(
       return generating::FileError(generating::kNativeEmitter,
                                    "short write to", paths.plan_file);
   }
+  // A package carries exactly one embedded-plan TU, so build.sh's choice is
+  // never ambiguous: whichever of the pair this emission does not write is
+  // removed, in case an earlier emission into the same directory (or the
+  // packer) left it behind. Otherwise a stale .incbin stub from a previous
+  // pack would silently win over the fresh decimal TU, or a stale decimal
+  // TU would ship beside the stub the packer is about to add.
   if (options.embed_plan_tu) {
     if (auto r = WriteFile(paths.embedded_tu, EmbedPlanAsTU(plan)); !r)
       return std::unexpected(r.error());
+    std::filesystem::remove(out_dir + "/update_plan_embedded.S", ec);
   } else {
-    // The packer replaces the decimal TU; a stale one from an earlier
-    // emission into the same directory would otherwise be preferred by no
-    // one but still ship in the package. Removing it keeps the plan on
-    // disk exactly once, as the .seeu.
     std::filesystem::remove(out_dir + "/update_plan_embedded.cc", ec);
   }
   if (auto r = WriteFile(paths.main_tu, kMainTU); !r)
