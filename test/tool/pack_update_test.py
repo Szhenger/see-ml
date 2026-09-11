@@ -87,7 +87,9 @@ class StubTest(unittest.TestCase):
         self.assertIn("SEEML_SYM(kSeemlUpdatePlan):", stub)
         self.assertIn("SEEML_SYM(kSeemlUpdatePlanSize):", stub)
         # The size is a label difference, never a literal that can go stale.
-        self.assertNotIn(str(len(b"anything")), stub.split(".quad")[1][:8])
+        self.assertRegex(stub, r"\.quad SEEML_SYM\(kSeemlUpdatePlan_end\) - "
+                               r"SEEML_SYM\(kSeemlUpdatePlan\)\n")
+        self.assertNotRegex(stub, r"\.(quad|long)\s+\d")
         self.assertIn("__USER_LABEL_PREFIX__", stub)
         # Both symbols are exported; the end label is not.
         self.assertIn(".globl SEEML_SYM(kSeemlUpdatePlan)\n", stub)
@@ -202,6 +204,18 @@ class AtomicWriteTest(unittest.TestCase):
             self.assertEqual(f.read(), "new")
         self.assertTrue(os.stat(target).st_mode & stat.S_IXUSR)
         self.assertEqual(os.listdir(d), ["out.txt"])
+
+    def test_files_get_the_ordinary_create_mode_not_mkstemps_0600(self):
+        """A package is copied to and built on other machines and by other
+        users: the stub must be world-readable under a normal umask."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        old = os.umask(0o022)
+        self.addCleanup(os.umask, old)
+        pu.write_atomic(os.path.join(d, "a.S"), b"x")
+        pu.write_atomic(os.path.join(d, "b.sh"), b"x", executable=True)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(d, "a.S")).st_mode), 0o644)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(d, "b.sh")).st_mode), 0o755)
 
 
 class PackTest(unittest.TestCase):

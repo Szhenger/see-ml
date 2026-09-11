@@ -17,9 +17,10 @@ verbatim: the host compiler never parses weight bytes again, the plan lands
 on disk exactly once, and embedding takes well under a second at any size.
 
 The emitted package is unchanged in kind: still dependency-free C++ that
-builds anywhere with a C++ toolchain (the stub needs only the preprocessor
-and assembler that every such toolchain carries). Python runs on the build
-host only; nothing here ships to the device.
+builds anywhere the generated build.sh already ran — the stub needs only
+the preprocessor and assembler every GCC- or Clang-compatible driver
+carries (`c++ -c update_plan_embedded.S`), on ELF, Mach-O and MinGW alike.
+Python runs on the build host only; nothing here ships to the device.
 
 Dependency tier 0: standard library only. Strict CLI, like every SeeML tool:
 an unknown flag or an unusable value is exit 2, never a default.
@@ -38,7 +39,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 PLAN_FILE = "update_plan.seeu"
 STUB_FILE = "update_plan_embedded.S"
@@ -157,7 +158,11 @@ def check_plan(path: str) -> int:
 def write_atomic(path: str, data: bytes, executable: bool = False) -> None:
     """Temp file in the same directory, fsync, then rename over the target —
     a crash mid-write leaves the old file or none, never a torn one (the
-    staging pattern the C++ custodian and seeml-bench already use)."""
+    staging pattern the C++ custodian and seeml-bench already use).
+
+    mkstemp creates the temp file 0600; the package is meant to be copied
+    and built elsewhere, so the final file gets the ordinary create mode
+    (0666, or 0777 for scripts) under the caller's umask instead."""
     directory = os.path.dirname(path) or "."
     fd, tmp = tempfile.mkstemp(prefix=".pack_update-", dir=directory)
     try:
@@ -165,8 +170,9 @@ def write_atomic(path: str, data: bytes, executable: bool = False) -> None:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        if executable:
-            os.chmod(tmp, 0o755)
+        umask = os.umask(0)
+        os.umask(umask)
+        os.chmod(tmp, (0o777 if executable else 0o666) & ~umask)
         os.replace(tmp, path)
     except BaseException:
         try:
