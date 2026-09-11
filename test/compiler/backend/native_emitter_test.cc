@@ -4,6 +4,7 @@
 // the embedded plan symbols the driver links against.
 // =============================================================================
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -103,10 +104,59 @@ TEST(NativeEmitter, EmitsCompletePackage) {
   EXPECT_STR_CONTAINS(script, "SEEML_TILE_FLAGS");
   EXPECT_STR_CONTAINS(script, "$TILE_FLAGS");
 
+  // The script consumes whichever embedded-plan TU the package carries:
+  // the packer's .incbin stub when present (assembled without the C++
+  // flags — it is preprocessed assembly), else the decimal TU emitted here.
+  EXPECT_STR_CONTAINS(script, "if [ -f update_plan_embedded.S ]; then");
+  EXPECT_STR_CONTAINS(script,
+                      "$CXX -c update_plan_embedded.S -o update_plan_embedded.o");
+  EXPECT_STR_CONTAINS(
+      script, "$CXX $FLAGS -c update_plan_embedded.cc -o update_plan_embedded.o");
+  EXPECT_STR_CONTAINS(script, "update_main.o update_plan_embedded.o");
+
   // The build script is marked executable.
   const auto perms = std::filesystem::status(paths.build_script).permissions();
   EXPECT_TRUE((perms & std::filesystem::perms::owner_exec) !=
               std::filesystem::perms::none);
+}
+
+TEST(NativeEmitter, SkipsTheDecimalTUOnRequest) {
+  ScopedTempDir dir;
+  SmfModel model = MakeMlp(6, 10, 3, 4);
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(BaseConfig(4)).Compile(model));
+  const std::string out_dir = (dir.path() / "pkg").string();
+
+  // A previous emission into the same directory left a decimal TU behind;
+  // the stub-bound package must not ship it.
+  std::filesystem::create_directories(out_dir);
+  std::ofstream(out_dir + "/update_plan_embedded.cc") << "stale";
+
+  EmitOptions options;
+  options.embed_plan_tu = false;
+  ASSERT_OK_AND_ASSIGN(
+      EmitPaths paths,
+      EmitNativePackage(compiled.plan, out_dir, RepoRoot(), options));
+  EXPECT_TRUE(paths.embedded_tu.empty());
+  EXPECT_FALSE(std::filesystem::exists(out_dir + "/update_plan_embedded.cc"));
+
+  // Everything the packer needs is still there: the plan exactly as the
+  // default emission writes it, the driver, the vendored runtime, and a
+  // build.sh that will assemble the stub the packer adds.
+  EXPECT_TRUE(std::filesystem::exists(paths.plan_file));
+  EXPECT_TRUE(std::filesystem::exists(paths.main_tu));
+  EXPECT_TRUE(std::filesystem::exists(
+      std::filesystem::path(out_dir) / "runtime/engine/update_engine.cc"));
+  const std::string plan_bytes = ReadText(paths.plan_file);
+  EXPECT_EQ(plan_bytes.size(), compiled.plan.size());
+  EXPECT_TRUE(std::equal(compiled.plan.begin(), compiled.plan.end(),
+                         plan_bytes.begin(), plan_bytes.end(),
+                         [](uint8_t a, char b) {
+                           return a == static_cast<uint8_t>(b);
+                         }));
+  const std::string script = ReadText(paths.build_script);
+  EXPECT_STR_CONTAINS(script, "update_plan_embedded.S");
+  EXPECT_STR_CONTAINS(script, "run tool/pack_update.py");
 }
 
 TEST(NativeEmitter, CreatesMissingOutputDir) {

@@ -12,6 +12,7 @@ tree provides.
 tool/
   export_model.py         PyTorch model + data  ->  SMF / SDS files
   seeml_update_compile.cc the compiler CLI       ->  a .seeu update package
+  pack_update.py          the package assembler  ->  .incbin-embedded package
   seeml_seeu_dump.cc      the plan disassembler   (inspect any .seeu)
   seeml_bench.cc          the benchmark harness  ->  one JSON per run
   bench_compare.py        the nightly Tier A regression gate over two runs
@@ -22,16 +23,17 @@ tool/
 **`export_model.py`** is the on-ramp: it converts a PyTorch `nn.Sequential`
 (or a decoder stack — pre-embedded via `export_decoder_smf`, or token-native
 SMF v4 via `export_token_decoder_smf` + `export_token_sds`) into the SMF
-model container and turns arrays into an SDS corpus — the only Python in
-the product, and the only place PyTorch and NumPy are needed
+model container and turns arrays into an SDS corpus — the only place
+PyTorch and NumPy are needed
 (`pip install -r tool/requirements.txt`; the token-native path and
 `--demo-decoder` need NumPy only). Its demo generators are fully
 parameterizable from the command line (`--width`, `--depth`, `--vocab`,
 `--seq-len`, `--blocks`, `--seed`, `--samples`, `--corpus-kind`), and
 `--corpus` converts saved NumPy arrays into an SDS corpus without writing
 Python; a flag that cannot apply to the requested mode is a hard error,
-matching the compiler CLI's discipline. Everything downstream is
-dependency-free C++.
+matching the compiler CLI's discipline. Everything that reaches the device
+is dependency-free C++; the build host may additionally run the Python
+packer below, which leaves no trace in the package.
 
 **`seeml_update_compile.cc`** is the compiler itself as a command: source
 model in, `.seeu` plan (and optional self-contained native package) out. Its
@@ -39,6 +41,17 @@ argument parsing is deliberately *strict* — an unknown flag, a flag missing
 its value, or a numeric with trailing garbage is a hard error, never a
 silent default — because a fine-tune you didn't mean to configure is worse
 than one that refuses to start.
+
+**`pack_update.py`** is the package assembler, the first Python-plane
+subsystem of the Two-Plane Overhaul (`docs/next-project/`): given a
+directory the compiler emitted with `--no-embed`, it embeds the plan as an
+`.incbin` assembly stub (`update_plan_embedded.S`, page-aligned) in place
+of the decimal C-array TU, and with `--build` runs the package's own
+`build.sh`. The host compiler never parses weight bytes, so a 135M-parameter
+package builds in seconds instead of minutes and the plan lands on disk
+once. Standard library only (it sits on the compile path), strict CLI
+(exit 2 on any unknown flag), atomic writes. `build.sh` prefers the stub
+when present, so it also upgrades packages from older compilers.
 
 **`seeml_seeu_dump.cc`** is the disassembler: point it at any plan and it
 verifies the integrity seal and prints the header and instruction streams in
@@ -62,4 +75,6 @@ explained and every exit code**, is in
 does internally is in [docs/compiler.md](../docs/compiler.md); the formats
 these tools read and write are in [docs/formats.md](../docs/formats.md). The
 compile CLI's argument discipline is verified alongside the driver suites
-under [test/compiler/driver/](../test/README.md).
+under [test/compiler/driver/](../test/README.md); the packer's suite is
+[test/tool/pack_update_test.py](../test/tool/pack_update_test.py)
+(`python3 -m unittest discover -s test/tool -p '*_test.py'`).

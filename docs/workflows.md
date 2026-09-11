@@ -138,7 +138,7 @@ named promise**:
 | ci.yml | `asan-ubsan` | correctness (memory / UB) |
 | ci.yml | `fuzz-smoke` | boundedness (hostile input) |
 | ci.yml | `e2e-package` | correctness + determinism of the *product* |
-| ci.yml | `exporter-syntax` | correctness (the Python edge) |
+| ci.yml | `python-tools` | correctness (the Python plane: syntax + the packer suite) |
 | nightly.yml | `tsan` | boundedness (races) |
 | nightly.yml | `fuzz-extended` | boundedness (hostile input, deeper) |
 | codeql.yml | `analyze` | correctness (paths the tests never run) |
@@ -287,6 +287,14 @@ This job performs the entire documented user journey, for real:
    committed models. They must be *bitwise identical* — the determinism
    promise, asserted not on a kernel or a test fixture but on the final
    artifact a user would deploy.
+6. Compile the same plan once more with `--no-embed` (no decimal
+   byte-array TU) and let `tool/pack_update.py --build` embed it as an
+   `.incbin` assembly stub and run the same `build.sh`. Three assertions:
+   the `.seeu` is byte-identical to the default emission, nothing in the
+   package or the binary mentions Python (the build-host tool leaves no
+   trace on the device path), and the stub-built binary commits the
+   *same bytes* as the decimal-built one — the two embeddings are one
+   plan, proven at the artifact level.
 
 One design decision deserves a highlight. The demo's regression gate
 might (deterministically) decide the training didn't improve and refuse
@@ -298,13 +306,22 @@ checks, decide up front which outcomes are failures and which are
 merely *answers* — conflating them produces flaky CI, and flaky CI
 trains humans to ignore red, which destroys the entire enterprise.
 
-### 3.6 `exporter-syntax` — the cheapest possible tripwire
+### 3.6 `python-tools` — the cheapest possible tripwire, plus one suite
 
-`python3 -m py_compile tool/export_model.py`. Five seconds. It catches
-exactly one class of regression — the exporter no longer parses — and
+`python3 -m py_compile` over every script in `tool/`. Five seconds. It
+catches exactly one class of regression — a tool no longer parses — and
 costs nearly nothing. Not every check needs to be deep; it needs to be
 *proportionate*. (Deliberately absent: installing PyTorch here — the
 e2e job already exercises the exporter for real.)
+
+The same job runs `test/tool/pack_update_test.py` under the runner's bare
+interpreter. That placement is the point: the package assembler is on
+the compile path and declared *tier 0* — standard library only — so a
+stray NumPy or torch import fails here, where nothing is installed. The
+suite also assembles and links the `.incbin` stub for real with the
+runner's `g++`, so the ELF spelling of the stub (`%object`,
+`.note.GNU-stack`) is checked on every diff, not only the Mach-O one a
+developer's Mac exercises.
 
 ---
 
