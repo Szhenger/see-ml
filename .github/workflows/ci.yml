@@ -274,14 +274,17 @@ jobs:
           done
           exit 1
       # The pinned build-host stack (tool/requirements-pinned.txt): CPython
-      # 3.14.7 with torch 2.14 and NumPy 2.5 from the CPU wheel index.
+      # 3.14.7 with torch 2.14 from the CPU wheel index and NumPy 2.5 from
+      # PyPI. --extra-index-url, not --index-url: the PyTorch mirror only
+      # carries the NumPy releases torch itself was built against, so an
+      # exact NumPy pin must be free to resolve from PyPI.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14.7"
           cache: pip
           cache-dependency-path: tool/requirements-pinned.txt
       - name: Install the pinned exporter stack (CPU torch)
-        run: pip install --index-url https://download.pytorch.org/whl/cpu -r tool/requirements-pinned.txt
+        run: pip install --extra-index-url https://download.pytorch.org/whl/cpu -r tool/requirements-pinned.txt
       - name: Exporter suite with torch (oracles, golden digests)
         run: python3 -m unittest discover -s test/tool -p 'export_model_test.py' -v
       - name: Export the demo model + corpus
