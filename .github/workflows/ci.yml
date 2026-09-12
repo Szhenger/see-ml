@@ -273,14 +273,22 @@ jobs:
             sleep 20
           done
           exit 1
+      # The pinned build-host stack (tool/requirements-pinned.txt): CPython
+      # 3.14.7 with torch 2.14 from the CPU wheel index and NumPy 2.5 from
+      # PyPI. --extra-index-url, not --index-url: the PyTorch mirror only
+      # carries the NumPy releases torch itself was built against, so an
+      # exact NumPy pin must be free to resolve from PyPI.
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14.7"
           cache: pip
-      - name: Install CPU torch for the exporter
-        run: pip install --index-url https://download.pytorch.org/whl/cpu torch numpy
+          cache-dependency-path: tool/requirements-pinned.txt
+      - name: Install the pinned exporter stack (CPU torch)
+        run: pip install --extra-index-url https://download.pytorch.org/whl/cpu -r tool/requirements-pinned.txt
+      - name: Exporter suite with torch (oracles, golden digests)
+        run: python3 -m unittest discover -s test/tool -p 'export_model_test.py' -v
       - name: Export the demo model + corpus
-        run: python3 tool/export_model.py --demo out/
+        run: python3 -W error tool/export_model.py --demo out/
       - name: Build the compiler
         run: sh build/build.sh
       - name: Compile the plan and build the emitted package
@@ -375,15 +383,55 @@ jobs:
   # --- Correctness: the Python plane, torch-free -----------------------------
   # Torch is deliberately not installed (heavy; the exporter's torch imports
   # are function-local): byte-compiling every tool script gates syntax and
-  # top-level import errors, and the packer's suite runs under the bare
+  # top-level import errors, and the packer's suite runs under a bare
   # interpreter — it is tier 0 (stdlib only), and a stray import fails here.
+  # Two interpreters: the pinned 3.14.7 and the 3.9 floor, so no tool grows
+  # syntax or a stdlib API the oldest supported build host lacks.
   python-tools:
-    name: python tools (syntax + packer suite)
+    name: python tools (${{ matrix.python }}, syntax + packer suite)
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.14.7"]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
       - name: Byte-compile every tool script
-        run: python3 -m py_compile tool/export_model.py tool/bench_compare.py tool/pack_update.py
+        run: python -m py_compile tool/export_model.py tool/bench_compare.py tool/pack_update.py
       - name: Packer unit tests (assembles the stub with the runner's g++)
-        run: python3 -m unittest discover -s test/tool -p '*_test.py' -v
+        run: python -m unittest discover -s test/tool -p '*_test.py' -v
+
+  # --- Correctness: the exporter across its NumPy floor and the pinned stack -
+  # The streaming container writer and the vectorized corpus writer must
+  # produce the bytes the original per-row / whole-blob algorithms did (the
+  # oracles live in the suite), on NumPy 1.x under the 3.9 floor and on
+  # NumPy 2.5 under 3.14.7. No torch: --demo-decoder and --corpus are the
+  # NumPy-only paths, and their default outputs are pinned by digest.
+  exporter-compat:
+    name: exporter (py ${{ matrix.python }}, numpy ${{ matrix.numpy }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { python: "3.9", numpy: "<2" }
+          - { python: "3.14.7", numpy: "==2.5.3" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install NumPy only
+        run: pip install "numpy${{ matrix.numpy }}"
+      - name: Exporter suite (oracles + golden digests, torch tests skip)
+        run: python -m unittest discover -s test/tool -p 'export_model_test.py' -v
+      - name: NumPy-only export paths run warning-free
+        run: |
+          python -W error tool/export_model.py --demo-decoder out/
+          python -W error -c "import numpy as np; np.savez('out/f.npz', inputs=np.zeros((10, 4), np.float32), labels=np.arange(10) % 3)"
+          python -W error tool/export_model.py --corpus out/f.npz out/f.sds

@@ -49,6 +49,7 @@ Supported modules inside an nn.Sequential:
 """
 
 import argparse
+import io
 import struct
 import sys
 
@@ -61,6 +62,9 @@ DEFAULT_ROPE_BASE = 10000.0  # what attr1 == 0 means on a Rope op
 # loading on older compilers, and the classic demos stay byte-for-byte.
 SDS_MAGIC = 0x31534453  # "SDS1"
 ALIGN = 64
+# Feature corpora stream to disk in row chunks: constant memory at any
+# corpus size, one write per chunk instead of two per row.
+SDS_CHUNK_ROWS = 1 << 16
 
 (OP_MATMUL, OP_ADDBIAS, OP_RELU, OP_GELU, OP_SILU, OP_MUL, OP_LAYERNORM,
  OP_ADD, OP_RMSNORM, OP_ROPE, OP_ATTENTION) = range(11)
@@ -76,6 +80,22 @@ def _s(name: str) -> bytes:
     return struct.pack("<H", len(b)) + b
 
 
+def _nbytes(data) -> int:
+    return memoryview(data).nbytes
+
+
+def _flat_bytes(data) -> memoryview:
+    """A 1-D byte view of any C-contiguous bytes-like (bytes, a NumPy array,
+    a memoryview): what file.write consumes, without copying the payload."""
+    mv = memoryview(data)
+    if mv.ndim == 1 and mv.format == "B":
+        return mv
+    if not mv.c_contiguous:
+        raise ValueError("tensor payloads must be C-contiguous (pass the "
+                         "array through numpy.ascontiguousarray)")
+    return mv.cast("B")
+
+
 class _SmfBuilder:
     def __init__(self, input_name: str, input_dim: int, seq_len: int = 0,
                  token_input: bool = False):
@@ -86,11 +106,26 @@ class _SmfBuilder:
         # one i32 token id per row, gathered on-device by kEmbedding.
         self.min_version = 4 if token_input else 3
         dims = [-1] if token_input else [-1, input_dim]
-        self.tensors = [dict(name=input_name, dims=dims, const=False, data=b"")]
+        self.tensors = [dict(name=input_name, dims=dims, const=False, data=b"",
+                             nbytes=0)]
         self.ops = []
 
-    def add_tensor(self, name, dims, data: bytes):
-        self.tensors.append(dict(name=name, dims=list(dims), const=True, data=data))
+    def add_tensor(self, name, dims, data, nbytes=None):
+        """`data` is any C-contiguous bytes-like — bytes, a memoryview, or a
+        NumPy array — written as-is at serialization time, so a weight
+        costs no copy between the framework and the file. It may instead be
+        a zero-argument callable returning such a bytes-like, with `nbytes`
+        its size: the payload is then produced only while it is being
+        written, so a model whose weights need a transposed copy each holds
+        one such copy at a time, not all of them at once."""
+        if callable(data):
+            if nbytes is None:
+                raise ValueError(f"add_tensor({name!r}): a callable payload "
+                                 "needs its nbytes up front")
+        else:
+            nbytes = _nbytes(data)
+        self.tensors.append(dict(name=name, dims=list(dims), const=True,
+                                 data=data, nbytes=int(nbytes)))
 
     def add_op(self, kind, name, inputs, output, attr0: int = 0,
                attr1: int = 0):
@@ -103,50 +138,79 @@ class _SmfBuilder:
         needs_v5 = any(op["attr1"] != 0 for op in self.ops)
         return max(self.min_version, 5 if needs_v5 else 3)
 
-    def serialize(self) -> bytes:
+    def _meta(self, offsets, version: int) -> bytes:
+        out = struct.pack("<IIII", SMF_MAGIC, version,
+                          len(self.tensors), len(self.ops))
+        out += _s(self.input_name) + _s(self.output_name)
+        out += struct.pack("<Q", self.seq_len)
+        for t in self.tensors:
+            out += _s(t["name"])
+            out += struct.pack("<BB", len(t["dims"]), 1 if t["const"] else 0)
+            for d in t["dims"]:
+                out += struct.pack("<q", d)
+            out += struct.pack("<QQ", offsets.get(t["name"], 0), t["nbytes"])
+        for op in self.ops:
+            out += struct.pack("<B", op["kind"]) + _s(op["name"])
+            out += struct.pack("<B", len(op["inputs"]))
+            for i in op["inputs"]:
+                out += _s(i)
+            out += _s(op["output"])
+            out += struct.pack("<I", op["attr0"])
+            if version >= 5:
+                out += struct.pack("<I", op["attr1"])
+        return out
+
+    def _layout(self):
+        """(header bytes, {tensor name: data offset}, total file size): every
+        constant tensor at a 64-byte-aligned offset after the header, the
+        file padded to alignment after the last one."""
         version = self.version
-
-        def meta(offsets):
-            out = struct.pack("<IIII", SMF_MAGIC, version,
-                              len(self.tensors), len(self.ops))
-            out += _s(self.input_name) + _s(self.output_name)
-            out += struct.pack("<Q", self.seq_len)
-            for t in self.tensors:
-                out += _s(t["name"])
-                out += struct.pack("<BB", len(t["dims"]), 1 if t["const"] else 0)
-                for d in t["dims"]:
-                    out += struct.pack("<q", d)
-                out += struct.pack("<QQ", offsets.get(t["name"], 0), len(t["data"]))
-            for op in self.ops:
-                out += struct.pack("<B", op["kind"]) + _s(op["name"])
-                out += struct.pack("<B", len(op["inputs"]))
-                for i in op["inputs"]:
-                    out += _s(i)
-                out += _s(op["output"])
-                out += struct.pack("<I", op["attr0"])
-                if version >= 5:
-                    out += struct.pack("<I", op["attr1"])
-            return out
-
-        meta_size = len(meta({}))
-        cursor, offsets = _align(meta_size), {}
+        cursor, offsets = _align(len(self._meta({}, version))), {}
         for t in self.tensors:
             if not t["const"]:
                 continue
             offsets[t["name"]] = cursor
-            cursor = _align(cursor + len(t["data"]))
+            cursor = _align(cursor + t["nbytes"])
+        return self._meta(offsets, version), offsets, cursor
 
-        blob = bytearray(meta(offsets))
-        blob.extend(b"\x00" * (cursor - len(blob)))
+    def write(self, f) -> int:
+        """Stream the container to a binary file object and return the byte
+        count. The header, each tensor's bytes (straight from the array
+        that holds them), and the alignment gaps are written in file order,
+        so the process never holds a second copy of the model: a 540 MB
+        model exports at ~1x its size, not the ~6x of assembling the whole
+        file in memory first. Byte-identical to serialize()."""
+        meta, offsets, total = self._layout()
+        f.write(meta)
+        pos = len(meta)
         for t in self.tensors:
-            if t["const"]:
-                o = offsets[t["name"]]
-                blob[o : o + len(t["data"])] = t["data"]
-        return bytes(blob)
+            if not t["const"]:
+                continue
+            o = offsets[t["name"]]
+            if o > pos:
+                f.write(b"\x00" * (o - pos))
+            view = _flat_bytes(t["data"]() if callable(t["data"])
+                               else t["data"])
+            if view.nbytes != t["nbytes"]:
+                raise ValueError(f"tensor {t['name']!r}: payload is "
+                                 f"{view.nbytes} bytes, declared {t['nbytes']}")
+            f.write(view)
+            pos = o + view.nbytes
+        if total > pos:
+            f.write(b"\x00" * (total - pos))
+        return total
+
+    def serialize(self) -> bytes:
+        """The whole container as one bytes object (library convenience;
+        the file exporters stream with write() instead)."""
+        buf = io.BytesIO()
+        self.write(buf)
+        return buf.getvalue()
 
 
 def export_smf(model, path: str, input_name: str = "x"):
     """Export an nn.Sequential of Linear/ReLU/GELU/SiLU/LayerNorm to SMF."""
+    import numpy as np
     import torch
     import torch.nn as nn
 
@@ -154,16 +218,26 @@ def export_smf(model, path: str, input_name: str = "x"):
     if not linears:
         raise ValueError("export_smf: model contains no nn.Linear layers")
 
+    def tensor(name, t):
+        # Produced only while being written: the f32, C-contiguous array
+        # shares the parameter's storage when it already is one (a bias),
+        # and is a single transient copy when it is not (a transposed
+        # weight, or a half-precision one) — so export peaks near the
+        # model's own size, and no bytes() copy sits in between.
+        t = t.detach()
+        b.add_tensor(name, list(t.shape),
+                     lambda t=t: np.asarray(t.float().contiguous().numpy(),
+                                            dtype="<f4"),
+                     nbytes=t.numel() * 4)
+
     b = _SmfBuilder(input_name, linears[0].in_features)
     prev, idx = input_name, 0
     for pos, m in enumerate(model):
         if isinstance(m, nn.Linear):
-            w = m.weight.detach().t().contiguous().float()  # [in, out]
-            b.add_tensor(f"w{idx}", list(w.shape), w.numpy().tobytes())
+            tensor(f"w{idx}", m.weight.t())  # [in, out]
             b.add_op(OP_MATMUL, f"mm{idx}", [prev, f"w{idx}"], f"z{idx}")
             if m.bias is not None:
-                bias = m.bias.detach().float()
-                b.add_tensor(f"b{idx}", [bias.numel()], bias.numpy().tobytes())
+                tensor(f"b{idx}", m.bias)
                 b.add_op(OP_ADDBIAS, f"ab{idx}", [f"z{idx}", f"b{idx}"],
                          f"zb{idx}")
                 prev = f"zb{idx}"
@@ -185,12 +259,10 @@ def export_smf(model, path: str, input_name: str = "x"):
             # elementwise_affine=False has weight/bias of None; the SMF op
             # always takes gamma/beta, so synthesize the identity affine.
             d = m.normalized_shape[0]
-            gamma = (m.weight.detach().float() if m.weight is not None
-                     else torch.ones(d))
-            beta = (m.bias.detach().float() if m.bias is not None
-                    else torch.zeros(d))
-            b.add_tensor(f"ln_g{pos}", [gamma.numel()], gamma.numpy().tobytes())
-            b.add_tensor(f"ln_b{pos}", [beta.numel()], beta.numpy().tobytes())
+            tensor(f"ln_g{pos}",
+                   m.weight if m.weight is not None else torch.ones(d))
+            tensor(f"ln_b{pos}",
+                   m.bias if m.bias is not None else torch.zeros(d))
             b.add_op(OP_LAYERNORM, f"ln{pos}",
                      [prev, f"ln_g{pos}", f"ln_b{pos}"], f"n{pos}")
             prev = f"n{pos}"
@@ -198,7 +270,7 @@ def export_smf(model, path: str, input_name: str = "x"):
             raise ValueError(f"export_smf: unsupported module {type(m).__name__}")
 
     with open(path, "wb") as f:
-        f.write(b.serialize())
+        b.write(f)
     print(f"wrote {path} ({idx} linear layers)")
 
 
@@ -244,8 +316,10 @@ def _emit_decoder_graph(b, blocks, head, num_heads: int, prev: str,
     base_bits = _rope_base_bits(rope_base)
 
     def tensor(name, arr):
-        a = np.ascontiguousarray(np.asarray(arr, dtype=np.float32))
-        b.add_tensor(name, list(a.shape), a.tobytes())
+        # Explicit little-endian f32 — the container's byte order, whatever
+        # the host's — and no bytes() copy: the builder writes the array.
+        a = np.ascontiguousarray(np.asarray(arr, dtype="<f4"))
+        b.add_tensor(name, list(a.shape), a)
         return name
 
     for i, blk in enumerate(blocks):
@@ -306,7 +380,7 @@ def export_decoder_smf(blocks, head, path: str, seq_len: int, num_heads: int,
     _emit_decoder_graph(b, blocks, head, num_heads, prev=input_name,
                         rope_base=rope_base)
     with open(path, "wb") as f:
-        f.write(b.serialize())
+        b.write(f)
     print(f"wrote {path} ({len(blocks)} decoder blocks, seq_len={seq_len}, "
           f"heads={num_heads}, rope_base={float(rope_base):g})")
 
@@ -325,7 +399,7 @@ def export_token_decoder_smf(embedding, blocks, head, path: str, seq_len: int,
     """
     import numpy as np
 
-    emb = np.ascontiguousarray(np.asarray(embedding, dtype=np.float32))
+    emb = np.ascontiguousarray(np.asarray(embedding, dtype="<f4"))
     if emb.ndim != 2:
         raise ValueError("export_token_decoder_smf: embedding must be [V, D]")
     D = _decoder_dim(blocks, head, num_heads, "export_token_decoder_smf")
@@ -333,12 +407,12 @@ def export_token_decoder_smf(embedding, blocks, head, path: str, seq_len: int,
         raise ValueError("export_token_decoder_smf: embedding width "
                          f"{emb.shape[1]} does not match block width {D}")
     b = _SmfBuilder(input_name, D, seq_len=seq_len, token_input=True)
-    b.add_tensor("emb", list(emb.shape), emb.tobytes())
+    b.add_tensor("emb", list(emb.shape), emb)
     b.add_op(OP_EMBEDDING, "embed", [input_name, "emb"], "e")
     _emit_decoder_graph(b, blocks, head, num_heads, prev="e",
                         rope_base=rope_base)
     with open(path, "wb") as f:
-        f.write(b.serialize())
+        b.write(f)
     print(f"wrote {path} ({len(blocks)} decoder blocks, seq_len={seq_len}, "
           f"heads={num_heads}, vocab={emb.shape[0]}, token-native, "
           f"rope_base={float(rope_base):g})")
@@ -349,7 +423,10 @@ def export_sds(inputs, labels, path: str, label_kind: int = 1):
     float32 [N, L] (kind 2), or None (kind 0, distillation corpora)."""
     import numpy as np
 
-    x = np.asarray(inputs, dtype=np.float32)
+    x = np.ascontiguousarray(np.asarray(inputs, dtype="<f4"))
+    if x.ndim != 2:
+        raise ValueError(f"export_sds: inputs must be [N, D], got shape "
+                         f"{x.shape}")
     n, d = x.shape
     if labels is None:
         label_kind, label_dim, lab = 0, 0, None
@@ -359,18 +436,35 @@ def export_sds(inputs, labels, path: str, label_kind: int = 1):
             raise ValueError(
                 "export_sds: label_kind=1 expects integer class labels; "
                 "pass label_kind=2 for dense float targets")
-        lab = lab.astype(np.int32).reshape(n)
+        lab = lab.astype("<i4").reshape(n)
         label_dim = 0
     else:
-        lab = np.asarray(labels, dtype=np.float32).reshape(n, -1)
+        lab = np.asarray(labels, dtype="<f4").reshape(n, -1)
         label_dim = lab.shape[1]
+
+    # Each record is the input row immediately followed by its label
+    # (nothing for kind 0, one i32 for kind 1, `label_dim` f32 for kind 2).
+    # A packed structured dtype is exactly that layout, so rows interleave
+    # in NumPy and stream out in chunks — the same bytes as a per-row loop,
+    # at memcpy speed and constant memory.
+    if lab is None:
+        record = None
+    elif label_kind == 1:
+        record = np.dtype([("x", "<f4", (d,)), ("y", "<i4")])
+    else:
+        record = np.dtype([("x", "<f4", (d,)), ("y", "<f4", (label_dim,))])
 
     with open(path, "wb") as f:
         f.write(struct.pack("<IIQQIIQ", SDS_MAGIC, 1, n, d, label_kind, 0, label_dim))
-        for i in range(n):
-            f.write(x[i].tobytes())
-            if lab is not None:
-                f.write(lab[i].tobytes())
+        for start in range(0, n, SDS_CHUNK_ROWS):
+            end = min(n, start + SDS_CHUNK_ROWS)
+            if record is None:
+                f.write(_flat_bytes(x[start:end]))
+            else:
+                rows = np.empty(end - start, dtype=record)
+                rows["x"] = x[start:end]
+                rows["y"] = lab[start:end]
+                f.write(_flat_bytes(rows))
     print(f"wrote {path} ({n} samples, input_dim={d}, label_kind={label_kind})")
 
 
@@ -398,7 +492,7 @@ def export_token_sds(records, path: str):
     if raw.size and (raw.max() > np.iinfo(np.int32).max or
                      raw.min() < np.iinfo(np.int32).min):
         raise ValueError("export_token_sds: token id does not fit int32")
-    a = np.ascontiguousarray(raw.astype(np.int32))
+    a = np.ascontiguousarray(raw.astype("<i4", copy=False))
     if a.ndim != 2 or a.shape[1] < 2:
         raise ValueError("export_token_sds: records must be [N, seq_len + 1]")
     if a.shape[0] == 0:
@@ -409,7 +503,7 @@ def export_token_sds(records, path: str):
     n, s = a.shape[0], a.shape[1] - 1
     with open(path, "wb") as f:
         f.write(struct.pack("<IIQQIIQ", SDS_MAGIC, 2, n, s, 1, 1, 0))
-        f.write(a.tobytes())
+        f.write(_flat_bytes(a))
     print(f"wrote {path} ({n} records, seq_len={s}, token-native)")
 
 

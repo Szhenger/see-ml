@@ -16,7 +16,7 @@ Notice what does *not* travel to the device: PyTorch, Python, this repository. T
 
 ## Step 1: Export the Model (build host, PyTorch)
 
-The exporter needs Python 3 with PyTorch and NumPy on the build host — `pip install -r tool/requirements.txt` installs both. Nothing on the device side touches Python.
+The exporter needs Python 3 with PyTorch and NumPy on the build host. The stack it is developed and tested on is CPython 3.14.7 with PyTorch 2.14 and NumPy 2.5 (`pip install -r tool/requirements-pinned.txt`); it also runs on anything down to Python 3.9, NumPy 1.17 and torch 1.7 (`tool/requirements.txt` states those floors), and the compiler reads every SMF/SDS file any version has written. Export streams the model straight from the framework's arrays to disk, so a 500 MB model needs about 500 MB, not several times that. Nothing on the device side touches Python.
 
 The quickest start — a demo model, teacher, and synthetic corpus in one command:
 
