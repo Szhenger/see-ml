@@ -254,11 +254,15 @@ backend-neutral f32).
 > **Metal ≈ 2,480 tok/s vs CPU ≈ 1,180 tok/s** (2.1×), training loss after
 > 80 steps agreeing to six significant digits (11.82789 vs 11.82787); the
 > CPU itself gained 1.14–1.62× rows/s from
-> #66 (bwd/fwd 2.0–3.0× → 1.2–1.7×). Not yet done: the SmolLM-135M field
-> run the release gate (#65) prices (≥ 800 tok/s on M4; the shapes above
-> exceed it, the model itself was not run here), `simdgroup` tiles for the
-> attention family (per-thread row kernels today), and GEMM tile tuning
-> (P2). The plan below was the design; what shipped follows it, with one
+> #66 (bwd/fwd 2.0–3.0× → 1.2–1.7×). **SmolLM-135M field run (2026-09-14, via the T2 importer, #69):** q8
+> base, rank 8, S=128, 512 tokens per step, the 53.7k-token docs corpus,
+> Apple M5: **Metal ≈ 300 tok/s vs CPU ≈ 67 tok/s** (4.5×), 80-step
+> validation loss 4.27723 vs 4.27724 — the gate's loss-parity criterion is
+> met, its ≥ 800 tok/s throughput target is **not**: at SmolLM's per-layer
+> shapes (0.17–0.45 GFLOP per GEMM) the dispatch floor the G1a probe
+> priced still dominates, and the attention family runs as per-thread row
+> kernels. What closes the remaining ~2.7×: `simdgroup` attention tiles,
+> fewer dispatches per layer (chain fusion, E4), GEMM tile tuning (P2). The plan below was the design; what shipped follows it, with one
 > delta: the kernel library is runtime-owned (`metal_kernels.h`) rather
 > than compiler-emitted, so CPU and GPU semantics version together.
 
