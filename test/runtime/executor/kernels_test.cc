@@ -472,6 +472,36 @@ std::vector<float> RunAtWidth(size_t threads, size_t out_size, Fn&& fill) {
               0);                                                         \
   } while (0)
 
+TEST(ParallelDeterminism, GemmNtTailPathsAreThreadCountInvariant) {
+  // #66's eight-lane NT core: K = 21 runs the 8-lane main loop AND the
+  // k % 8 tail, N = 259 runs the 4-column path AND the 1-column path across
+  // the kTileN boundary (256), M = 5 gives one ragged row chunk. Both NT
+  // variants must be bit-identical at 1 and 8 threads — the lane rule is a
+  // pure function of K.
+  const size_t M = 5, N = 259, K = 21;
+  const std::vector<float> a = RandnVector(M * K, 15);
+  const std::vector<float> bt = RandnVector(N * K, 16);
+  std::vector<int8_t> q8(N * K);
+  for (size_t i = 0; i < q8.size(); ++i)
+    q8[i] = static_cast<int8_t>((i * 53 + 7) % 255 - 127);
+  auto nt = [&](float* c) { k::GemmNT(a.data(), bt.data(), c, M, N, K); };
+  auto ntq8 = [&](float* c) {
+    k::GemmNTQ8(a.data(), q8.data(), c, M, N, K, 0.02f);
+  };
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, M * N, nt), RunAtWidth(8, M * N, nt));
+  EXPECT_BITWISE_EQ_F32(RunAtWidth(1, M * N, ntq8),
+                        RunAtWidth(8, M * N, ntq8));
+  // And the values are right: against a double reference with dequant.
+  const std::vector<float> got = RunAtWidth(1, M * N, ntq8);
+  for (size_t m = 0; m < M; ++m)
+    for (size_t n = 0; n < N; ++n) {
+      double ref = 0.0;
+      for (size_t kk = 0; kk < K; ++kk)
+        ref += static_cast<double>(a[m * K + kk]) * q8[n * K + kk];
+      EXPECT_NEAR(got[m * N + n], 0.02 * ref, 1e-4 * (1.0 + std::fabs(ref)));
+    }
+}
+
 TEST(ParallelDeterminism, GemmFamilyIsThreadCountInvariant) {
   const size_t M = 64, N = 96, K = 48;
   const std::vector<float> a = RandnVector(M * K, 11);

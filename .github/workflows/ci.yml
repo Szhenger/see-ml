@@ -452,15 +452,18 @@ jobs:
             --out out/updated_cpu.smf --seed 7 --val-frac 0.1 --backend cpu --force
           set +e
           out/pkg/model_update --model out/decoder.smf --data out/decoder_corpus.sds \
-            --out out/x.smf --backend gpu
-          test $? -eq 2
+            --out out/x.smf --backend gpu 2> out/bad.log
+          rc=$?
+          set -e
+          cat out/bad.log
+          test "$rc" -eq 2
       - name: SEEML_NO_METAL builds the stub and auto degrades to cpu
         run: |
           cp -R out/pkg out/pkg_nometal
           (cd out/pkg_nometal && SEEML_NO_METAL=1 sh build.sh)
           out/pkg_nometal/model_update --model out/decoder.smf --data out/decoder_corpus.sds \
             --out out/updated_nometal.smf --seed 7 --val-frac 0.1 --backend auto --force 2> out/nometal.log
-          grep -q 'no Metal device on this host; using cpu\|not built into this runtime' out/nometal.log
+          grep -q 'no Metal device on this host; using cpu' out/nometal.log
           grep -q 'seeml-update: backend cpu' out/nometal.log
 
   # --- Correctness: the exporter across its NumPy floor and the pinned stack -

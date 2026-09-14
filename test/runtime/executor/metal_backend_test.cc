@@ -312,6 +312,60 @@ TEST(MetalBackend, CpuInstructionsWaitForThePendingGpuWorkTheyTouch) {
   std::free(arena);
 }
 
+TEST(MetalBackend, ActivationsStayFiniteAtLargeMagnitude) {
+  // The GPU's *fast* tanh returns NaN above ~44, which through the GELU
+  // means NaN for any pre-activation past ~10.25; the library must be
+  // compiled with the precise transcendental functions. Sweep every
+  // activation forward and backward over [-40, 40] on both backends.
+  if (Skip()) return;
+  auto metal = CreateMetalBackend();
+  ASSERT_OK(metal);
+  constexpr size_t kArenaBytes = 16384, kN = 801;
+  uint8_t* arena = static_cast<uint8_t*>(std::aligned_alloc(16384, kArenaBytes));
+  ASSERT_TRUE(arena != nullptr);
+  std::memset(arena, 0, kArenaBytes);
+  float* x = reinterpret_cast<float*>(arena);          // [0, 3204)
+  float* dy = reinterpret_cast<float*>(arena + 3264);  // up to 6468
+  float* out = reinterpret_cast<float*>(arena + 6528); // up to 9732
+  for (size_t i = 0; i < kN; ++i) {
+    x[i] = -40.0f + 0.1f * static_cast<float>(i);
+    dy[i] = 0.5f + 0.001f * static_cast<float>(i);
+  }
+  ASSERT_OK((*metal)->Bind(arena, kArenaBytes, nullptr, 0, 0));
+  auto cpu = CreateCpuBackend();
+  ASSERT_OK(cpu->Bind(arena, kArenaBytes, nullptr, 0, 0));
+  const OpCode fwd[] = {OpCode::kReluFwd, OpCode::kGeluFwd, OpCode::kSiluFwd};
+  const OpCode bwd[] = {OpCode::kReluBwd, OpCode::kGeluBwd, OpCode::kSiluBwd};
+  StepParams params;
+  for (int which = 0; which < 3; ++which) {
+    for (int pass = 0; pass < 2; ++pass) {
+      UpdateInstruction ins;
+      ins.opcode = static_cast<uint16_t>(pass == 0 ? fwd[which] : bwd[which]);
+      if (pass == 0) {
+        ins.in[0] = MakeArenaRef(0);
+        ins.in[1] = MakeArenaRef(6528);
+      } else {
+        ins.in[0] = MakeArenaRef(3264);
+        ins.in[1] = MakeArenaRef(0);
+        ins.in[2] = MakeArenaRef(6528);
+      }
+      ins.out[0] = kN;
+      std::vector<float> want(kN), got(kN);
+      ASSERT_OK(cpu->Execute(ins, params));
+      std::memcpy(want.data(), out, kN * sizeof(float));
+      std::memset(out, 0x7f, kN * sizeof(float));  // NaN-ish stale bytes
+      ASSERT_OK((*metal)->Execute(ins, params));
+      ASSERT_OK((*metal)->Flush());
+      std::memcpy(got.data(), out, kN * sizeof(float));
+      for (size_t i = 0; i < kN; ++i) {
+        EXPECT_TRUE(std::isfinite(got[i]));
+        EXPECT_NEAR(got[i], want[i], 1e-4 + 2e-4 * std::fabs(want[i]));
+      }
+    }
+  }
+  std::free(arena);
+}
+
 TEST(MetalBackend, MergeDeltasMatchCpuAtTolerance) {
   if (Skip()) return;
   SmfModel m = MakeMlp(16, 32, 4, 43);

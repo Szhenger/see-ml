@@ -285,6 +285,18 @@ int main(int argc, char** argv) {
   if (!backend_kind)
     return Fail("--backend must be cpu, metal or auto, got '" + *backend_s +
                 "'");
+  // The report records the backend that actually ran (the per-backend
+  // gate keys rows by it): resolve `auto` once, the way every fixture's
+  // engine will, so the field never says "auto".
+  std::string backend_resolved;
+  {
+    rt::UpdateEngine probe;
+    if (auto ok = probe.SelectBackend(*backend_kind); !ok)
+      return Fail(ok.error());
+    backend_resolved = probe.backend_name();
+    if (!probe.backend_note().empty())
+      std::fprintf(stderr, "seeml-bench: %s\n", probe.backend_note().c_str());
+  }
   auto thread_names = SplitCsv("--threads", *threads_csv);
   if (!thread_names) return Fail(thread_names.error());
   std::vector<uint64_t> threads;
@@ -338,7 +350,7 @@ int main(int argc, char** argv) {
                "\"peak_gflops\": %.1f},\n"
                "  \"fixtures\": {",
                seeml::update::kSeemlVersion, HostString().c_str(),
-               rt::BackendKindName(*backend_kind), *lo, *hi,
+               backend_resolved.c_str(), *lo, *hi,
                *repeats, threads_csv->c_str(), peak_gflops);
 
   bool first_fixture = true;
@@ -357,8 +369,6 @@ int main(int argc, char** argv) {
     rt::UpdateEngine engine;
     if (auto ok = engine.SelectBackend(*backend_kind); !ok)
       return Fail(f->name + (": " + ok.error()));
-    if (!engine.backend_note().empty())
-      std::fprintf(stderr, "seeml-bench: %s\n", engine.backend_note().c_str());
     const auto t_load = Clock::now();
     if (auto ok = engine.LoadFromMemory(compiled->plan.data(),
                                         compiled->plan.size());

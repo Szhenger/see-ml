@@ -74,7 +74,9 @@ class ExecutorBackend {
   /// inside the plan blob (>= rodata_bytes): a GPU backend may wrap the
   /// frozen weights zero-copy only if whole pages of the blob cover them.
   /// A backend that cannot bind (no device, a buffer wrap refused) reports
-  /// why and leaves nothing half-bound.
+  /// why and leaves nothing half-bound: the PREVIOUS binding, if any,
+  /// stays intact and executable — the engine relies on it to keep a
+  /// loaded plan usable after a refused re-Load.
   [[nodiscard]] virtual std::expected<void, std::string> Bind(
       uint8_t* arena, uint64_t arena_bytes, const uint8_t* rodata,
       uint64_t rodata_bytes, uint64_t rodata_mapped_bytes) = 0;

@@ -145,6 +145,7 @@ if(APPLE)
     target_link_libraries(seeml_update_rt PUBLIC
         "-framework Metal" "-framework Foundation")
 endif()
+option(SEEML_NO_METAL "Build the Metal executor backend's stub on Apple hosts too (the G1a harness is unaffected)" OFF)
 # The Metal executor backend (G1b): the real backend on Apple hosts, the
 # stub (--backend metal is an error, auto degrades to cpu) everywhere else.
 # No non-Apple translation unit references a Metal symbol.

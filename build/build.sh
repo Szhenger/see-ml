@@ -72,19 +72,23 @@ compile runtime/executor/cpu_backend.cc       rt_cpu_backend.o
 # ObjC++ front end rejects it) — the rest of the tree is standard C++23.
 METAL_OBJS=""
 METAL_LDFLAGS=""
-if [ "$(uname)" = "Darwin" ] && [ -z "${SEEML_NO_METAL:-}" ]; then
+if [ "$(uname)" = "Darwin" ]; then
   echo "  OBJCXX runtime/executor/metal_gemm.mm"
   eval "$CXX $FLAGS -x objective-c++ -fobjc-arc -c runtime/executor/metal_gemm.mm -o build/rt_metal_gemm.o"
-  # The Metal executor backend (G1b) rides the same toolchain gate; the
-  # stub takes its place everywhere Metal does not exist.
+  METAL_OBJS="build/rt_metal_gemm.o"
+  METAL_LDFLAGS="-framework Metal -framework Foundation"
+fi
+# The Metal executor backend (G1b) exists on Darwin unless SEEML_NO_METAL=1
+# (mirroring CMake's option); the stub takes its place everywhere else. The
+# G1a harness above stays on the platform gate alone: its hardware suite
+# links it on every Mac.
+if [ "$(uname)" = "Darwin" ] && [ -z "${SEEML_NO_METAL:-}" ]; then
   echo "  OBJCXX runtime/executor/metal_backend.mm"
   eval "$CXX $FLAGS -x objective-c++ -fobjc-arc -c runtime/executor/metal_backend.mm -o build/rt_metal_backend.o"
-  METAL_OBJS="build/rt_metal_gemm.o build/rt_metal_backend.o"
-  METAL_LDFLAGS="-framework Metal -framework Foundation"
 else
   compile runtime/executor/metal_backend_stub.cc rt_metal_backend.o
-  METAL_OBJS="build/rt_metal_backend.o"
 fi
+METAL_OBJS="$METAL_OBJS build/rt_metal_backend.o"
 compile runtime/feeder/dataset.cc             dataset.o
 compile runtime/feeder/batch_pipeline.cc      batch_pipeline.o
 compile runtime/custodian/durable_io.cc       durable_io.o

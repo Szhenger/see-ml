@@ -112,10 +112,13 @@ def render_stub(page_align: int) -> str:
     /* __DATA,__data, not __TEXT,__const: the Metal backend (G1b-2) wraps
      * the plan's frozen weights as a zero-copy shared buffer, and Metal
      * leaves read-only pages unreadable from the CPU once wrapped — the
-     * embedding gather then faults. Writable pages cost nothing: the plan
-     * is hash-verified at load, and no runtime path writes through a
-     * rodata reference (the validator proves every write targets the
-     * arena). Other targets keep .rodata; nothing wraps them. */
+     * embedding gather then faults. What writable pages cost is the
+     * page-fault fail-stop against a stray write after load; the runtime
+     * re-seals the plan (re-hashes it) before merge and commit, so such a
+     * write is still refused before it can ship, and no runtime path
+     * writes through a rodata reference by construction (the validator
+     * proves every write targets the arena). Other targets keep .rodata;
+     * nothing wraps them. */
     .section __DATA,__data
 #else
     .section .rodata

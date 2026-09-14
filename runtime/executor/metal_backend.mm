@@ -6,9 +6,11 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <unistd.h>
 #include <unordered_map>
 #include <vector>
@@ -189,16 +191,23 @@ class MetalBackend final : public ExecutorBackend {
   id<MTLCommandBuffer> cmd_ = nil;
   id<MTLComputeCommandEncoder> enc_ = nil;
   std::vector<Extent> pending_reads_, pending_writes_;
-  std::unordered_map<const void*, InstructionExtents> extents_;
+  // Keyed on the instruction's 64 bytes, not its address: a caller that
+  // reuses one UpdateInstruction object with different operands (the
+  // hand-built test pattern) must never see stale extents.
+  std::unordered_map<std::string, InstructionExtents> extents_;
 };
 
-// Dimensions ride 32-bit in the kernels. Plain counts (GEMM M/N/K,
-// elementwise counts, AddBias/ReduceRows rows x cols) must fit; the
-// transformer family's packed dim words are two 32-bit halves by
-// construction and always do. A wider plan — one that could not exist on
-// the devices this targets — takes the CPU path for that instruction.
+// Dimensions AND the element indices built from them ride 32-bit in the
+// kernels. Plain counts (GEMM M/N/K, elementwise counts, AddBias/ReduceRows
+// rows x cols) and every index product (M·K, K·N, M·N; B·H·S·S for the
+// probability matrix; B·S·H·d for activations) must fit; the transformer
+// family's packed dim words are two 32-bit halves by construction, their
+// products are not. A wider plan — one that could not exist on the devices
+// this targets — takes the CPU path for that instruction.
 bool DimsFit32(up::OpCode op, const up::UpdateInstruction& ins) {
   constexpr uint64_t kMax = 0xFFFFFFFFu;
+  auto hi = [](uint64_t v) { return v >> 32; };
+  auto lo = [](uint64_t v) { return v & kMax; };
   switch (op) {
     case up::OpCode::kGemmNN:
     case up::OpCode::kGemmNT:
@@ -207,7 +216,33 @@ bool DimsFit32(up::OpCode op, const up::UpdateInstruction& ins) {
     case up::OpCode::kGemmNNQ8:
     case up::OpCode::kGemmNTQ8:
       return ins.out[0] <= kMax && ins.out[1] <= kMax && ins.out[2] <= kMax &&
-             ins.out[0] * ins.out[1] <= kMax;
+             ins.out[0] * ins.out[1] <= kMax && ins.out[0] * ins.out[2] <= kMax &&
+             ins.out[2] * ins.out[1] <= kMax;
+    case up::OpCode::kRopeFwd:
+    case up::OpCode::kRopeBwd:
+      return hi(ins.out[0]) * lo(ins.out[0]) * hi(ins.out[1]) * lo(ins.out[1]) <=
+             kMax;
+    case up::OpCode::kAttnFwd: {
+      const uint64_t B = hi(ins.out[1]), S = lo(ins.out[1]);
+      const uint64_t H = hi(ins.out[2]), d = lo(ins.out[2]);
+      return B * H * S * S <= kMax && B * S * H * d <= kMax;
+    }
+    case up::OpCode::kAttnDP:
+    case up::OpCode::kAttnDV:
+    case up::OpCode::kAttnDQ:
+    case up::OpCode::kAttnDK: {
+      const uint64_t B = hi(ins.out[0]), S = lo(ins.out[0]);
+      const uint64_t H = hi(ins.out[1]), d = lo(ins.out[1]);
+      return B * H * S * S <= kMax && B * S * H * d <= kMax;
+    }
+    case up::OpCode::kSoftmaxRowsBwd:
+    case up::OpCode::kLayerNormFwd:
+    case up::OpCode::kRmsNormFwd:
+      return hi(ins.out[0]) * lo(ins.out[0]) <= kMax;
+    case up::OpCode::kLayerNormBwd:
+      return hi(ins.out[2]) * lo(ins.out[2]) <= kMax;
+    case up::OpCode::kRmsNormBwd:
+      return hi(ins.out[1]) * lo(ins.out[1]) <= kMax;
     case up::OpCode::kAddBias:
     case up::OpCode::kReduceRows:
       return ins.out[0] <= kMax && ins.out[1] <= kMax &&
@@ -258,13 +293,22 @@ MetalBackend::Create() {
     if (!be->queue_) return std::unexpected("cannot create a command queue");
 
     MTLCompileOptions* options = [MTLCompileOptions new];
-    // Precise math: the kernel library mirrors the CPU expressions (tanh
-    // GELU, exp-based sigmoid, exact softmax) and is compared against them
-    // at tolerance; fast-math approximations would widen that gap for no
-    // throughput the training step could feel.
+    // Precise math, both halves of it: `mathMode` governs algebraic
+    // fast-math (reassociation, no NaN/inf), `mathFloatingPointFunctions`
+    // governs which transcendental variants the unqualified tanh/exp/sin/
+    // cos/sqrt calls resolve to — and the fast tanh returns NaN above
+    // ~44, which through the GELU means NaN for any pre-activation past
+    // ~10.25. The kernel library mirrors the CPU expressions and is
+    // compared against them at tolerance; both knobs must be precise.
+    // (The pre-15 `fastMathEnabled = NO` selects both at once.)
+#if defined(__MAC_15_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 150000
     if (@available(macOS 15.0, *)) {
       options.mathMode = MTLMathModeSafe;
-    } else {
+      options.mathFloatingPointFunctions =
+          MTLMathFloatingPointFunctionsPrecise;
+    } else
+#endif
+    {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
       options.fastMathEnabled = NO;
@@ -369,14 +413,13 @@ std::expected<void, std::string> MetalBackend::Bind(
 
 const InstructionExtents* MetalBackend::ExtentsOf(
     const up::UpdateInstruction& ins) {
-  // Keyed on the instruction's address: the engine's decoded streams are
-  // stable for the life of a binding, and Bind clears the cache.
-  auto it = extents_.find(&ins);
+  std::string key(reinterpret_cast<const char*>(&ins), sizeof(ins));
+  auto it = extents_.find(key);
   if (it != extents_.end()) return &it->second;
   auto ex = DescribeInstruction(ins, arena_bytes_, rodata_bytes_,
                                 up::kSeeuVersion);
   if (!ex) return nullptr;
-  return &extents_.emplace(&ins, *ex).first->second;
+  return &extents_.emplace(std::move(key), *ex).first->second;
 }
 
 bool MetalBackend::HazardWithPending(const InstructionExtents& ex) const {

@@ -273,9 +273,23 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
                               plan_size - header.rodata_offset);
       !r) {
     std::free(arena);
-    if (arena_)
-      (void)backend_->Bind(arena_, arena_bytes_, rodata_, header_.rodata_size,
-                           plan_size_ - header_.rodata_offset);
+    // The contract (backend.h) keeps the previous binding intact on a
+    // refused Bind; re-binding is belt and braces. If even that fails the
+    // engine must not claim a loaded plan over an unbound backend.
+    if (arena_) {
+      if (auto again = backend_->Bind(arena_, arena_bytes_, rodata_,
+                                      header_.rodata_size,
+                                      plan_size_ - header_.rodata_offset);
+          !again) {
+        std::free(arena_);
+        arena_ = nullptr;
+        plan_ = nullptr;
+        return diag::executing::Error(
+            "backend '" + std::string(backend_->name()) +
+            "' cannot bind the plan (" + r.error() +
+            ") and lost the previous one (" + again.error() + ")");
+      }
+    }
     return diag::executing::Error("backend '" +
                                   std::string(backend_->name()) +
                                   "' cannot bind the plan: " + r.error());
@@ -676,6 +690,15 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
 
 std::expected<void, std::string> UpdateEngine::RunMerge() {
   if (!arena_) return diag::executing::Error("no plan loaded");
+  // Re-seal the plan before its frozen weights are merged and committed.
+  // The blob is read-only by contract but lives in ordinary memory — in a
+  // packed Apple package on writable pages, so the GPU can share them —
+  // and a stray write since load must fail here, not ship as corrupted
+  // deltas. One parallel hash of the plan, once per update.
+  if (up::PlanSelfHash(plan_, plan_size_, offsetof(up::PlanHeader, plan_hash)) !=
+      header_.plan_hash)
+    return diag::executing::Error(
+        "plan bytes changed since load — refusing to merge");
   if (auto r = Execute(merge_program_); !r) return r;
   // Finiteness gate on the materialized deltas. The training loop's loss
   // guard reads the loss written BEFORE each step's backward + optimizer,

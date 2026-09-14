@@ -120,7 +120,7 @@ model_update --model model.smf --data corpus.sds --out updated.smf \
 | `--backend cpu\|metal\|auto` | the executor (cpu; or `$SEEML_BACKEND`). `cpu` is the bitwise-deterministic reference and builds anywhere; `metal` runs the update on an Apple GPU and is an error where none exists; `auto` takes the GPU when present and says so, else cpu |
 | `--min-improvement F` | commit only if the gated loss fell by at least the fraction F of its initial value (0 = any strict fall) |
 | `--require-accuracy` | additionally require held-out accuracy not to drop; a usage error on plans without class labels or without a validation split |
-| `--report report.json` | write the backend, the gate parameters, the loss and accuracy pairs and the verdict as JSON |
+| `--report report.json` | write the backend, the gate parameters, the loss and accuracy pairs, the verdict and whether the commit landed as JSON (written last; an unwritable path is a warning, the exit code still carries the verdict) |
 | `--force` | commit even if the gate shows no improvement |
 
 What happens, in order:
