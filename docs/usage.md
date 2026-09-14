@@ -47,6 +47,16 @@ export_token_decoder_smf(embedding, blocks, head, "decoder.smf",
 export_token_sds(records, "decoder_corpus.sds")    # records: [N, S+1] i32
 ```
 
+**Importing a Hugging Face decoder.** A local Llama-class checkpoint directory (`llama`, `qwen2`, SmolLM2 — `config.json` plus `model.safetensors` or its shard index) becomes a token-native SMF with NumPy alone:
+
+```bash
+huggingface-cli download HuggingFaceTB/SmolLM-135M            # once; any local dir works
+python3 tool/export_model.py --hf <model_dir> smollm.smf --seq-len 128 \
+  --text-corpus docs.txt docs.sds --hf-parity
+```
+
+The walk transposes every Linear to `MatMul(x, W)` layout, repeats grouped-query k/v heads to one per query head (the format carries no KV heads yet), permutes q/k features within each head from Hugging Face's rotate-half RoPE pairs `(c, c + d/2)` to SeeML's interleaved `(2c, 2c+1)` (the scores are a dot product over `d`, so a permutation applied to both sides is exact), carries `rope_theta` per Rope op, adds Qwen2's q/k/v biases as `AddBias` ops, and ties `w_head` to the embedding when the checkpoint does. What it refuses, loudly: a non-SwiGLU block, `rope_scaling`, MLP biases, a `--seq-len` past `max_position_embeddings`, and an `rms_norm_eps` other than the runtime's fixed `1e-5` (Qwen2's `1e-6` is a drift; `--allow-eps-drift` accepts it knowing step 0 will not equal the source model — the attribute is P7, #96). Two tier-2 extras: `--text-corpus` tokenizes a UTF-8 file with the checkpoint's `tokenizer.json` into `S + 1`-token records (needs `tokenizers`), and `--hf-parity` runs a NumPy forward with SeeML's exact semantics against `transformers` on seeded random tokens and prints the max logit delta (SmolLM-135M: `6.4e-05` at `S = 128`; needs torch + transformers). Neither is needed to import.
+
 Each corpus record is `S + 1` ids: the runtime feeds the first `S` and derives next-token labels from the shifted view, and the embedding gathers on-device. `python3 tool/export_model.py --demo-decoder out/` writes a working example of both files — `decoder.smf` and `decoder_corpus.sds` (NumPy only — no PyTorch needed); the corpus is deliberately *not* named `corpus.sds`, so both demos can share one output directory. Pass those names to the compile and update steps below in place of `model.smf` / `corpus.sds`. Remember that `--data-batch` counts *rows* (tokens), so it must be a multiple of `seq_len`.
 
 ## Step 2: Compile the Update Plan (build host)

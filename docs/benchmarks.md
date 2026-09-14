@@ -74,7 +74,7 @@ shapes — the gap the C2 SIMD and G1b Metal projects are priced against.
 | **softmax-xent μs at vocab ∈ {1k, 32k, 128k}** | fwd+bwd per row | the chunked-CE project (pillar A3): this curve IS the justification |
 | **q8 dequant overhead** | q8 GEMM / f32 GEMM time ratio | NF4/int4 design: if int8 dequant already costs >15%, block-wise 4-bit needs a fused design, not a naive port |
 | **Metal vs CPU GEMM** | the G1a harness at real shapes | the G1b engine-integration go/no-go: dispatch overhead amortization point (at which M×N×K does GPU win?) |
-| **backend split** | `seeml-bench --backend metal` vs `cpu` on the same fixtures; `bench.json` carries `"backend"` and the gate keys rows by it | where the GPU pays: on this suite's tiny fixtures Metal is 0.65–1.23× the CPU (dispatch floor), on a D=512 / 8-head / S=128 4-block decoder 2.1× (2,480 vs 1,180 tok/s, Apple M5) — the frontier row must be measured at frontier shapes |
+| **backend split** | `seeml-bench --backend metal` vs `cpu` on the same fixtures; `bench.json` carries `"backend"` and the gate keys rows by it | where the GPU pays: on this suite's tiny fixtures Metal is 0.65–1.23× the CPU (dispatch floor), on a D=512 / 8-head / S=128 4-block decoder 2.1× (2,480 vs 1,180 tok/s, Apple M5); on SmolLM-135M (q8, r8, S=128) 4.5× (300 vs 67 tok/s) against MLX's 1,605 — the frontier row must be measured at frontier shapes |
 
 ## Tier C — Memory (the gate that refuses compiles)
 

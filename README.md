@@ -82,11 +82,13 @@ What SeeML can train today, stated up front:
   and a per-op RoPE base θ (SMF v5)
   — token-native decoders train end to end: the corpus carries i32 token
   ids (SDS v2), next-token labels are derived from the shifted view, and
-  the frozen embedding gathers on-device. The PyTorch exporter accepts an
-  `nn.Sequential` of `Linear`/activation/`LayerNorm` modules;
-  `export_decoder_smf` emits pre-embedded decoder stacks and
-  `export_token_decoder_smf` + `export_token_sds` emit the token-native
-  form (`--demo-decoder` writes a working pair). 
+  the frozen embedding gathers on-device. The exporter imports Llama-class
+  Hugging Face checkpoints (`--hf`: llama / qwen2 / SmolLM2, GQA repeated
+  to MHA, rotate-half RoPE permuted to interleaved pairs, NumPy only;
+  SmolLM-135M reproduces `transformers`' logits to 6.4e-05), accepts an
+  `nn.Sequential` of `Linear`/activation/`LayerNorm` modules, and
+  `export_decoder_smf` / `export_token_decoder_smf` + `export_token_sds`
+  emit hand-built decoders (`--demo-decoder` writes a working pair). 
   The compiler's intermediate representation additionally models 2-D convolution 
   (lowered to matrix multiplication via im2col), but
   grouped/dilated forms are rejected and the SMF container does not yet

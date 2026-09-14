@@ -20,7 +20,7 @@ tool/
 
 ## What each one is for
 
-**`export_model.py`** is the on-ramp: it converts a PyTorch `nn.Sequential`
+**`export_model.py`** is the on-ramp: with `--hf` it imports a Llama-class Hugging Face checkpoint directory (NumPy only — the safetensors container is parsed by hand; `--hf-parity` and `--text-corpus` are optional tier-2 extras on torch + transformers / tokenizers), and it converts a PyTorch `nn.Sequential`
 (or a decoder stack — pre-embedded via `export_decoder_smf`, or token-native
 SMF v4 via `export_token_decoder_smf` + `export_token_sds`) into the SMF
 model container and turns arrays into an SDS corpus — the only place

@@ -39,6 +39,16 @@ Usage:
                                  seq_len=S, num_heads=H)
         export_token_sds(token_records, "corpus.sds")  # [N, S+1] i32
 
+    python3 export_model.py --hf <model_dir> out.smf --seq-len S
+        Imports a Llama-class Hugging Face checkpoint directory (llama,
+        qwen2, SmolLM2: config.json + safetensors) as a token-native SMF
+        decoder — NumPy only. Adds: --text-corpus text.txt out.sds
+        (tokenizes with the checkpoint's tokenizer.json; needs the
+        `tokenizers` package), --hf-parity (max |Δ logits| of the SeeML
+        forward vs transformers; needs torch + transformers), and
+        --allow-eps-drift (a checkpoint whose rms_norm_eps is not the
+        runtime's 1e-5).
+
 Supported modules inside an nn.Sequential:
     nn.Linear     -> MatMul(x, W[in,out]) + AddBias(b[out])  (W stored
                      transposed from PyTorch's [out, in] layout)
@@ -49,6 +59,8 @@ Supported modules inside an nn.Sequential:
 """
 
 import argparse
+import os
+import json
 import io
 import struct
 import sys
@@ -328,7 +340,17 @@ def _emit_decoder_graph(b, blocks, head, num_heads: int, prev: str,
         b.add_op(OP_RMSNORM, p + "ln1", [prev, p + "ln1_g"], p + "n1")
         for w in ("wq", "wk", "wv"):
             tensor(p + w, blk[w])
-            b.add_op(OP_MATMUL, p + "mm_" + w, [p + "n1", p + w], p + w[1])
+            # Optional projection bias (Qwen2-class attention_bias): a rank-1
+            # AddBias after the MatMul; absent for Llama-class blocks.
+            bias = blk.get("b" + w[1])
+            if bias is None:
+                b.add_op(OP_MATMUL, p + "mm_" + w, [p + "n1", p + w], p + w[1])
+            else:
+                tensor(p + "b" + w[1], bias)
+                b.add_op(OP_MATMUL, p + "mm_" + w, [p + "n1", p + w],
+                         p + w[1] + "_mm")
+                b.add_op(OP_ADDBIAS, p + "ab_" + w, [p + w[1] + "_mm",
+                                                     p + "b" + w[1]], p + w[1])
         b.add_op(OP_ROPE, p + "rope_q", [p + "q"], p + "qr", attr0=num_heads,
                  attr1=base_bits)
         b.add_op(OP_ROPE, p + "rope_k", [p + "k"], p + "kr", attr0=num_heads,
@@ -417,6 +439,383 @@ def export_token_decoder_smf(embedding, blocks, head, path: str, seq_len: int,
           f"heads={num_heads}, vocab={emb.shape[0]}, token-native, "
           f"rope_base={float(rope_base):g})")
 
+
+
+# --- Hugging Face import (roadmap Project 4, Phase T2) ---------------------
+# A Llama-class checkpoint directory (config.json + model.safetensors, or an
+# index over shards) becomes the SeeML token-native decoder without torch,
+# transformers or safetensors: the container is parsed by hand (it is a
+# JSON header plus raw little-endian tensors) and the walk is NumPy. What
+# the walk does, weight by weight:
+#   [out, in] -> [in, out]      every Linear is transposed for MatMul(x, W)
+#   GQA -> MHA                  k/v projections are repeated per query head
+#                               (head h reads kv head h // (H / H_kv)) until
+#                               the format carries KV heads natively
+#   rotate-half -> interleaved  HF rotates pairs (c, c + d/2); SeeML rotates
+#                               (2c, 2c+1) at the same frequency base^(-2c/d),
+#                               so q and k output features are permuted
+#                               within each head: SeeML[2c] = HF[c],
+#                               SeeML[2c+1] = HF[c + d/2]. Scores are a dot
+#                               product over d, invariant to a permutation
+#                               applied to both; v and o are untouched.
+#   rope_theta -> rope_base     per Rope op (SMF v5 attr1)
+#   tied lm_head                w_head = embedding^T when lm_head is absent
+#   RMSNorm eps                 the runtime's norms are fixed at 1e-5 (P7,
+#                               #96, adds the attribute); a checkpoint with
+#                               another eps is refused unless the drift is
+#                               accepted explicitly.
+# The parity check (--hf-parity) runs the SeeML-semantics NumPy forward
+# below against `transformers` when it is installed — a second, independent
+# implementation of every op the compiled plan will execute.
+
+RUNTIME_NORM_EPS = 1e-5  # runtime/executor/normalization.cc; P7 (#96) lifts it
+
+_SAFETENSORS_DTYPES = {"F32": "<f4", "F16": "<f2", "BF16": "<u2", "F64": "<f8"}
+
+
+def read_safetensors(path: str):
+    """{name: float32 array} from one safetensors file (F32/F16/BF16/F64).
+
+    The format is an 8-byte little-endian header length, a JSON header
+    mapping tensor names to {dtype, shape, data_offsets}, then the raw
+    tensor bytes. BF16 is widened by placing the 16 bits in the top half
+    of a float32 — exact, since bf16 is float32 with the low mantissa
+    dropped."""
+    import numpy as np
+
+    with open(path, "rb") as f:
+        raw = f.read()
+    if len(raw) < 8:
+        raise ValueError(f"{path}: not a safetensors file (too short)")
+    n = struct.unpack("<Q", raw[:8])[0]
+    if n > len(raw) - 8:
+        raise ValueError(f"{path}: safetensors header runs past the file")
+    header = json.loads(raw[8:8 + n].decode("utf-8"))
+    base = 8 + n
+    out = {}
+    for name, info in header.items():
+        if name == "__metadata__":
+            continue
+        dtype = info["dtype"]
+        if dtype not in _SAFETENSORS_DTYPES:
+            raise ValueError(f"{path}: tensor '{name}' has dtype {dtype}; "
+                             "the importer reads F32/F16/BF16/F64 only")
+        b, e = info["data_offsets"]
+        if b > e or base + e > len(raw):
+            raise ValueError(f"{path}: tensor '{name}' offsets run past "
+                             "the file")
+        arr = np.frombuffer(raw, dtype=_SAFETENSORS_DTYPES[dtype],
+                            count=(e - b) // np.dtype(
+                                _SAFETENSORS_DTYPES[dtype]).itemsize,
+                            offset=base + b)
+        if dtype == "BF16":
+            arr = (arr.astype(np.uint32) << 16).view(np.float32)
+        else:
+            arr = arr.astype(np.float32)
+        out[name] = arr.reshape(info["shape"])
+    return out
+
+
+def load_hf_checkpoint(model_dir: str):
+    """(config, {name: float32 array}) from a Hugging Face model directory:
+    config.json plus model.safetensors or the shards its index names."""
+    if not os.path.isdir(model_dir):
+        raise ValueError(f"{model_dir}: not a directory (pass a local "
+                         "checkout — `huggingface-cli download <id>` first)")
+    cfg_path = os.path.join(model_dir, "config.json")
+    if not os.path.isfile(cfg_path):
+        raise ValueError(f"{model_dir}: no config.json")
+    with open(cfg_path) as f:
+        config = json.load(f)
+    single = os.path.join(model_dir, "model.safetensors")
+    index = os.path.join(model_dir, "model.safetensors.index.json")
+    tensors = {}
+    if os.path.isfile(single):
+        tensors.update(read_safetensors(single))
+    elif os.path.isfile(index):
+        with open(index) as f:
+            shards = sorted(set(json.load(f)["weight_map"].values()))
+        for shard in shards:
+            tensors.update(read_safetensors(os.path.join(model_dir, shard)))
+    else:
+        raise ValueError(f"{model_dir}: no model.safetensors (nor an index "
+                         "over shards); .bin checkpoints are not read")
+    return config, tensors
+
+
+def _rope_interleave_order(d: int):
+    """HF feature index for each SeeML feature within a head: SeeML pair
+    (2c, 2c+1) <- HF (c, c + d/2)."""
+    import numpy as np
+
+    order = np.empty(d, dtype=np.int64)
+    order[0::2] = np.arange(d // 2)
+    order[1::2] = np.arange(d // 2) + d // 2
+    return order
+
+
+def hf_llama_to_seeml(config: dict, tensors: dict, seq_len: int,
+                      allow_eps_drift: bool = False):
+    """Convert a Llama-class checkpoint (llama / qwen2 / SmolLM2) into the
+    embedding / blocks / head arrays the token-native exporter takes.
+    Returns a dict with those plus num_heads, rope_base, and the notes
+    printed to the user."""
+    import numpy as np
+
+    mt = config.get("model_type")
+    if mt not in ("llama", "qwen2"):
+        raise ValueError(f"model_type '{mt}' is not a Llama-class decoder "
+                         "the importer walks (llama, qwen2)")
+    if config.get("hidden_act", "silu") != "silu":
+        raise ValueError(f"hidden_act '{config.get('hidden_act')}': the "
+                         "SeeML decoder block is SwiGLU (silu) only")
+    if config.get("rope_scaling") not in (None, {}):
+        raise ValueError("rope_scaling is set; the runtime's RoPE is the "
+                         "plain base^(-2c/d) recurrence")
+    if config.get("mlp_bias", False):
+        raise ValueError("mlp_bias=true: the SeeML MLP has no biases")
+    D = int(config["hidden_size"])
+    H = int(config["num_attention_heads"])
+    Hkv = int(config.get("num_key_value_heads") or H)
+    F = int(config["intermediate_size"])
+    L = int(config["num_hidden_layers"])
+    V = int(config["vocab_size"])
+    eps = float(config.get("rms_norm_eps", 1e-6))
+    theta = float(config.get("rope_theta", DEFAULT_ROPE_BASE))
+    max_pos = int(config.get("max_position_embeddings", seq_len))
+    if D % H != 0:
+        raise ValueError(f"hidden_size {D} is not a multiple of "
+                         f"num_attention_heads {H}")
+    d = D // H
+    head_dim = int(config.get("head_dim") or d)
+    if head_dim != d:
+        raise ValueError(f"head_dim {head_dim} != hidden_size / heads {d}: "
+                         "the SeeML attention geometry is H x (D / H)")
+    if d % 2 != 0:
+        raise ValueError(f"head width {d} is odd; RoPE needs pairs")
+    if H % Hkv != 0:
+        raise ValueError(f"num_attention_heads {H} is not a multiple of "
+                         f"num_key_value_heads {Hkv}")
+    if seq_len < 1:
+        raise ValueError("--seq-len must be >= 1")
+    if seq_len > max_pos:
+        raise ValueError(f"--seq-len {seq_len} exceeds the checkpoint's "
+                         f"max_position_embeddings {max_pos}")
+    notes = []
+    if abs(eps - RUNTIME_NORM_EPS) > 0:
+        msg = (f"rms_norm_eps {eps:g} differs from the runtime's fixed "
+               f"{RUNTIME_NORM_EPS:g} (P7, #96, adds the attribute)")
+        if not allow_eps_drift:
+            raise ValueError(msg + "; pass --allow-eps-drift to import "
+                             "anyway (step 0 will not equal the source "
+                             "model exactly)")
+        notes.append("accepted eps drift: " + msg)
+    if Hkv != H:
+        notes.append(f"GQA: {Hkv} kv heads repeated to {H} query heads "
+                     "(the format carries no kv heads yet)")
+
+    def take(name):
+        if name not in tensors:
+            raise ValueError(f"checkpoint lacks tensor '{name}'")
+        return tensors[name]
+
+    order = _rope_interleave_order(d)
+    rep = H // Hkv
+    kv_of = np.arange(H) // rep  # kv head serving each query head
+
+    def q_cols(w):  # [H*d, D] -> [D, H*d] with the RoPE permutation
+        return np.ascontiguousarray(
+            w.T.reshape(D, H, d)[:, :, order].reshape(D, H * d))
+
+    def kv_cols(w, permute):  # [Hkv*d, D] -> repeated + (optionally) permuted
+        t = w.T.reshape(D, Hkv, d)[:, kv_of, :]
+        if permute:
+            t = t[:, :, order]
+        return np.ascontiguousarray(t.reshape(D, H * d))
+
+    def q_bias(bv):
+        return np.ascontiguousarray(bv.reshape(H, d)[:, order].reshape(H * d))
+
+    def kv_bias(bv, permute):
+        t = bv.reshape(Hkv, d)[kv_of, :]
+        if permute:
+            t = t[:, order]
+        return np.ascontiguousarray(t.reshape(H * d))
+
+    blocks = []
+    for i in range(L):
+        p = f"model.layers.{i}."
+        blk = {
+            "ln1_g": take(p + "input_layernorm.weight"),
+            "wq": q_cols(take(p + "self_attn.q_proj.weight")),
+            "wk": kv_cols(take(p + "self_attn.k_proj.weight"), True),
+            "wv": kv_cols(take(p + "self_attn.v_proj.weight"), False),
+            "wo": np.ascontiguousarray(take(p + "self_attn.o_proj.weight").T),
+            "ln2_g": take(p + "post_attention_layernorm.weight"),
+            "w_gate": np.ascontiguousarray(take(p + "mlp.gate_proj.weight").T),
+            "w_up": np.ascontiguousarray(take(p + "mlp.up_proj.weight").T),
+            "w_down": np.ascontiguousarray(take(p + "mlp.down_proj.weight").T),
+        }
+        if p + "self_attn.q_proj.bias" in tensors:  # Qwen2-class
+            blk["bq"] = q_bias(take(p + "self_attn.q_proj.bias"))
+            blk["bk"] = kv_bias(take(p + "self_attn.k_proj.bias"), True)
+            blk["bv"] = kv_bias(take(p + "self_attn.v_proj.bias"), False)
+        if p + "self_attn.o_proj.bias" in tensors:
+            raise ValueError("o_proj has a bias; the SeeML block has none")
+        blocks.append(blk)
+    emb = np.ascontiguousarray(take("model.embed_tokens.weight"))
+    if emb.shape != (V, D):
+        raise ValueError(f"embedding is {emb.shape}, expected {(V, D)}")
+    if "lm_head.weight" in tensors:
+        w_head = np.ascontiguousarray(take("lm_head.weight").T)
+        notes.append("untied lm_head")
+    else:
+        w_head = np.ascontiguousarray(emb.T)
+        notes.append("tied lm_head (w_head = embedding^T; the merged head "
+                     "adapter is not written back into the embedding)")
+    head = {"lnf_g": take("model.norm.weight"), "w_head": w_head}
+    return {"embedding": emb, "blocks": blocks, "head": head,
+            "num_heads": H, "rope_base": theta, "seq_len": seq_len,
+            "notes": notes, "vocab": V, "dim": D}
+
+
+def export_hf_decoder(model_dir: str, out_path: str, seq_len: int,
+                      allow_eps_drift: bool = False):
+    """--hf: import a Llama-class checkpoint and write the SMF."""
+    config, tensors = load_hf_checkpoint(model_dir)
+    conv = hf_llama_to_seeml(config, tensors, seq_len,
+                             allow_eps_drift=allow_eps_drift)
+    for note in conv["notes"]:
+        print(f"hf import: {note}", file=sys.stderr)
+    export_token_decoder_smf(conv["embedding"], conv["blocks"], conv["head"],
+                             out_path, seq_len=seq_len,
+                             num_heads=conv["num_heads"],
+                             rope_base=conv["rope_base"])
+    return conv
+
+
+def reference_decoder_logits(embedding, blocks, head, num_heads: int,
+                             rope_base: float, tokens):
+    """The SeeML decoder's semantics in NumPy: the forward the compiled
+    plan executes (RMSNorm at the runtime's eps, interleaved RoPE with the
+    kernel's frequency recurrence, causal softmax, SwiGLU), for parity
+    checks. tokens: int array [B, S]; returns float32 logits [B, S, V]."""
+    import numpy as np
+
+    tok = np.asarray(tokens)
+    B, S = tok.shape
+    H = num_heads
+    x = np.asarray(embedding, np.float32)[tok]  # [B, S, D]
+    D = x.shape[-1]
+    d = D // H
+
+    def rmsnorm(v, g):
+        rs = 1.0 / np.sqrt(np.mean(v.astype(np.float32) ** 2, axis=-1,
+                                   keepdims=True) + RUNTIME_NORM_EPS)
+        return (v * rs * g).astype(np.float32)
+
+    # angle(s, c) = s * base^(-2c/d) by the kernel's multiplicative recurrence
+    step = np.float32(rope_base) ** np.float32(-2.0 / d)
+    freq = np.empty(d // 2, np.float32)
+    f = np.float32(1.0)
+    for c in range(d // 2):
+        freq[c] = f
+        f = np.float32(f * step)
+    theta = np.arange(S, dtype=np.float32)[:, None] * freq[None, :]  # [S, d/2]
+    cs, sn = np.cos(theta), np.sin(theta)
+
+    def rope(v):  # [B, S, H*d]
+        v = v.reshape(B, S, H, d)
+        a, b = v[..., 0::2], v[..., 1::2]
+        c_, s_ = cs[None, :, None, :], sn[None, :, None, :]
+        out = np.empty_like(v)
+        out[..., 0::2] = a * c_ - b * s_
+        out[..., 1::2] = a * s_ + b * c_
+        return out.reshape(B, S, H * d)
+
+    mask = np.triu(np.ones((S, S), dtype=bool), 1)
+    for blk in blocks:
+        n1 = rmsnorm(x, blk["ln1_g"])
+        q = n1 @ blk["wq"] + (blk["bq"] if "bq" in blk else 0)
+        k = n1 @ blk["wk"] + (blk["bk"] if "bk" in blk else 0)
+        v = n1 @ blk["wv"] + (blk["bv"] if "bv" in blk else 0)
+        q, k = rope(q), rope(k)
+        qh = q.reshape(B, S, H, d).transpose(0, 2, 1, 3)
+        kh = k.reshape(B, S, H, d).transpose(0, 2, 1, 3)
+        vh = v.reshape(B, S, H, d).transpose(0, 2, 1, 3)
+        scores = (qh @ kh.transpose(0, 1, 3, 2)) / np.float32(np.sqrt(d))
+        scores = np.where(mask, np.float32(-np.inf), scores)
+        scores = scores - scores.max(axis=-1, keepdims=True)
+        p = np.exp(scores)
+        p = p / p.sum(axis=-1, keepdims=True)
+        a = (p @ vh).transpose(0, 2, 1, 3).reshape(B, S, H * d)
+        x = x + a @ blk["wo"]
+        n2 = rmsnorm(x, blk["ln2_g"])
+        g = n2 @ blk["w_gate"]
+        u = n2 @ blk["w_up"]
+        x = x + ((g / (1.0 + np.exp(-g))) * u) @ blk["w_down"]
+    nf = rmsnorm(x, head["lnf_g"])
+    return (nf @ head["w_head"]).astype(np.float32)
+
+
+def hf_parity(model_dir: str, conv: dict, batch: int = 2, seed: int = 0):
+    """max |Δ logits| between the SeeML-semantics NumPy forward of the
+    converted arrays and `transformers`' forward of the checkpoint on
+    seeded random tokens. Needs torch + transformers (tier 2)."""
+    import numpy as np
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM
+    except ImportError as e:
+        raise RuntimeError("--hf-parity needs torch and transformers "
+                           f"({e.name} is not installed)") from e
+
+    rng = np.random.default_rng(seed)
+    tokens = rng.integers(0, conv["vocab"], (batch, conv["seq_len"]),
+                          dtype=np.int64)
+    try:  # transformers >= 5 spells the keyword `dtype`; older, `torch_dtype`
+        model = AutoModelForCausalLM.from_pretrained(model_dir,
+                                                     dtype=torch.float32)
+    except TypeError:
+        model = AutoModelForCausalLM.from_pretrained(model_dir,
+                                                     torch_dtype=torch.float32)
+    model.eval()
+    with torch.no_grad():
+        want = model(torch.from_numpy(tokens)).logits.float().numpy()
+    got = reference_decoder_logits(conv["embedding"], conv["blocks"],
+                                   conv["head"], conv["num_heads"],
+                                   conv["rope_base"], tokens)
+    return float(np.max(np.abs(got - want))), float(np.max(np.abs(want)))
+
+
+def export_text_corpus(model_dir: str, text_path: str, out_path: str,
+                       seq_len: int, vocab: int):
+    """--text-corpus: tokenize a text file with the checkpoint's
+    tokenizer.json and write consecutive (seq_len + 1)-token records
+    (the remainder is dropped). Needs the `tokenizers` package (tier 2)."""
+    import numpy as np
+    try:
+        from tokenizers import Tokenizer
+    except ImportError as e:
+        raise RuntimeError("--text-corpus needs the `tokenizers` package "
+                           "(pip install tokenizers)") from e
+    tok_path = os.path.join(model_dir, "tokenizer.json")
+    if not os.path.isfile(tok_path):
+        raise ValueError(f"{model_dir}: no tokenizer.json for --text-corpus")
+    with open(text_path, encoding="utf-8") as f:
+        text = f.read()
+    ids = np.asarray(Tokenizer.from_file(tok_path).encode(text).ids,
+                     dtype=np.int64)
+    if ids.size and (ids.min() < 0 or ids.max() >= vocab):
+        raise ValueError("tokenizer produced ids outside the model's vocab")
+    rec = seq_len + 1
+    n = ids.size // rec
+    if n == 0:
+        raise ValueError(f"{text_path}: {ids.size} tokens is fewer than one "
+                         f"record of {rec}")
+    export_token_sds(ids[:n * rec].reshape(n, rec).astype(np.int32), out_path)
+    print(f"text corpus: {ids.size} tokens -> {n} records of {rec}",
+          file=sys.stderr)
 
 def export_sds(inputs, labels, path: str, label_kind: int = 1):
     """inputs: float32 array [N, D]; labels: int32 [N] (kind 1),
@@ -609,6 +1008,23 @@ if __name__ == "__main__":
     parser.add_argument("--corpus", nargs=2, metavar=("DATA", "OUT_SDS"),
                         help="convert a .npz/.npy into an SDS corpus "
                              "(see the usage text above)")
+    parser.add_argument("--hf", nargs=2, metavar=("MODEL_DIR", "OUT_SMF"),
+                        help="import a Llama-class Hugging Face checkpoint "
+                             "directory (llama / qwen2 / SmolLM2; config.json "
+                             "+ safetensors) as a token-native decoder; needs "
+                             "--seq-len; NumPy only")
+    parser.add_argument("--allow-eps-drift", action="store_true",
+                        help="--hf only: import a checkpoint whose "
+                             "rms_norm_eps differs from the runtime's 1e-5")
+    parser.add_argument("--hf-parity", action="store_true",
+                        help="--hf only: after the export, compare the "
+                             "SeeML-semantics NumPy forward against "
+                             "transformers (needs torch + transformers)")
+    parser.add_argument("--text-corpus", nargs=2,
+                        metavar=("TEXT", "OUT_SDS"),
+                        help="--hf only: tokenize a UTF-8 text file with the "
+                             "checkpoint's tokenizer.json into (seq-len + 1)"
+                             "-token records (needs the tokenizers package)")
     parser.add_argument("--seed", type=int, metavar="N",
                         help="demo RNG seed for weights and corpora (0)")
     parser.add_argument("--samples", type=int, metavar="N",
@@ -628,8 +1044,8 @@ if __name__ == "__main__":
     parser.add_argument("--heads", type=int, metavar="N",
                         help="--demo-decoder only: attention heads (4)")
     parser.add_argument("--seq-len", type=int, metavar="N",
-                        help="--demo-decoder only: compiled sequence "
-                             "length (8)")
+                        help="compiled sequence length: --demo-decoder (8) "
+                             "or --hf (required)")
     parser.add_argument("--blocks", type=int, metavar="N",
                         help="--demo-decoder only: decoder blocks (2)")
     parser.add_argument("--ffn", type=int, metavar="N",
@@ -645,7 +1061,7 @@ if __name__ == "__main__":
         except ValueError as e:
             parser.error(f"--rope-base: {e}")
 
-    if not args.demo and not args.demo_decoder and not args.corpus:
+    if not (args.demo or args.demo_decoder or args.corpus or args.hf):
         parser.print_help()
         sys.exit(0)
 
@@ -661,8 +1077,15 @@ if __name__ == "__main__":
     _require(args.demo, "--demo",
              depth=args.depth, corpus_kind=args.corpus_kind)
     _require(args.demo_decoder, "--demo-decoder", vocab=args.vocab,
-             heads=args.heads, seq_len=args.seq_len, blocks=args.blocks,
-             ffn=args.ffn, rope_base=args.rope_base)
+             heads=args.heads, blocks=args.blocks, ffn=args.ffn,
+             rope_base=args.rope_base)
+    _require(args.demo_decoder or args.hf, "--demo-decoder or --hf",
+             seq_len=args.seq_len)
+    _require(args.hf, "--hf",
+             allow_eps_drift=args.allow_eps_drift or None,
+             hf_parity=args.hf_parity or None, text_corpus=args.text_corpus)
+    if args.hf and args.seq_len is None:
+        parser.error("--hf requires --seq-len (the compiled sequence length)")
     _require(args.demo or args.demo_decoder, "--demo or --demo-decoder",
              width=args.width, samples=args.samples, seed=args.seed)
     for name in ("samples", "width", "depth", "vocab", "heads", "seq_len",
@@ -694,3 +1117,19 @@ if __name__ == "__main__":
                                  else DEFAULT_ROPE_BASE))
     if args.corpus:
         _export_corpus(args.corpus[0], args.corpus[1])
+    if args.hf:
+        try:
+            conv = export_hf_decoder(args.hf[0], args.hf[1], args.seq_len,
+                                     allow_eps_drift=args.allow_eps_drift)
+            if args.text_corpus:
+                export_text_corpus(args.hf[0], args.text_corpus[0],
+                                   args.text_corpus[1], args.seq_len,
+                                   conv["vocab"])
+            if args.hf_parity:
+                delta, scale = hf_parity(args.hf[0], conv)
+                print(f"hf parity: max |Δ logits| = {delta:.3g} "
+                      f"(max |logits| {scale:.3g}) vs transformers",
+                      file=sys.stderr)
+        except (ValueError, RuntimeError) as e:
+            print(f"export_model.py: --hf: {e}", file=sys.stderr)
+            sys.exit(2)
