@@ -168,7 +168,7 @@ The VJP registry is a table of small theorems. A few bits of vocabulary for the 
 | `Y = LN(X; γ, β)` | `dX` from cached mean/rstd (γ, β frozen by design) | `sc_low.layer_norm_grad` |
 | `loss = xent(logits, y)` | `dlogits = seed·(softmax(logits) − onehot(y))/N` | `sc_low.softmax_xent_grad` |
 | `loss = mse(p, t)` | `dp = seed·2(p − t)/count` | `sc_low.mse_grad` |
-| `loss = KL(student ∥ teacher)` | `dlogits = seed·(p_s − p_t)/(N·T)` | `sc_low.kl_grad` |
+| `loss = T²·KL(teacher ∥ student)` | `dlogits = seed·T·(p_s − p_t)/N` | `sc_low.kl_grad` |
 
 Two of these deserve a remark. The softmax-cross-entropy gradient `probs − onehot` is one of the loveliest results in the field — the messy derivative of a log of a softmax collapses into a subtraction — and it's why the forward op keeps its probabilities around. And the matmul rules explain two-thirds of the GEMM variants the runtime carries: training needs `NT` (`dC @ Wᵀ`) and `TN` (`Xᵀ @ dC`) as first-class citizens, not just plain `NN`.
 

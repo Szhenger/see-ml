@@ -97,7 +97,8 @@ void MseBwd(const float* pred, const float* target, const float* seed,
 }
 
 void KLDistillFwd(const float* s_logits, const float* t_logits, float* loss,
-                  float* p_s, float* p_t, size_t N, size_t C, float T) {
+                  float* p_s, float* p_t, size_t N, size_t C, float T,
+                  float loss_scale) {
   const float inv_T = 1.0f / T;
   const size_t grain = RowGrain(C, kGrainMath);
   double partials[up::kMaxParallelChunks] = {};
@@ -128,12 +129,19 @@ void KLDistillFwd(const float* s_logits, const float* t_logits, float* loss,
   double total = 0.0;
   const size_t chunks = up::ParallelChunkCount(N, grain);
   for (size_t c = 0; c < chunks; ++c) total += partials[c];
-  *loss = static_cast<float>(total / static_cast<double>(N));
+  // The mean divergence is rounded to f32 first, then scaled: with
+  // loss_scale == 1.0f the multiply is exact, so pre-v8 plans (which carry
+  // no scale) produce the same bits as before the T^2 convention landed.
+  *loss = static_cast<float>(total / static_cast<double>(N)) * loss_scale;
 }
 
 void KLDistillBwd(const float* p_s, const float* p_t, const float* seed,
-                  float* dlogits, size_t N, size_t C, float T) {
-  const float scale = *seed / (static_cast<float>(N) * T);
+                  float* dlogits, size_t N, size_t C, float T,
+                  float loss_scale) {
+  // d/ds [loss_scale * mean KL(p_t || softmax(s/T))] = loss_scale*(p_s-p_t)/(N*T);
+  // with loss_scale = T^2 this is the Hinton gradient T*(p_s - p_t)/N.
+  // (*seed * 1.0f) is exact, so the scale-free case keeps its old bits.
+  const float scale = (*seed * loss_scale) / (static_cast<float>(N) * T);
   up::ParallelFor(N * C, kGrainCheap, [&](size_t b, size_t e, size_t) {
     for (size_t i = b; i < e; ++i) dlogits[i] = scale * (p_s[i] - p_t[i]);
   });

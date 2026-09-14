@@ -211,6 +211,40 @@ TEST(UpdateSystem, GradientsMatchFiniteDifferences) {
   GradientCheck(compiled, engine, 4242);
 }
 
+TEST(UpdateSystem, DistillationGradientsMatchFiniteDifferences) {
+  // The T^2-scaled KL loss (#13) and the composite (1-w)·xent + w·kl, each
+  // checked through the compiled backward against the compiled forward —
+  // the program-level FD coverage these two losses never had.
+  const int64_t in_dim = 5, hidden = 7, out_dim = 3, batch = 2;
+  SmfModel student = MakeMlp(in_dim, hidden, out_dim, 61);
+  SmfModel teacher = MakeMlp(in_dim, 9, out_dim, 62);
+
+  for (const LossKind loss : {LossKind::kKLDistill, LossKind::kXEntPlusKL}) {
+    UpdateConfig config = BaseConfig(batch);
+    config.loss = loss;
+    config.temperature = 2.0f;
+    config.distill_weight = 0.4f;
+    config.lora.rank = 3;
+    config.emit_optimizer = false;  // params stay fixed across executions
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                         UpdateCompiler(config).Compile(student, &teacher));
+
+    UpdateEngine engine;
+    ASSERT_OK(
+        engine.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+
+    std::mt19937_64 rng(6161);
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    std::vector<float> x(batch * in_dim);
+    for (auto& v : x) v = dist(rng);
+    std::vector<int32_t> labels;
+    if (loss == LossKind::kXEntPlusKL) labels = {2, 0};
+    FillSlots(engine, x, labels);
+
+    GradientCheck(compiled, engine, 6161);
+  }
+}
+
 // =============================================================================
 // 3. End-to-end: train -> merge -> commit
 // =============================================================================

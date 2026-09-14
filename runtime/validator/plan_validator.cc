@@ -101,6 +101,27 @@ std::expected<void, std::string> ValidateInstruction(
   };
 
   const uint64_t d0 = ins.out[0], d1 = ins.out[1], d2 = ins.out[2];
+  // The KL temperature word's high half is the loss scale (v8). Pre-v8
+  // plans never wrote it: a nonzero high word there is corruption, exactly
+  // like flags before v5. From v8 on, zero means "absent" (scale 1.0) and
+  // any written scale must be a finite positive float — Execute() multiplies
+  // by it blindly, and a zero or NaN scale would train on nothing, silently.
+  auto kl_scale_ok = [&](uint64_t word) -> std::expected<void, std::string> {
+    const uint64_t hi = word >> 32;
+    if (plan_version < up::kSeeuKlScaleVersion) {
+      if (hi != 0)
+        return diag::validating::Error(
+            "kl_distill carries a loss scale in a pre-v" +
+            std::to_string(up::kSeeuKlScaleVersion) + " plan");
+      return {};
+    }
+    if (hi == 0) return {};
+    const float scale = std::bit_cast<float>(static_cast<uint32_t>(hi));
+    if (!std::isfinite(scale) || scale <= 0.0f)
+      return diag::validating::Error(
+          "kl_distill loss scale must be a finite positive float");
+    return {};
+  };
   uint64_t mk = 0, kn = 0, mn = 0, nc = 0;
   // Transformer opcodes exist only from v6: no earlier compiler emits them,
   // so their appearance in an older plan is corruption, not a feature.
@@ -235,12 +256,14 @@ std::expected<void, std::string> ValidateInstruction(
           !ref_ok(ins.in[2], 1, true) || !ref_ok(ins.in[3], nc, true) ||
           !ref_ok(ins.out[0], nc, true))
         return fail();
+      if (auto r = kl_scale_ok(d2); !r) return r;
       return disjoint();
     case up::OpCode::kKLDistillBwd:
       if (!MulOk(d0 >> 32, d0 & 0xFFFFFFFFu, &nc)) return fail();
       if (!ref_ok(ins.in[0], nc, false) || !ref_ok(ins.in[1], nc, false) ||
           !ref_ok(ins.in[2], 1, false) || !ref_ok(ins.in[3], nc, true))
         return fail();
+      if (auto r = kl_scale_ok(d1); !r) return r;
       return disjoint();
     case up::OpCode::kSgdStep:
       if (!ref_ok(ins.in[0], d0, true) || !ref_ok(ins.in[1], d0, false))

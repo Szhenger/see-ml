@@ -88,6 +88,13 @@ float ImmBitsToF32(uint64_t bits) {
   return f;
 }
 
+// The KL temperature word's high half is the v8 loss scale; zero (pre-v8)
+// reads as 1.0, mirroring the engine.
+float KlScaleOf(uint64_t word) {
+  const uint64_t hi = word >> 32;
+  return hi == 0 ? 1.0f : ImmBitsToF32(hi);
+}
+
 /// The in[] slot carrying f32 immediate bits rather than a tensor ref, per
 /// the ISA in source/plan/instruction.h; -1 when every slot is a ref.
 /// Decoding immediates as refs printed "ar+0x3f800000" for alpha = 1.0 — an
@@ -149,14 +156,16 @@ void Disassemble(const char* title, const UpdateInstruction* instrs,
       case OpCode::kKLDistillFwd:
         std::printf("   p_t:");
         PrintRef(ins.out[0]);
-        std::printf("   n/c: %" PRIu64 " %" PRIu64 "  T %g\n",
+        std::printf("   n/c: %" PRIu64 " %" PRIu64 "  T %g  scale %g\n",
                     ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu,
-                    ImmBitsToF32(ins.out[2]));
+                    ImmBitsToF32(ins.out[2] & 0xFFFFFFFFu),
+                    KlScaleOf(ins.out[2]));
         break;
       case OpCode::kKLDistillBwd:
-        std::printf("   n/c: %" PRIu64 " %" PRIu64 "  T %g\n",
+        std::printf("   n/c: %" PRIu64 " %" PRIu64 "  T %g  scale %g\n",
                     ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
-                    ImmBitsToF32(ins.out[1]));
+                    ImmBitsToF32(ins.out[1] & 0xFFFFFFFFu),
+                    KlScaleOf(ins.out[1]));
         break;
       case OpCode::kRmsNormFwd:
         std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",

@@ -45,6 +45,51 @@ TEST(PlanValidator, AcceptsInBoundsOperands) {
                                 kArena, kRodata, up::kSeeuVersion));
 }
 
+TEST(PlanValidator, KlLossScaleIsVersionGated) {
+  // N=2, C=3 -> 6 floats per logit/prob tensor, disjoint arena slots; the
+  // loss is one float. T = 2 in the low word; the v8 scale in the high word.
+  const auto f32 = [](float f) {
+    return uint64_t{std::bit_cast<uint32_t>(f)};
+  };
+  up::UpdateInstruction fwd;
+  fwd.opcode = static_cast<uint16_t>(up::OpCode::kKLDistillFwd);
+  fwd.in[0] = up::MakeArenaRef(0);
+  fwd.in[1] = up::MakeArenaRef(64);
+  fwd.in[2] = up::MakeArenaRef(128);
+  fwd.in[3] = up::MakeArenaRef(192);
+  fwd.out[0] = up::MakeArenaRef(256);
+  fwd.out[1] = (uint64_t{2} << 32) | 3;
+  fwd.out[2] = f32(2.0f);  // no scale: means 1.0 at any version
+  EXPECT_OK(ValidateInstruction(fwd, kArena, kRodata, up::kSeeuVersion));
+  EXPECT_OK(ValidateInstruction(fwd, kArena, kRodata,
+                                up::kSeeuKlScaleVersion - 1));
+
+  fwd.out[2] = (f32(4.0f) << 32) | f32(2.0f);  // T^2 scale, the v8 form
+  EXPECT_OK(ValidateInstruction(fwd, kArena, kRodata, up::kSeeuVersion));
+  // A pre-v8 plan never wrote the high word: corruption, not a feature.
+  EXPECT_ERROR(ValidateInstruction(fwd, kArena, kRodata,
+                                   up::kSeeuKlScaleVersion - 1));
+  // A written scale must be a finite positive float — 0 or NaN would train
+  // on nothing, silently.
+  // (an all-zero high word is "absent" and accepted; a signed zero is not)
+  fwd.out[2] = (f32(-0.0f) << 32) | f32(2.0f);
+  EXPECT_ERROR(ValidateInstruction(fwd, kArena, kRodata, up::kSeeuVersion));
+  fwd.out[2] = (f32(std::bit_cast<float>(0x7FC00000u)) << 32) | f32(2.0f);
+  EXPECT_ERROR(ValidateInstruction(fwd, kArena, kRodata, up::kSeeuVersion));
+
+  up::UpdateInstruction bwd;
+  bwd.opcode = static_cast<uint16_t>(up::OpCode::kKLDistillBwd);
+  bwd.in[0] = up::MakeArenaRef(0);
+  bwd.in[1] = up::MakeArenaRef(64);
+  bwd.in[2] = up::MakeArenaRef(128);
+  bwd.in[3] = up::MakeArenaRef(192);
+  bwd.out[0] = (uint64_t{2} << 32) | 3;
+  bwd.out[1] = (f32(4.0f) << 32) | f32(2.0f);
+  EXPECT_OK(ValidateInstruction(bwd, kArena, kRodata, up::kSeeuVersion));
+  EXPECT_ERROR(ValidateInstruction(bwd, kArena, kRodata,
+                                   up::kSeeuKlScaleVersion - 1));
+}
+
 TEST(PlanValidator, TransformerOpcodesAreVersionGated) {
   // A valid attention instruction: q/k/v/o at disjoint arena offsets
   // (spaced 64 floats apart), probs cache beyond them. B=1, S=4, H=2,

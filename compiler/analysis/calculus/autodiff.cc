@@ -329,8 +329,10 @@ const std::unordered_map<std::string_view, VjpRule>& VjpRegistry() {
        }},
 
       // (loss, p_s, p_t) = kl_distill(student_logits, teacher_logits)
-      // dstudent = seed * (p_s - p_t) / (N * T); the teacher branch is frozen
-      // by construction, so no adjoint ever flows into it.
+      // dstudent = seed * loss_scale * (p_s - p_t) / (N * T) — the exact
+      // derivative of the forward's loss_scale * mean KL (loss_scale = T^2
+      // gives Hinton's T*(p_s - p_t)/N). The teacher branch is frozen by
+      // construction, so no adjoint ever flows into it.
       {"sc_high.kl_distill",
        [](sir::Operation* op, AdContext& ctx) {
          sir::Value* s_logits = op->operand(0);
@@ -343,6 +345,8 @@ const std::unordered_map<std::string_view, VjpRule>& VjpRegistry() {
          sir::Operation* g = ctx.block->appendOp("sc_low.kl_grad");
          g->setAttribute("temperature",
                          op->getAttrAs<float>("temperature").value_or(1.0f));
+         g->setAttribute("loss_scale",
+                         op->getAttrAs<float>("loss_scale").value_or(1.0f));
          g->addOperand(p_s);
          g->addOperand(p_t);
          g->addOperand(seed);
