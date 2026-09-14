@@ -238,8 +238,11 @@ backend-neutral f32).
 > the embedding gather; packages vendor the backend with a Darwin branch
 > in `build.sh`; a macOS CI job proves `--backend auto` degrades on a
 > Metal-less runner. Measured on an Apple M5, D=512 / 8 heads / S=128 /
-> 4-block token decoder at 512 tokens per step: **Metal ≈ 2,260 tok/s vs
-> CPU ≈ 1,140 tok/s** (2.0×); the CPU itself gained 1.14–1.62× rows/s from
+> 4-block token decoder at 512 tokens per step, packed with the `.incbin`
+> stub (rodata zero-copy), idle host, per-step slope over 20→80 steps:
+> **Metal ≈ 2,480 tok/s vs CPU ≈ 1,180 tok/s** (2.1×), training loss after
+> 80 steps agreeing to six significant digits (11.82789 vs 11.82787); the
+> CPU itself gained 1.14–1.62× rows/s from
 > #66 (bwd/fwd 2.0–3.0× → 1.2–1.7×). Not yet done: the SmolLM-135M field
 > run the release gate (#65) prices (≥ 800 tok/s on M4; the shapes above
 > exceed it, the model itself was not run here), `simdgroup` tiles for the

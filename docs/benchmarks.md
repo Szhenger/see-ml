@@ -74,7 +74,7 @@ shapes — the gap the C2 SIMD and G1b Metal projects are priced against.
 | **softmax-xent μs at vocab ∈ {1k, 32k, 128k}** | fwd+bwd per row | the chunked-CE project (pillar A3): this curve IS the justification |
 | **q8 dequant overhead** | q8 GEMM / f32 GEMM time ratio | NF4/int4 design: if int8 dequant already costs >15%, block-wise 4-bit needs a fused design, not a naive port |
 | **Metal vs CPU GEMM** | the G1a harness at real shapes | the G1b engine-integration go/no-go: dispatch overhead amortization point (at which M×N×K does GPU win?) |
-| **backend split** | `seeml-bench --backend metal` vs `cpu` on the same fixtures; `bench.json` carries `"backend"` and the gate keys rows by it | where the GPU pays: on this suite's tiny fixtures Metal is 0.65–1.23× the CPU (dispatch floor), on a D=512 4-block decoder 2.0× — the frontier row must be measured at frontier shapes |
+| **backend split** | `seeml-bench --backend metal` vs `cpu` on the same fixtures; `bench.json` carries `"backend"` and the gate keys rows by it | where the GPU pays: on this suite's tiny fixtures Metal is 0.65–1.23× the CPU (dispatch floor), on a D=512 / 8-head / S=128 4-block decoder 2.1× (2,480 vs 1,180 tok/s, Apple M5) — the frontier row must be measured at frontier shapes |
 
 ## Tier C — Memory (the gate that refuses compiles)
 
@@ -103,7 +103,7 @@ shapes — the gap the C2 SIMD and G1b Metal projects are priced against.
 |---|---|---|
 | **CI wall time per job** | each ci.yml job's duration trend | the per-diff feedback loop; when build-and-test crosses ~10 min, precompiled-header or unity-build work pays |
 | **full local build time** | `build/build.sh` clean | same loop locally; the single biggest dev-speed lever in a -O2 -Werror tree |
-| **suite runtime top-10** | slowest tests trend | keeps the 356-test suite honest — one 60 s test taxes every diff forever |
+| **suite runtime top-10** | slowest tests trend | keeps the 367-test suite honest — one 60 s test taxes every diff forever |
 | **fuzz corpus coverage** | edges covered nightly (libFuzzer `-print_final_stats`) | whether the fourth arm (compile-of-SMF) is still finding new ground or needs structure-aware mutators |
 
 ## Reference points from this branch (not benchmarks — sanity anchors)
