@@ -144,18 +144,24 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   const uint64_t emit_bytes = header.emit_count * sizeof(up::EmitEntry);
 
   // Decode the instruction streams once; per-step execution touches only the
-  // decoded vectors and the arena.
+  // decoded vectors and the arena. An empty section (the step program of a
+  // plan that does not accumulate) decodes to an empty vector whose data()
+  // is null — memcpy's arguments are declared non-null even for a zero
+  // length, so the copy is skipped, not called.
+  auto decode = [&](auto& out, uint64_t offset, uint64_t bytes) {
+    if (bytes) std::memcpy(out.data(), plan + offset, bytes);
+  };
   std::vector<up::UpdateInstruction> train(header.train_instr_count);
-  std::memcpy(train.data(), plan + header.train_instr_offset, train_bytes);
+  decode(train, header.train_instr_offset, train_bytes);
   std::vector<up::UpdateInstruction> merge(header.merge_instr_count);
-  std::memcpy(merge.data(), plan + header.merge_instr_offset, merge_bytes);
+  decode(merge, header.merge_instr_offset, merge_bytes);
   std::vector<up::UpdateInstruction> eval(header.eval_instr_count);
-  std::memcpy(eval.data(), plan + header.eval_instr_offset, eval_bytes);
+  decode(eval, header.eval_instr_offset, eval_bytes);
   std::vector<up::UpdateInstruction> step(header.step_instr_count);
-  std::memcpy(step.data(), plan + header.step_instr_offset,
-              header.step_instr_count * sizeof(up::UpdateInstruction));
+  decode(step, header.step_instr_offset,
+         header.step_instr_count * sizeof(up::UpdateInstruction));
   std::vector<up::EmitEntry> emit(header.emit_count);
-  std::memcpy(emit.data(), plan + header.emit_table_offset, emit_bytes);
+  decode(emit, header.emit_table_offset, emit_bytes);
 
   // Executor boundary: every operand ref of every instruction is
   // bounds-proven by the validator and every emit entry targets the arena —
