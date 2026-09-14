@@ -48,7 +48,20 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // unscaled divergence they were compiled for, bit-for-bit. A pre-v8 runtime
 // would silently drop the scale, which is why plans that carry it declare
 // v8 (and are rejected by older runtimes as newer than they can prove).
-inline constexpr uint32_t kSeeuVersion = 8;
+// v9: gradient accumulation (roadmap 2a). Three fields carved from zeros:
+// grad_accum_steps (pad4; 0 or 1 = the pre-v9 one-batch step), and the
+// step program's offset/count (reserved[0..1]). When grad_accum_steps > 1
+// the train section holds the GRAD program (forward + backward + one
+// kAccumulate per parameter into a persistent accumulator) and the step
+// section holds the optimizer program (clip on the accumulator, the step
+// on it, kFill it to zero); the runtime runs G grad executions per
+// optimizer step. One new opcode, kAccumulate, gated like the v6 family.
+// Additive: a v9 plan with G = 1 has an empty step section and the very
+// same monolithic train program a v8 compiler emitted.
+inline constexpr uint32_t kSeeuVersion = 9;
+
+// The version that introduced gradient accumulation and kAccumulate.
+inline constexpr uint32_t kSeeuGradAccumVersion = 9;
 
 // Section alignment. Every section starts 64-byte aligned (one cache line);
 // rodata additionally starts on a 16 KiB boundary and the blob is padded to
@@ -173,10 +186,14 @@ struct PlanHeader {
   // rows-per-sequence the feeder contract and the attention geometry agree
   // on (nonzero exactly when input_kind == 1 or the model is sequential).
   uint32_t input_kind = 0;
-  uint32_t pad4 = 0;
+  // --- v9: micro-steps per optimizer step (0 or 1 = none; then the step
+  // section below is empty and the train section is one whole step).
+  uint32_t grad_accum_steps = 0;
   uint64_t seq_len = 0;
 
-  uint64_t reserved[2] = {0, 0};
+  // --- v9: the optimizer (step) program, present iff grad_accum_steps > 1.
+  uint64_t step_instr_offset = 0;
+  uint64_t step_instr_count = 0;
 };
 
 /// Maps a trained weight delta in the arena to the byte range it updates
@@ -194,7 +211,7 @@ struct EmitEntry {
 
 // The header layout is the compiler↔runtime ABI. Additive version bumps
 // carve new fields out of `reserved` and MUST NOT change this size — a v7
-// carve of reserved[4] into input_kind/pad4/seq_len/reserved[2] is
+// carve of reserved[4] into input_kind/grad_accum_steps/seq_len/step_instr_offset+count is
 // byte-exact only if this holds. Compiler-enforce it rather than argue it.
 static_assert(sizeof(PlanHeader) == 280, "PlanHeader layout is part of the ABI.");
 static_assert(sizeof(EmitEntry) == 24, "EmitEntry layout is part of the ABI.");

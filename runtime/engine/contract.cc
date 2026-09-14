@@ -34,23 +34,39 @@ bool WellFormedDiagnostic(std::string_view message) {
 
 std::expected<void, std::string> VerifyPlanContract(
     const up::PlanHeader& header, uint64_t plan_size) {
-  uint64_t train_bytes = 0, merge_bytes = 0, eval_bytes = 0, emit_bytes = 0;
+  uint64_t train_bytes = 0, merge_bytes = 0, eval_bytes = 0, emit_bytes = 0,
+           step_bytes = 0;
   if (!MulOk(header.train_instr_count, sizeof(up::UpdateInstruction),
              &train_bytes) ||
       !MulOk(header.merge_instr_count, sizeof(up::UpdateInstruction),
              &merge_bytes) ||
       !MulOk(header.eval_instr_count, sizeof(up::UpdateInstruction),
              &eval_bytes) ||
+      !MulOk(header.step_instr_count, sizeof(up::UpdateInstruction),
+             &step_bytes) ||
       !MulOk(header.emit_count, sizeof(up::EmitEntry), &emit_bytes))
     return diag::executing::Error("plan section size overflows");
   if (!RangeOk(header.train_instr_offset, train_bytes, plan_size) ||
       !RangeOk(header.merge_instr_offset, merge_bytes, plan_size) ||
       !RangeOk(header.eval_instr_offset, eval_bytes, plan_size) ||
+      !RangeOk(header.step_instr_offset, step_bytes, plan_size) ||
       !RangeOk(header.rodata_offset, header.rodata_size, plan_size) ||
       !RangeOk(header.persist_init_offset, header.persist_init_size,
                plan_size) ||
       !RangeOk(header.emit_table_offset, emit_bytes, plan_size))
     return diag::executing::Error("plan section out of bounds");
+
+  // Gradient accumulation (v9): a step program exists exactly when the
+  // plan accumulates more than one micro-batch — a lone step program would
+  // never run, and an accumulating plan without one would never step.
+  if ((header.grad_accum_steps > 1) != (header.step_instr_count > 0))
+    return diag::executing::Error(
+        "plan step program presence disagrees with grad_accum_steps");
+  if (header.version < up::kSeeuGradAccumVersion &&
+      (header.grad_accum_steps > 1 || header.step_instr_count > 0))
+    return diag::executing::Error(
+        "pre-v" + std::to_string(up::kSeeuGradAccumVersion) +
+        " plan carries gradient-accumulation fields");
 
   // The engine chunks Evaluate passes by dividing sample counts by the
   // batch, and the feeder stages batch x input width every step — zero for
@@ -103,8 +119,9 @@ std::expected<void, std::string> VerifyExecutorContract(
     std::span<const up::UpdateInstruction> train,
     std::span<const up::UpdateInstruction> merge,
     std::span<const up::UpdateInstruction> eval,
+    std::span<const up::UpdateInstruction> step,
     std::span<const up::EmitEntry> emit_table, const up::PlanHeader& header) {
-  for (const auto* program : {&train, &merge, &eval})
+  for (const auto* program : {&train, &merge, &eval, &step})
     for (const up::UpdateInstruction& ins : *program) {
       if (auto r = ValidateInstruction(ins, header.arena_size,
                                        header.rodata_size, header.version);

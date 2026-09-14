@@ -61,6 +61,11 @@ struct UpdateConfig {
   LoRASpec lora;
   OptimizerSpec optimizer;
   uint64_t default_steps = 1000;
+  // Gradient accumulation (roadmap 2a): micro-steps per optimizer step.
+  // The plan compiles at micro-batch `batch` and accumulates G gradients
+  // before each optimizer step, so activation memory scales with `batch`
+  // while the effective batch is batch * G. 1 = the classic one-batch step.
+  uint32_t grad_accum_steps = 1;
   // Quantize frozen base/teacher weights that feed MatMuls to per-tensor
   // symmetric int8 in the plan's rodata (QLoRA-style). Adapters, gradients,
   // and all activations stay f32; the source .smf on disk is untouched.

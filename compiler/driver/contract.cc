@@ -135,6 +135,16 @@ std::expected<void, std::string> VerifyGeneratedPlan(
                   "contains it");
   if (compiled.merge_instruction_count < num_adapters)
     return Broken("backend", "fewer merge instructions than adapters");
+  // Gradient accumulation: the step program exists exactly when the plan
+  // accumulates, and then it must step every trainable (one step and one
+  // zero per parameter, plus optional clips).
+  if ((compiled.grad_accum_steps > 1) != (compiled.step_instruction_count > 0))
+    return Broken("backend", "step program presence disagrees with "
+                             "grad_accum_steps");
+  if (compiled.grad_accum_steps > 1 &&
+      compiled.step_instruction_count < 4 * num_adapters)
+    return Broken("backend", "step program too short to step every "
+                             "trainable");
   if (compiled.arena_size == 0 ||
       compiled.arena_size < compiled.persistent_size)
     return Broken("backend", "arena cannot contain its persistent segment");

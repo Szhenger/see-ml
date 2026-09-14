@@ -139,6 +139,16 @@ const Fixture kFixtures[] = {
 
 /// Sums 2·M·N·K over every GEMM-family instruction in the plan's training
 /// stream — the plan itself is the ground truth for per-step matmul work.
+uint64_t GemmFlopsPerStep(const std::vector<uint8_t>& plan);
+
+/// Micro-batches per optimizer step recorded in the plan (1 = none).
+uint64_t GradAccumOf(const std::vector<uint8_t>& plan) {
+  up::PlanHeader h{};
+  if (plan.size() < sizeof(h)) return 1;
+  std::memcpy(&h, plan.data(), sizeof(h));
+  return h.grad_accum_steps > 1 ? h.grad_accum_steps : 1;
+}
+
 uint64_t GemmFlopsPerStep(const std::vector<uint8_t>& plan) {
   up::PlanHeader h;
   std::memcpy(&h, plan.data(), sizeof h);
@@ -401,7 +411,7 @@ int main(int argc, char** argv) {
                  f->seq, compiled->plan.size(), compiled->arena_size,
                  compiled->persistent_size, compiled->rodata_size,
                  compiled->train_instruction_count,
-                 GemmFlopsPerStep(compiled->plan), trainable_params,
+                 GemmFlopsPerStep(compiled->plan) * GradAccumOf(compiled->plan), trainable_params,
                  compile_ms, load_ms);
     first_fixture = false;
 
@@ -455,7 +465,7 @@ int main(int argc, char** argv) {
                         : 0.0;
       const double gflops =
           step_ms > 0.0
-              ? static_cast<double>(GemmFlopsPerStep(compiled->plan)) /
+              ? static_cast<double>(GemmFlopsPerStep(compiled->plan) * GradAccumOf(compiled->plan)) /
                     (step_ms * 1e6)
               : 0.0;
       const rt::StepTimings st = engine.step_timings();

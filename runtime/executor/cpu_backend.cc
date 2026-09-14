@@ -218,6 +218,9 @@ std::expected<void, std::string> CpuBackend::Execute(
     case up::OpCode::kCopy:
       k::Copy(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), ins.out[0]);
       break;
+    case up::OpCode::kAccumulate:
+      k::Accumulate(WritePtr(ins.in[0]), ReadPtr(ins.in[1]), ins.out[0]);
+      break;
     case up::OpCode::kRmsNormFwd:
       k::RmsNormFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
                     WritePtr(ins.in[2]), WritePtr(ins.in[3]),

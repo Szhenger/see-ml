@@ -393,7 +393,7 @@ TrainableAutodiff::Run(sir::Block& block, sir::Value* loss,
 
   // --- Seed dL/dL = 1.0 ----------------------------------------------------
   sir::Operation* fill = block.appendOp("sc_low.fill");
-  fill->setAttribute("value", 1.0f);
+  fill->setAttribute("value", seed_value_);
   sir::Value* seed = fill->addResult(std::string(loss->id()) + ".seed",
                                      sir::DataType::F32, loss->shape());
   ctx.adjoint[loss] = seed;

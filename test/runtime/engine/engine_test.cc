@@ -90,7 +90,7 @@ TEST(EngineContract, ExecutorContractSpeaksAsThePlanValidator) {
   up::PlanHeader header{};
   header.arena_size = 1024;
 
-  const auto r = VerifyExecutorContract(std::span(&bogus, 1), {}, {}, {},
+  const auto r = VerifyExecutorContract(std::span(&bogus, 1), {}, {}, {}, {},
                                         header);
   ASSERT_FALSE(r.has_value());
   EXPECT_TRUE(WellFormedDiagnostic(r.error()));
@@ -100,6 +100,40 @@ TEST(EngineContract, ExecutorContractSpeaksAsThePlanValidator) {
 // =============================================================================
 // The feeder boundary
 // =============================================================================
+
+TEST(EngineContract, PlanContractTiesTheStepSectionToAccumulation) {
+  namespace up = seeml::update;
+  up::PlanHeader header{};
+  header.version = up::kSeeuVersion;
+  header.batch = 4;
+  header.input_floats = 16;
+  header.arena_size = 4096;
+  header.input_ref = up::MakeArenaRef(0);
+  header.loss_ref = up::MakeArenaRef(256);
+  constexpr uint64_t kPlanSize = 65536;
+  EXPECT_OK(VerifyPlanContract(header, kPlanSize));
+  // Accumulation without a step program: nothing would ever step.
+  header.grad_accum_steps = 4;
+  EXPECT_ERROR_CONTAINS(VerifyPlanContract(header, kPlanSize),
+                        "step program presence");
+  // A step program without accumulation: it would never run.
+  header.grad_accum_steps = 1;
+  header.step_instr_offset = 1024;
+  header.step_instr_count = 2;
+  EXPECT_ERROR_CONTAINS(VerifyPlanContract(header, kPlanSize),
+                        "step program presence");
+  // Both present: accepted; the section must lie inside the blob.
+  header.grad_accum_steps = 4;
+  EXPECT_OK(VerifyPlanContract(header, kPlanSize));
+  header.step_instr_offset = kPlanSize - 64;
+  EXPECT_ERROR_CONTAINS(VerifyPlanContract(header, kPlanSize),
+                        "out of bounds");
+  // A pre-v9 plan cannot carry the fields at all.
+  header.step_instr_offset = 1024;
+  header.version = up::kSeeuGradAccumVersion - 1;
+  EXPECT_ERROR_CONTAINS(VerifyPlanContract(header, kPlanSize),
+                        "gradient-accumulation fields");
+}
 
 TEST(EngineContract, ExecutorContractBindsEmbeddingTokensToTheStagedSlot) {
   // Regression: kEmbedFwd gathers table[tokens[t]] — a data-dependent
@@ -122,15 +156,15 @@ TEST(EngineContract, ExecutorContractBindsEmbeddingTokensToTheStagedSlot) {
   emb.out[0] = 4;
   emb.out[1] = (uint64_t{8} << 32) | 4;
   std::vector<up::UpdateInstruction> train = {emb};
-  EXPECT_OK(VerifyExecutorContract(train, {}, {}, {}, header));
+  EXPECT_OK(VerifyExecutorContract(train, {}, {}, {}, {}, header));
   // Tokens read from anywhere but the staged slot: rejected.
   train[0].in[0] = up::MakeArenaRef(512);
-  EXPECT_ERROR_CONTAINS(VerifyExecutorContract(train, {}, {}, {}, header),
+  EXPECT_ERROR_CONTAINS(VerifyExecutorContract(train, {}, {}, {}, {}, header),
                         "staged input slot");
   // Embedding in a plan that does not declare token input: rejected.
   train[0].in[0] = up::MakeArenaRef(0);
   header.input_kind = 0;
-  EXPECT_ERROR_CONTAINS(VerifyExecutorContract(train, {}, {}, {}, header),
+  EXPECT_ERROR_CONTAINS(VerifyExecutorContract(train, {}, {}, {}, {}, header),
                         "without token input");
 }
 

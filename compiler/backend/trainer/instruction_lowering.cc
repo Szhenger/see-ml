@@ -344,6 +344,16 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[0] = ref(op->result(0));
       ins.in[1] = F32Bits(op->getAttrAs<float>("value").value_or(0.0f));
       ins.out[0] = vol(op->result(0));
+    } else if (m == "sc_low.zero") {  // in-place: kFill over an operand
+      set(OpCode::kFill);
+      ins.in[0] = ref(op->operand(0));
+      ins.in[1] = F32Bits(0.0f);
+      ins.out[0] = vol(op->operand(0));
+    } else if (m == "sc_low.accumulate") {  // dst += src (v9)
+      set(OpCode::kAccumulate);
+      ins.in[0] = ref(op->operand(0));
+      ins.in[1] = ref(op->operand(1));
+      ins.out[0] = vol(op->operand(0));
     } else if (m == "sc_low.copy") {
       set(OpCode::kCopy);
       ins.in[0] = ref(op->operand(0));

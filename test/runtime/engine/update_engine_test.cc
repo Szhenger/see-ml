@@ -744,6 +744,109 @@ TEST(UpdateEngineTrain, ShouldStopInterruptsAndLossCurveRecords) {
   EXPECT_EQ(report.loss_curve.size(), 25u);
 }
 
+TEST(UpdateEngineAccumulation, StepsCountOptimizerStepsAndConsumeGBatches) {
+  // A G = 3 plan: Train(5) is five optimizer steps over fifteen
+  // micro-batches; the loss curve has five entries (each the mean of three
+  // micro-batch losses); the persistent moments moved; and a resume after
+  // three optimizer steps replays the feeder past 3 x 3 x batch rows so
+  // the resumed run is bit-identical to the uninterrupted one.
+  UpdateConfig config = BaseConfig(kBatch);
+  config.grad_accum_steps = 3;
+  const std::vector<uint8_t> plan = CompilePlan(config);
+  ASSERT_FALSE(plan.empty());
+
+  auto data_at = [&](uint64_t seed) -> Dataset {
+    auto d = MakeClassificationData(26, kInDim, seed);
+    if (!d) std::abort();  // the fixture is seeded and cannot fail
+    d->EnableShuffle(5);
+    return std::move(*d);
+  };
+  UpdateEngine straight;
+  ASSERT_OK(straight.LoadFromMemory(plan.data(), plan.size()));
+  EXPECT_EQ(straight.grad_accum_steps(), 3u);
+  Dataset d1 = data_at(8);
+  TrainOptions opts = Quiet();
+  opts.record_loss_curve = true;
+  ASSERT_OK_AND_ASSIGN(auto report, straight.Train(d1, 6, opts));
+  EXPECT_EQ(report.steps, 6u);
+  EXPECT_EQ(straight.step(), 6u);
+  EXPECT_EQ(report.loss_curve.size(), 6u);
+  const std::vector<uint8_t> straight_bytes(
+      straight.arena(), straight.arena() + straight.header().persistent_size);
+
+  ScopedTempDir tmp;
+  const std::string ckpt = tmp.File("accum.ckpt");
+  UpdateEngine first;
+  ASSERT_OK(first.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d2 = data_at(8);
+  ASSERT_OK(first.Train(d2, 3, Quiet()));
+  ASSERT_OK(first.SaveCheckpoint(ckpt));
+  UpdateEngine resumed;
+  ASSERT_OK(resumed.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d3 = data_at(8);
+  TrainOptions ropt = Quiet();
+  ropt.checkpoint_path = ckpt;
+  ropt.resume = true;
+  ASSERT_OK(resumed.Train(d3, 3, ropt));
+  EXPECT_EQ(resumed.step(), 6u);
+  const std::vector<uint8_t> resumed_bytes(
+      resumed.arena(), resumed.arena() + resumed.header().persistent_size);
+  EXPECT_TRUE(straight_bytes == resumed_bytes);
+}
+
+TEST(UpdateEngineAccumulation, SgdWithClipTrainsAndImproves) {
+  UpdateConfig config = BaseConfig(kBatch);
+  config.optimizer.kind = OptimizerKind::kSgd;
+  config.optimizer.clip_norm = 0.5f;
+  config.optimizer.lr = 5e-2f;
+  config.grad_accum_steps = 2;
+  const std::vector<uint8_t> plan = CompilePlan(config);
+  ASSERT_FALSE(plan.empty());
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
+  auto data = MakeClassificationData(40, kInDim, 6);
+  ASSERT_OK(data);
+  data->EnableShuffle(2);
+  TrainOptions options = Quiet();
+  options.record_loss_curve = true;
+  ASSERT_OK_AND_ASSIGN(auto report, engine.Train(*data, 30, options));
+  EXPECT_EQ(report.steps, 30u);
+  EXPECT_EQ(report.loss_curve.size(), 30u);
+  EXPECT_LT(report.final_avg_loss, report.initial_avg_loss);
+}
+
+TEST(UpdateEngineAccumulation, IsBitwiseInvariantAcrossThreadCounts) {
+  UpdateConfig config = BaseConfig(kBatch);
+  config.grad_accum_steps = 2;
+  const std::vector<uint8_t> plan = CompilePlan(config);
+  ASSERT_FALSE(plan.empty());
+  auto run = [&](size_t threads, std::vector<float>* curve,
+                 std::vector<uint8_t>* persistent) {
+    seeml::update::SetParallelThreadCount(threads);
+    UpdateEngine engine;
+    EXPECT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
+    auto data = MakeClassificationData(30, kInDim, 5);
+    EXPECT_OK(data);
+    data->EnableShuffle(3);
+    TrainOptions options = Quiet();
+    options.record_loss_curve = true;
+    auto report = engine.Train(*data, 10, options);
+    EXPECT_OK(report);
+    if (!report) return;
+    *curve = report->loss_curve;
+    persistent->assign(engine.arena(),
+                       engine.arena() + engine.header().persistent_size);
+  };
+  std::vector<float> c1, c4;
+  std::vector<uint8_t> p1, p4;
+  run(1, &c1, &p1);
+  run(4, &c4, &p4);
+  seeml::update::SetParallelThreadCount(0);
+  ASSERT_EQ(c1.size(), 10u);
+  EXPECT_TRUE(c1 == c4);
+  EXPECT_TRUE(p1 == p4);
+}
+
 TEST(UpdateEngineGate, ImprovedByAndAccuracyHeld) {
   seeml::update_rt::TrainReport r;
   r.has_validation = true;

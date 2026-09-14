@@ -77,7 +77,7 @@ static_assert(sizeof(KArgs) == 136, "KArgs must match the MSL layout");
 enum Pipe : int {
   kPGemmNN, kPGemmNT, kPGemmTN, kPGemmAcc, kPGemmNNQ8, kPGemmNTQ8,
   kPAddEW, kPMulEW, kPAddBias, kPReluFwd, kPReluBwd, kPGeluFwd, kPGeluBwd,
-  kPSiluFwd, kPSiluBwd, kPScale, kPFill, kPCopy, kPSgd, kPAdamW,
+  kPSiluFwd, kPSiluBwd, kPScale, kPFill, kPCopy, kPAccumulate, kPSgd, kPAdamW,
   kPReduceRows, kPLnFwd, kPLnBwd, kPRmsFwd, kPRmsBwd,
   kPClipPartials, kPClipFinish, kPClipApply,
   kPRopeFwd, kPRopeBwd, kPAttnFwd, kPAttnDP, kPAttnDV, kPSoftmaxRowsBwd,
@@ -88,7 +88,8 @@ const char* const kPipeNames[kPipeCount] = {
     "k_gemm_nn", "k_gemm_nt", "k_gemm_tn", "k_gemm_acc", "k_gemm_nn_q8",
     "k_gemm_nt_q8", "k_add_ew", "k_mul_ew", "k_add_bias", "k_relu_fwd",
     "k_relu_bwd", "k_gelu_fwd", "k_gelu_bwd", "k_silu_fwd", "k_silu_bwd",
-    "k_scale", "k_fill", "k_copy", "k_sgd", "k_adamw", "k_reduce_rows",
+    "k_scale", "k_fill", "k_copy", "k_accumulate", "k_sgd", "k_adamw",
+    "k_reduce_rows",
     "k_layernorm_fwd", "k_layernorm_bwd", "k_rmsnorm_fwd", "k_rmsnorm_bwd",
     "k_clip_partials", "k_clip_finish", "k_clip_apply", "k_rope_fwd",
     "k_rope_bwd", "k_attn_fwd", "k_attn_dp", "k_attn_dv",
@@ -258,6 +259,7 @@ bool DimsFit32(up::OpCode op, const up::UpdateInstruction& ins) {
     case up::OpCode::kScale:
     case up::OpCode::kFill:
     case up::OpCode::kCopy:
+    case up::OpCode::kAccumulate:
     case up::OpCode::kSgdStep:
     case up::OpCode::kAdamWStep:
     case up::OpCode::kClipNorm:
@@ -568,6 +570,11 @@ std::expected<void, std::string> MetalBackend::Encode(
       ref(0, ins.in[0]); ref(1, ins.in[1]);
       a.n = u32(ins.out[0]);
       Dispatch(kPCopy, a, a.n, kElementwiseGroup);
+      return {};
+    case up::OpCode::kAccumulate:
+      ref(0, ins.in[0]); ref(1, ins.in[1]);
+      a.n = u32(ins.out[0]);
+      Dispatch(kPAccumulate, a, a.n, kElementwiseGroup);
       return {};
     case up::OpCode::kSgdStep:
       ref(0, ins.in[0]); ref(1, ins.in[1]);

@@ -80,7 +80,7 @@ seeml-update-compile \
 
 **How to optimize.** `--optimizer adamw|sgd` (default adamw), `--lr` (default 1e-3), `--weight-decay` (default 0.01), and `--clip-norm` (default 0 = off; a positive value bakes per-tensor gradient clipping instructions into the stream). The schedule — `--lr-schedule const|cosine`, `--warmup N`, `--min-lr-factor F` — travels in the plan header and is evaluated per step on the device.
 
-**How big.** `--quantize-base` stores eligible frozen weights as int8 in the plan (4× smaller, dequantization fused into the GEMM for free) — and, because commit patches the *original file's* floats, quantization error never reaches the committed model. `--steps` (default 1000) is the default step count baked into the plan (the device may override it).
+**How big.** `--quantize-base` stores eligible frozen weights as int8 in the plan (4× smaller, dequantization fused into the GEMM for free) — and, because commit patches the *original file's* floats, quantization error never reaches the committed model. `--steps` (default 1000) is the default optimizer-step count baked into the plan (the device may override it). `--grad-accum G` (default 1) compiles at the micro-batch `--data-batch` and accumulates `G` micro-batch gradients per optimizer step: the effective batch is `data-batch × G` while activation memory stays that of one micro-batch, at the cost of one gradient-sized accumulator per adapter in the persistent segment (the compile report lists `effective_batch` and `step_instructions`).
 
 **How it's optimized.** By default the compiler fuses each frozen `X@W → +bias → activation` chain into a single matmul instruction with a fused write-back epilogue, so an MLP layer's three arena round-trips become one. Fusion is bitwise-neutral by construction: it only matches chains no backward instruction reads (the frozen teacher subgraph, the bias step of unadapted layers), and the runtime applies the epilogue with the same per-element expressions as the standalone kernels. `--no-fuse-epilogue` disables the pass — the plan gets more instructions and more transient arena, never different bits; useful when diffing `seeml-seeu-dump` output across compiler versions or isolating a kernel while debugging.
 
@@ -120,7 +120,7 @@ model_update --model model.smf --data corpus.sds --out updated.smf \
 | `--model source.smf` | the model the plan was compiled from (required; must hash-match the plan) |
 | `--data corpus.sds` | the training corpus (required) |
 | `--out updated.smf` | where the committed model is written (`updated_model.smf`) |
-| `--steps N` | training steps (0 = the plan's compiled default) |
+| `--steps N` | optimizer steps (0 = the plan's compiled default); under `--grad-accum G` each consumes `G` micro-batches |
 | `--seed S` | shuffle-permutation seed (0) |
 | `--val-frac F` | held-out fraction for the regression gate (0.1); 0 gates on the training-loss trend instead |
 | `--checkpoint path` | checkpoint file, hash-bound to the plan |

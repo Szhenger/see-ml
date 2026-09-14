@@ -27,10 +27,21 @@
 
 namespace seeml::update {
 
+// Gradient accumulation (roadmap 2a): with grad_accum_steps > 1 the
+// synthesizer declares one persistent accumulator per parameter, folds
+// the gradient into it (sc_low.accumulate, the tail of the GRAD program)
+// and then clips, steps and zeroes the accumulator instead of the gradient
+// (the STEP program). The driver splits the lowered stream at the first
+// step-program instruction. `emit_step` false (the finite-difference test
+// hook) keeps the accumulators and the folds but emits no step.
 class OptimizerSynthesizer {
  public:
-  OptimizerSynthesizer(OptimizerKind kind, float clip_norm)
-      : kind_(kind), clip_norm_(clip_norm) {}
+  OptimizerSynthesizer(OptimizerKind kind, float clip_norm,
+                       uint32_t grad_accum_steps = 1, bool emit_step = true)
+      : kind_(kind),
+        clip_norm_(clip_norm),
+        grad_accum_steps_(grad_accum_steps),
+        emit_step_(emit_step) {}
 
   [[nodiscard]] std::expected<void, std::string> Run(
       seeml::sir::Block& block,
@@ -40,6 +51,8 @@ class OptimizerSynthesizer {
  private:
   OptimizerKind kind_;
   float clip_norm_;
+  uint32_t grad_accum_steps_;
+  bool emit_step_;
 };
 
 }  // namespace seeml::update

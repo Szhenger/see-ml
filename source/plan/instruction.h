@@ -103,6 +103,12 @@ enum class OpCode : uint16_t {
   // narrowest softmax width before anything executes.
   kEmbedFwd = 41,  // in: tokens(i32 [T]), table(ro [V,D]), out([T,D]);
                    // out[0]=T, out[1]=V<<32|D
+  // --- Gradient accumulation (plan v9). -------------------------------------
+  // dst += src, in place: the grad program folds each micro-batch's
+  // gradient into its persistent accumulator; the step program then clips
+  // and steps on the accumulator and zeroes it (kFill). One operand is
+  // read and written through one pointer — not an alias.
+  kAccumulate = 42,  // in: dst, src; out[0] = count
 };
 
 // --- Instruction flags (plan v5): fused GEMM epilogues. ----------------------

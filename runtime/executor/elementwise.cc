@@ -35,6 +35,12 @@ void AddBias(const float* x, const float* b, float* out, size_t rows,
                   });
 }
 
+void Accumulate(float* dst, const float* src, size_t n) {
+  up::ParallelFor(n, kGrainCheap, [&](size_t b, size_t e, size_t) {
+    for (size_t i = b; i < e; ++i) dst[i] += src[i];
+  });
+}
+
 void Scale(const float* x, float* out, float alpha, size_t n) {
   up::ParallelFor(n, kGrainCheap, [&](size_t b, size_t e, size_t) {
     for (size_t i = b; i < e; ++i) out[i] = alpha * x[i];

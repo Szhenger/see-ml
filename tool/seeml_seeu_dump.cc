@@ -41,6 +41,7 @@ const char* OpName(uint16_t opcode) {
     case OpCode::kSoftmaxXEntBwd: return "softmax_xent.bwd";
     case OpCode::kMseFwd:         return "mse.fwd";
     case OpCode::kMseBwd:         return "mse.bwd";
+    case OpCode::kAccumulate:     return "accumulate";
     case OpCode::kKLDistillFwd:   return "kl_distill.fwd";
     case OpCode::kKLDistillBwd:   return "kl_distill.bwd";
     case OpCode::kSgdStep:        return "sgd.step";
@@ -335,9 +336,14 @@ int main(int argc, char** argv) {
               h.lr_schedule == 1 ? "cosine+warmup" : "constant",
               h.warmup_steps, h.min_lr_factor);
   std::printf("  default steps      %" PRIu64 "\n", h.default_steps);
+  if (h.grad_accum_steps > 1)
+    std::printf("  grad accumulation  %u micro-batches per optimizer step "
+                "(effective batch %" PRIu64 ")\n",
+                h.grad_accum_steps, h.batch * h.grad_accum_steps);
   std::printf("  programs           train %" PRIu64 " | eval %" PRIu64
-              " | merge %" PRIu64 " instrs\n",
-              h.train_instr_count, h.eval_instr_count, h.merge_instr_count);
+              " | merge %" PRIu64 " | step %" PRIu64 " instrs\n",
+              h.train_instr_count, h.eval_instr_count, h.merge_instr_count,
+              h.step_instr_count);
   std::printf("  emit table         %" PRIu64 " entr%s\n", h.emit_count,
               h.emit_count == 1 ? "y" : "ies");
 
@@ -381,6 +387,11 @@ int main(int argc, char** argv) {
                         sizeof(UpdateInstruction), plan.size()))
       Disassemble("merge", stream(h.merge_instr_offset, h.merge_instr_count),
                   h.merge_instr_count);
+    if (h.step_instr_count &&
+        SectionInBounds(h.step_instr_offset, h.step_instr_count,
+                        sizeof(UpdateInstruction), plan.size()))
+      Disassemble("step", stream(h.step_instr_offset, h.step_instr_count),
+                  h.step_instr_count);
   }
   // The dump above is still useful forensics for a corrupt plan, but a
   // script must not need to parse text to learn the seal failed.

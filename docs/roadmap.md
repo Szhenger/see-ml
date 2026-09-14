@@ -101,6 +101,18 @@ Three subprojects, ordered by value-per-effort. All three relieve the same
 constraint the exact memory gate (`CheckPlanFitsLocally`) now enforces
 honestly: the arena must fit the device.
 
+> **Status: Phase 2a SHIPPED (2026-09-14, #70).** Exactly as scoped below:
+> `--grad-accum G`, the 1/G autodiff seed, persistent accumulators with
+> `sc_low.accumulate` folds (the grad program) and clip / step / zero on
+> the accumulator (the step program, a v9 plan section), the runtime
+> running G grad executions per optimizer step with LR and AdamW advancing
+> per optimizer step and checkpoints on step boundaries. Verified: (b=32,
+> G=1) is the unchanged monolithic program; (b=8, G=4) folds over four
+> 8-row slices equal the 32-row gradient at f32 round-off (the 1/G seed
+> keeps per-row adjoints bitwise, only the row-sum association differs —
+> not bitwise, as this outline had hoped); thread-count invariance and
+> resume bit-identity hold under G > 1; the Metal backend runs the folds.
+
 **Phase 2a — Gradient accumulation / micro-batching (M).** Today the
 optimizer step is fused into the train stream: effective batch ≡ compiled
 batch, and activation memory scales with it.
