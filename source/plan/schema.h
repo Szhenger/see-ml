@@ -50,6 +50,15 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // v8 (and are rejected by older runtimes as newer than they can prove).
 inline constexpr uint32_t kSeeuVersion = 8;
 
+// Section alignment. Every section starts 64-byte aligned (one cache line);
+// rodata additionally starts on a 16 KiB boundary and the blob is padded to
+// a 16 KiB multiple, so a page-aligned embedded plan (the .incbin stub)
+// lets a GPU backend wrap the frozen weights as a zero-copy shared buffer.
+// Alignment is a layout property the header's explicit offsets already
+// describe — an older runtime reads such a plan unchanged — so it needs no
+// version bump.
+inline constexpr uint64_t kSeeuRodataAlignment = 16384;
+
 // The version that introduced the distillation loss scale: plans below it
 // must carry a zero high word on the KL temperature operand, and are
 // validated to.

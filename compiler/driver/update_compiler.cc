@@ -500,7 +500,10 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   header.eval_instr_offset = off;
   header.eval_instr_count = eval_instrs->size();
   off += eval_instrs->size() * sizeof(UpdateInstruction);
-  off = AlignUp(off);
+  // rodata on a page boundary (schema.h kSeeuRodataAlignment): with the
+  // plan itself page-aligned, a GPU backend wraps the frozen weights
+  // zero-copy instead of duplicating them.
+  off = (off + kSeeuRodataAlignment - 1) & ~(kSeeuRodataAlignment - 1);
   header.rodata_offset = off;
   header.rodata_size = binding->rodata.size();
   off = AlignUp(off + binding->rodata.size());
@@ -510,6 +513,9 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   header.emit_table_offset = off;
   header.emit_count = emit_table.size();
   off += emit_table.size() * sizeof(EmitEntry);
+  // Pad the blob to a page multiple: a zero-copy wrap of the rodata section
+  // rounds its length up to whole pages, and those pages must be the plan's.
+  off = (off + kSeeuRodataAlignment - 1) & ~(kSeeuRodataAlignment - 1);
 
   CompiledUpdate result;
   result.plan.resize(off, 0);

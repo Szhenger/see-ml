@@ -89,7 +89,8 @@ def render_stub(page_align: int) -> str:
 
     Preprocessed assembly (.S): the C preprocessor supplies the target's
     symbol prefix (`__USER_LABEL_PREFIX__` is `_` on Mach-O, empty on ELF),
-    the width of size_t, and the section spellings, so one stub assembles
+    the width of size_t, and the section spellings (writable data on
+    Apple, for the Metal backend's zero-copy plan wrap), so one stub assembles
     on every target the vendored runtime builds for. The size symbol is a
     label difference, never a literal, so re-running the compiler into the
     same directory can never leave a stale size beside fresh bytes.
@@ -108,7 +109,17 @@ def render_stub(page_align: int) -> str:
 #define SEEML_SYM(name) SEEML_CAT(__USER_LABEL_PREFIX__, name)
 
 #if defined(__APPLE__)
-    .section __TEXT,__const
+    /* __DATA,__data, not __TEXT,__const: the Metal backend (G1b-2) wraps
+     * the plan's frozen weights as a zero-copy shared buffer, and Metal
+     * leaves read-only pages unreadable from the CPU once wrapped — the
+     * embedding gather then faults. What writable pages cost is the
+     * page-fault fail-stop against a stray write after load; the runtime
+     * re-seals the plan (re-hashes it) before merge and commit, so such a
+     * write is still refused before it can ship, and no runtime path
+     * writes through a rodata reference by construction (the validator
+     * proves every write targets the arena). Other targets keep .rodata;
+     * nothing wraps them. */
+    .section __DATA,__data
 #else
     .section .rodata
 #endif

@@ -13,7 +13,7 @@
 #include "runtime/custodian/durable_io.h"
 #include "runtime/diagnostics/executing/error.h"
 #include "runtime/engine/contract.h"
-#include "runtime/executor/update_kernels.h"
+#include "runtime/executor/backend.h"
 #include "runtime/feeder/batch_pipeline.h"
 #include "runtime/validator/plan_validator.h"
 #include "source/identity/hash.h"
@@ -22,39 +22,48 @@
 namespace seeml::update_rt {
 
 namespace up = seeml::update;
-namespace k = kernels;
 
-namespace {
-
-float BitsToF32(uint64_t bits) {
-  return std::bit_cast<float>(static_cast<uint32_t>(bits));
-}
-
-// The KL temperature word packs (loss_scale bits << 32) | T bits. A zero
-// high word is a pre-v8 plan: no scale was ever written, and 1.0 selects
-// the pre-change behavior (schema.h, the additive-field rule).
-float KlTemperatureOf(uint64_t word) { return BitsToF32(word & 0xFFFFFFFFu); }
-float KlLossScaleOf(uint64_t word) {
-  const uint64_t hi = word >> 32;
-  return hi == 0 ? 1.0f : BitsToF32(hi);
-}
-
-}  // namespace
+UpdateEngine::UpdateEngine() : backend_(CreateCpuBackend()) {}
 
 UpdateEngine::~UpdateEngine() {
+  // The backend may hold a zero-copy view of the arena (a GPU buffer
+  // wrapping it): release the view before the memory.
+  backend_.reset();
   std::free(arena_);
 }
+
+std::expected<void, std::string> UpdateEngine::SelectBackend(
+    BackendKind requested) {
+  auto sel = CreateBackend(requested);
+  if (!sel)
+    return diag::executing::Error("backend '" +
+                                  std::string(BackendKindName(requested)) +
+                                  "': " + sel.error());
+  // A plan already loaded must stay executable on the new backend, or the
+  // switch is refused and the current backend keeps its binding.
+  if (arena_) {
+    if (auto r = sel->backend->Bind(arena_, arena_bytes_, rodata_,
+                                    header_.rodata_size,
+                                    plan_size_ - header_.rodata_offset);
+        !r)
+      return diag::executing::Error(
+          "backend '" + std::string(sel->backend->name()) +
+          "' cannot bind the loaded plan: " + r.error());
+  }
+  backend_ = std::move(sel->backend);
+  backend_kind_ = sel->resolved;
+  backend_note_ = std::move(sel->note);
+  return {};
+}
+
+const char* UpdateEngine::backend_name() const { return backend_->name(); }
+std::string UpdateEngine::backend_device() const { return backend_->device(); }
 
 const float* UpdateEngine::ReadPtr(uint64_t ref) const {
   const uint64_t offset = up::RefOffset(ref);
   if (up::IsRodataRef(ref))
     return reinterpret_cast<const float*>(rodata_ + offset);
   return reinterpret_cast<const float*>(arena_ + offset);
-}
-
-const int8_t* UpdateEngine::ReadPtrQ8(uint64_t ref) const {
-  // Validation pinned q8 sources to rodata; see ValidateInstruction.
-  return reinterpret_cast<const int8_t*>(rodata_ + up::RefOffset(ref));
 }
 
 float* UpdateEngine::WritePtr(uint64_t ref) {
@@ -238,21 +247,58 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   // Bound before rounding: on a 32-bit host a u64 arena_size past SIZE_MAX
   // would otherwise truncate into a small allocation the validator's
   // (u64) bounds proof does not cover — the feeder guards the same class.
-  if (header.arena_size > SIZE_MAX - 64)
+  // Page-aligned (kArenaAlignment) so a GPU backend can wrap it as a
+  // zero-copy shared buffer; on the CPU path the alignment changes the
+  // allocation's address and nothing else.
+  if (header.arena_size > SIZE_MAX - kArenaAlignment)
     return diag::executing::Error(
         "plan arena of " + std::to_string(header.arena_size) +
         " bytes exceeds this host's address space");
   const size_t arena_bytes =
-      (static_cast<size_t>(header.arena_size) + 63) & ~size_t{63};
-  uint8_t* arena = static_cast<uint8_t*>(std::aligned_alloc(64, arena_bytes));
+      (static_cast<size_t>(header.arena_size) + (kArenaAlignment - 1)) &
+      ~size_t{kArenaAlignment - 1};
+  uint8_t* arena = static_cast<uint8_t*>(
+      std::aligned_alloc(kArenaAlignment, arena_bytes));
   if (!arena) return diag::executing::Error("arena allocation failed");
   std::memset(arena, 0, arena_bytes);
   std::memcpy(arena, plan + header.persist_init_offset,
               header.persist_init_size);
 
+  // Executor boundary, second half: the backend must accept the address
+  // spaces (a GPU backend wraps them as device-visible buffers here). A
+  // refusal releases the candidate arena and re-binds the previous plan, so
+  // a rejected re-Load still leaves the old plan fully executable.
+  if (auto r = backend_->Bind(arena, arena_bytes, plan + header.rodata_offset,
+                              header.rodata_size,
+                              plan_size - header.rodata_offset);
+      !r) {
+    std::free(arena);
+    // The contract (backend.h) keeps the previous binding intact on a
+    // refused Bind; re-binding is belt and braces. If even that fails the
+    // engine must not claim a loaded plan over an unbound backend.
+    if (arena_) {
+      if (auto again = backend_->Bind(arena_, arena_bytes_, rodata_,
+                                      header_.rodata_size,
+                                      plan_size_ - header_.rodata_offset);
+          !again) {
+        std::free(arena_);
+        arena_ = nullptr;
+        plan_ = nullptr;
+        return diag::executing::Error(
+            "backend '" + std::string(backend_->name()) +
+            "' cannot bind the plan (" + r.error() +
+            ") and lost the previous one (" + again.error() + ")");
+      }
+    }
+    return diag::executing::Error("backend '" +
+                                  std::string(backend_->name()) +
+                                  "' cannot bind the plan: " + r.error());
+  }
+
   // Commit — nothing below can fail.
   std::free(arena_);
   arena_ = arena;
+  arena_bytes_ = arena_bytes;
   header_ = header;
   train_program_ = std::move(train);
   merge_program_ = std::move(merge);
@@ -292,8 +338,9 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   return {};
 }
 
-void UpdateEngine::Execute(const std::vector<up::UpdateInstruction>& program) {
-  ExecuteRange(program, 0, program.size());
+std::expected<void, std::string> UpdateEngine::Execute(
+    const std::vector<up::UpdateInstruction>& program) {
+  return ExecuteRange(program, 0, program.size());
 }
 
 /// Executes the training stream, split at the phase boundaries scanned by
@@ -301,230 +348,58 @@ void UpdateEngine::Execute(const std::vector<up::UpdateInstruction>& program) {
 /// a plain Execute() unless the runtime is built with -DSEEML_STEP_TIMING
 /// (the benchmark-harness build), so the shipped runtime never reads a
 /// clock inside the step.
-void UpdateEngine::ExecuteTrainProgram() {
+std::expected<void, std::string> UpdateEngine::ExecuteTrainProgram() {
 #ifdef SEEML_STEP_TIMING
   using clock = std::chrono::steady_clock;
   const auto t0 = clock::now();
-  ExecuteRange(train_program_, 0, train_bwd_begin_);
+  if (auto r = ExecuteRange(train_program_, 0, train_bwd_begin_); !r) return r;
   const auto t1 = clock::now();
-  ExecuteRange(train_program_, train_bwd_begin_, train_opt_begin_);
+  if (auto r = ExecuteRange(train_program_, train_bwd_begin_, train_opt_begin_);
+      !r)
+    return r;
   const auto t2 = clock::now();
-  ExecuteRange(train_program_, train_opt_begin_, train_program_.size());
+  if (auto r = ExecuteRange(train_program_, train_opt_begin_,
+                            train_program_.size());
+      !r)
+    return r;
   const auto t3 = clock::now();
   ++timings_.steps;
   timings_.fwd_seconds += std::chrono::duration<double>(t1 - t0).count();
   timings_.bwd_seconds += std::chrono::duration<double>(t2 - t1).count();
   timings_.opt_seconds += std::chrono::duration<double>(t3 - t2).count();
+  return {};
 #else
-  Execute(train_program_);
+  return Execute(train_program_);
 #endif
 }
 
-void UpdateEngine::ExecuteRange(
+std::expected<void, std::string> UpdateEngine::ExecuteRange(
     const std::vector<up::UpdateInstruction>& program, size_t begin,
     size_t end) {
-  for (size_t idx = begin; idx < end; ++idx) {
-    const up::UpdateInstruction& ins = program[idx];
-    switch (static_cast<up::OpCode>(ins.opcode)) {
-      case up::OpCode::kNop:
-        break;
-      case up::OpCode::kGemmNN:
-        // v5 epilogue flags: bias ref rides the otherwise-free in[3]; the
-        // validator proved the flag/slot combination before dispatch.
-        k::GemmNN(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                  ins.out[0], ins.out[1], ins.out[2],
-                  ins.flags & up::kFlagEpilogueBias ? ReadPtr(ins.in[3])
-                                                    : nullptr,
-                  up::EpilogueActOf(ins.flags));
-        break;
-      case up::OpCode::kGemmNT:
-        k::GemmNT(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                  ins.out[0], ins.out[1], ins.out[2]);
-        break;
-      case up::OpCode::kGemmTN:
-        k::GemmTN(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                  ins.out[0], ins.out[1], ins.out[2]);
-        break;
-      case up::OpCode::kGemmAccNN:
-        k::GemmAccNN(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
-                     WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2],
-                     BitsToF32(ins.in[3]));
-        break;
-      case up::OpCode::kGemmNNQ8:
-        k::GemmNNQ8(ReadPtr(ins.in[0]), ReadPtrQ8(ins.in[1]),
-                    WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2],
-                    BitsToF32(ins.in[3]), up::EpilogueActOf(ins.flags));
-        break;
-      case up::OpCode::kGemmNTQ8:
-        k::GemmNTQ8(ReadPtr(ins.in[0]), ReadPtrQ8(ins.in[1]),
-                    WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2],
-                    BitsToF32(ins.in[3]));
-        break;
-      case up::OpCode::kAddEW:
-        k::AddEW(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                 ins.out[0]);
-        break;
-      case up::OpCode::kMulEW:
-        k::MulEW(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                 ins.out[0]);
-        break;
-      case up::OpCode::kAddBias:
-        k::AddBias(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                   ins.out[0], ins.out[1]);
-        break;
-      case up::OpCode::kReluFwd:
-        k::ReluFwd(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), ins.out[0]);
-        break;
-      case up::OpCode::kReluBwd:
-        k::ReluBwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                   ins.out[0]);
-        break;
-      case up::OpCode::kGeluFwd:
-        k::GeluFwd(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), ins.out[0]);
-        break;
-      case up::OpCode::kGeluBwd:
-        k::GeluBwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                   ins.out[0]);
-        break;
-      case up::OpCode::kSiluFwd:
-        k::SiluFwd(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), ins.out[0]);
-        break;
-      case up::OpCode::kSiluBwd:
-        k::SiluBwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                   ins.out[0]);
-        break;
-      case up::OpCode::kLayerNormFwd:
-        k::LayerNormFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
-                        ReadPtr(ins.in[2]), WritePtr(ins.in[3]),
-                        WritePtr(ins.out[1]), WritePtr(ins.out[2]),
-                        ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
-        break;
-      case up::OpCode::kLayerNormBwd:
-        k::LayerNormBwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
-                        ReadPtr(ins.in[2]), ReadPtr(ins.out[0]),
-                        ReadPtr(ins.out[1]), WritePtr(ins.in[3]),
-                        ins.out[2] >> 32, ins.out[2] & 0xFFFFFFFFu);
-        break;
-      case up::OpCode::kClipNorm:
-        k::ClipNorm(WritePtr(ins.in[0]), ins.out[0], BitsToF32(ins.in[1]));
-        break;
-      case up::OpCode::kScale:
-        k::Scale(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), BitsToF32(ins.in[2]),
-                 ins.out[0]);
-        break;
-      case up::OpCode::kReduceRows:
-        k::ReduceRows(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), ins.out[0],
-                      ins.out[1]);
-        break;
-      case up::OpCode::kSoftmaxXEntFwd:
-        k::SoftmaxXEntFwd(ReadPtr(ins.in[0]),
-                          reinterpret_cast<const int32_t*>(ReadPtr(ins.in[1])),
-                          WritePtr(ins.in[2]), WritePtr(ins.in[3]), ins.out[0],
-                          ins.out[1]);
-        break;
-      case up::OpCode::kSoftmaxXEntBwd:
-        k::SoftmaxXEntBwd(ReadPtr(ins.in[0]),
-                          reinterpret_cast<const int32_t*>(ReadPtr(ins.in[1])),
-                          ReadPtr(ins.in[2]), WritePtr(ins.in[3]), ins.out[0],
-                          ins.out[1]);
-        break;
-      case up::OpCode::kMseFwd:
-        k::MseFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                  ins.out[0]);
-        break;
-      case up::OpCode::kMseBwd:
-        k::MseBwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), ReadPtr(ins.in[2]),
-                  WritePtr(ins.in[3]), ins.out[0]);
-        break;
-      case up::OpCode::kKLDistillFwd:
-        k::KLDistillFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
-                        WritePtr(ins.in[2]), WritePtr(ins.in[3]),
-                        WritePtr(ins.out[0]), ins.out[1] >> 32,
-                        ins.out[1] & 0xFFFFFFFFu, KlTemperatureOf(ins.out[2]),
-                        KlLossScaleOf(ins.out[2]));
-        break;
-      case up::OpCode::kKLDistillBwd:
-        k::KLDistillBwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
-                        ReadPtr(ins.in[2]), WritePtr(ins.in[3]),
-                        ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
-                        KlTemperatureOf(ins.out[1]),
-                        KlLossScaleOf(ins.out[1]));
-        break;
-      case up::OpCode::kSgdStep:
-        k::SgdStep(WritePtr(ins.in[0]), ReadPtr(ins.in[1]), ins.out[0],
-                   EffectiveLr(), header_.weight_decay);
-        break;
-      case up::OpCode::kAdamWStep:
-        k::AdamWStep(WritePtr(ins.in[0]), ReadPtr(ins.in[1]),
-                     WritePtr(ins.in[2]), WritePtr(ins.in[3]), ins.out[0],
-                     EffectiveLr(), header_.beta1, header_.beta2, header_.eps,
-                     header_.weight_decay, step_);
-        break;
-      case up::OpCode::kFill:
-        k::Fill(WritePtr(ins.in[0]), BitsToF32(ins.in[1]), ins.out[0]);
-        break;
-      case up::OpCode::kCopy:
-        k::Copy(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), ins.out[0]);
-        break;
-      case up::OpCode::kRmsNormFwd:
-        k::RmsNormFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
-                      WritePtr(ins.in[2]), WritePtr(ins.in[3]),
-                      ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
-        break;
-      case up::OpCode::kRmsNormBwd:
-        k::RmsNormBwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
-                      ReadPtr(ins.in[2]), ReadPtr(ins.out[0]),
-                      WritePtr(ins.in[3]), ins.out[1] >> 32,
-                      ins.out[1] & 0xFFFFFFFFu);
-        break;
-      case up::OpCode::kRopeFwd:
-        k::RopeFwd(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), ins.out[0] >> 32,
-                   ins.out[0] & 0xFFFFFFFFu, ins.out[1] >> 32,
-                   ins.out[1] & 0xFFFFFFFFu, BitsToF32(ins.out[2]));
-        break;
-      case up::OpCode::kRopeBwd:
-        k::RopeBwd(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), ins.out[0] >> 32,
-                   ins.out[0] & 0xFFFFFFFFu, ins.out[1] >> 32,
-                   ins.out[1] & 0xFFFFFFFFu, BitsToF32(ins.out[2]));
-        break;
-      case up::OpCode::kAttnFwd:
-        k::AttnFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), ReadPtr(ins.in[2]),
-                   WritePtr(ins.in[3]), WritePtr(ins.out[0]),
-                   ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu,
-                   ins.out[2] >> 32, ins.out[2] & 0xFFFFFFFFu);
-        break;
-      case up::OpCode::kAttnDP:
-        k::AttnDP(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                  ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
-                  ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
-        break;
-      case up::OpCode::kAttnDV:
-        k::AttnDV(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                  ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
-                  ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
-        break;
-      case up::OpCode::kSoftmaxRowsBwd:
-        k::SoftmaxRowsBwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
-                          WritePtr(ins.in[2]), ins.out[0] >> 32,
-                          ins.out[0] & 0xFFFFFFFFu);
-        break;
-      case up::OpCode::kAttnDQ:
-        k::AttnDQ(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                  ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
-                  ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
-        break;
-      case up::OpCode::kAttnDK:
-        k::AttnDK(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                  ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
-                  ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
-        break;
-      case up::OpCode::kEmbedFwd:
-        k::EmbedFwd(reinterpret_cast<const int32_t*>(ReadPtr(ins.in[0])),
-                    ReadPtr(ins.in[1]), WritePtr(ins.in[2]), ins.out[0],
-                    ins.out[1] & 0xFFFFFFFFu);
-        break;
-    }
-  }
+  // The per-step scalars the optimizer instructions read: the scheduled
+  // learning rate is a pure function of (header_, step_), evaluated once
+  // per range — every instruction of one execution sees the same step.
+  const StepParams params{.lr = EffectiveLr(),
+                          .beta1 = header_.beta1,
+                          .beta2 = header_.beta2,
+                          .eps = header_.eps,
+                          .weight_decay = header_.weight_decay,
+                          .step = step_};
+  for (size_t idx = begin; idx < end; ++idx)
+    if (auto r = backend_->Execute(program[idx], params); !r)
+      return diag::executing::Error("backend '" +
+                                    std::string(backend_->name()) +
+                                    "' failed at instruction " +
+                                    std::to_string(idx) + ": " + r.error());
+  // Every range ends coherent: the engine reads the loss slot, the eval
+  // probabilities, the merge deltas and the persistent segment straight off
+  // the arena after Execute returns, and the step-timing split (below)
+  // must charge deferred GPU work to the phase that issued it.
+  if (auto r = backend_->Flush(); !r)
+    return diag::executing::Error("backend '" +
+                                  std::string(backend_->name()) +
+                                  "' failed to complete: " + r.error());
+  return {};
 }
 
 float UpdateEngine::LossValue() const {
@@ -558,7 +433,12 @@ void UpdateEngine::ExecuteTrainOnce() {
   // adapter parameters, so deltas materialized by an earlier RunMerge are
   // stale and commit must re-merge first.
   merged_ = false;
-  ExecuteTrainProgram();
+  if (auto r = ExecuteTrainProgram(); !r) {
+    // A verification hook, not a product path: the CPU backend never fails,
+    // and a GPU failure here is a bug the test must not paper over.
+    std::fprintf(stderr, "ExecuteTrainOnce: %s\n", r.error().c_str());
+    std::abort();
+  }
 }
 
 std::expected<void, std::string> UpdateEngine::ValidateDataset(
@@ -626,7 +506,10 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
                          header_.label_kind == 0 ? 0 : header_.label_bytes);
     for (uint64_t b = 0; b < batches; ++b) {
       feeder.NextBatch(input_slot, label_slot);
-      Execute(eval_program_);
+      if (auto r = Execute(eval_program_); !r) {
+        data.RestoreServingPos(entry_pos);
+        return std::unexpected(r.error());
+      }
       total += LossValue();
       if (track_accuracy) {
         // Rows past the dataset's tail in the final batch are wrapped
@@ -759,7 +642,7 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
       }
       step_ = s + 1;  // 1-indexed timestep for AdamW bias correction
       feeder.NextBatch(input_slot, label_slot);
-      ExecuteTrainProgram();
+      if (auto r = ExecuteTrainProgram(); !r) return std::unexpected(r.error());
       ++executed;
 
       const float loss = LossValue();
@@ -807,7 +690,16 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
 
 std::expected<void, std::string> UpdateEngine::RunMerge() {
   if (!arena_) return diag::executing::Error("no plan loaded");
-  Execute(merge_program_);
+  // Re-seal the plan before its frozen weights are merged and committed.
+  // The blob is read-only by contract but lives in ordinary memory — in a
+  // packed Apple package on writable pages, so the GPU can share them —
+  // and a stray write since load must fail here, not ship as corrupted
+  // deltas. One parallel hash of the plan, once per update.
+  if (up::PlanSelfHash(plan_, plan_size_, offsetof(up::PlanHeader, plan_hash)) !=
+      header_.plan_hash)
+    return diag::executing::Error(
+        "plan bytes changed since load — refusing to merge");
+  if (auto r = Execute(merge_program_); !r) return r;
   // Finiteness gate on the materialized deltas. The training loop's loss
   // guard reads the loss written BEFORE each step's backward + optimizer,
   // so a gradient that overflows on the final executed step can poison the

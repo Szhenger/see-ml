@@ -46,6 +46,31 @@ inline bool RangeOk(uint64_t off, uint64_t bytes, uint64_t size) {
     const seeml::update::UpdateInstruction& ins, uint64_t arena_size,
     uint64_t rodata_size, uint32_t plan_version);
 
+/// One operand's byte extent as the validator derived it — the same
+/// arithmetic the kernels use for their loop bounds.
+struct OperandExtent {
+  uint64_t off = 0;
+  uint64_t bytes = 0;
+  bool write = false;
+  bool rodata = false;
+};
+
+/// Every operand extent of one instruction (at most 8).
+struct InstructionExtents {
+  OperandExtent ranges[8];
+  size_t count = 0;
+};
+
+/// ValidateInstruction, additionally returning the operand extents it
+/// proved. A backend that defers work (a GPU command buffer) uses these to
+/// decide when a CPU-resident instruction must wait for pending GPU work
+/// — the read/write ranges are exactly the ones the bounds proof covers,
+/// so dependency tracking can never be looser than validation.
+[[nodiscard]] std::expected<InstructionExtents, std::string>
+DescribeInstruction(const seeml::update::UpdateInstruction& ins,
+                    uint64_t arena_size, uint64_t rodata_size,
+                    uint32_t plan_version);
+
 }  // namespace seeml::update_rt
 
 #endif  // SEEML_RUNTIME_VALIDATOR_PLAN_VALIDATOR_H_

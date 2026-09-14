@@ -49,13 +49,19 @@ file configures the language server with the same flags.
 
 ### Objective-C++ and Metal Shading Language (Apple-only)
 
-One `.mm` file — `runtime/executor/metal_gemm.mm` — compiled with ARC
-(`-fobjc-arc`) and linked against `-framework Metal -framework Foundation`,
-gated on Apple hosts in both build drivers. MSL kernels are **not** checked in
-as `.metal` files: the compiler emits MSL source as C++ string literals
-(`compiler/backend/trainer/kernel_emitter.cc` — four kernels: `seeml_matmul`,
-`seeml_matmul_nt`, `seeml_matmul_tn`, `seeml_gemm_acc`), and the harness JITs
-them at runtime via `newLibraryWithSource:options:error:`. See §7 for scope.
+Two `.mm` files — `runtime/executor/metal_backend.mm` (the executor
+backend, §7) and `runtime/executor/metal_gemm.mm` (the G1a correctness
+harness) — compiled with ARC (`-fobjc-arc`) and linked against
+`-framework Metal -framework Foundation`, gated on Apple hosts in both build
+drivers and in the emitted package's `build.sh` (`SEEML_NO_METAL=1` opts
+out; `metal_backend_stub.cc` takes the backend's place everywhere else, so no
+non-Apple translation unit references a Metal symbol). MSL kernels are
+**not** checked in as `.metal` files: the backend's kernel library is a C++
+string literal owned by the runtime (`runtime/executor/metal_kernels.h`, so
+CPU and GPU kernel semantics are versioned together), the harness's four
+GEMMs are emitted by `compiler/backend/trainer/kernel_emitter.cc`, and both
+are JIT-compiled at runtime via `newLibraryWithSource:options:error:` — no
+Metal toolchain is needed to build anything.
 
 ### POSIX shell
 
@@ -162,7 +168,9 @@ generated driver `update_main.cc`, 35 vendored runtime/`source/` files, and a
 `build.sh` that compiles them with `-std=c++23 -O2 -pthread` (no `-Werror` in
 the field). Host-derived GEMM tile geometry is baked in as
 `-DSEEML_GEMM_TILE_K/N` defines, overridable via `SEEML_TILE_FLAGS` when
-cross-compiling with `CXX`. The Metal path is *not* vendored.
+cross-compiling with `CXX`. The Metal backend *is* vendored: `build.sh`
+compiles its Objective-C++ unit and links the frameworks on Darwin, and the
+stub elsewhere, so a Linux package is byte-for-byte what it was.
 
 ---
 
@@ -275,17 +283,38 @@ to the update transport.
 
 ## 7. GPU status (Apple Metal)
 
-The Metal integration is a hardware-validated **correctness harness**, not a
-dispatch path: synchronous copy-in/copy-out GEMM via shared-mode
-`MTLBuffer`s, one command buffer per call, MSL JIT-compiled from the
-compiler-emitted source string. Contracts: bitwise-reproducible on the same
-device, but *not* bitwise-equal to CPU kernels (different FMA contraction) —
-cross-backend comparison is tolerance-based. The training engine does not yet
-dispatch to it, and the file is excluded from vendored packages. The path from
-harness to backend — engine backend switch, zero-copy residency, batched
-encoding, `simdgroup_matrix` kernels, package vendoring — is scoped as
-milestone v1.3.0 in `docs/roadmap.md` (Project 5; GitHub epic #59), with the
-CPU kept as the bitwise-deterministic reference backend.
+The Metal integration is an opt-in **executor backend** behind the
+`ExecutorBackend` seam (`runtime/executor/backend.h`): `model_update
+--backend cpu|metal|auto` (or `$SEEML_BACKEND`; default `cpu`). The engine
+decodes, validates and sequences the plan; the backend executes it.
+
+- **Residency.** The engine's arena is page-aligned (16 KiB) and wrapped
+  once as a shared `MTLBuffer` — the CPU and GPU read and write the same
+  pages, so the loss slot, checkpoints and merge deltas need no copies. The
+  plan's rodata section starts on a page boundary and the blob is page-padded
+  (`kSeeuRodataAlignment`, a layout property, no version bump), so a
+  page-aligned, writable embedded plan (the `.incbin` stub, `__DATA,__data`
+  on Apple) is wrapped zero-copy too; a heap-resident plan is copied once at
+  load, and the device label says which.
+- **Batching.** Consecutive GPU instructions encode into one command buffer
+  through one serial compute encoder; a CPU-resident instruction (the three
+  loss families, the embedding gather) waits only for pending GPU work it
+  depends on, decided from the validator's operand extents
+  (`DescribeInstruction`) — dependency tracking is never looser than the
+  bounds proof. A command buffer that ends in any state but Completed is an
+  executor diagnostic, never a silent fallback.
+- **Coverage.** `simdgroup_matrix` 64×64 GEMM tiles (NN/NT/TN/accumulate)
+  with fused bias+activation epilogues and the int8 variants; the transformer
+  family; elementwise, LayerNorm/RMSNorm, ReduceRows, ClipNorm (the CPU's
+  chunk geometry, partials combined in chunk order), SGD and AdamW.
+- **Determinism is per-backend.** A backend is bitwise-reproducible against
+  itself (tested run-to-run); CPU and GPU compare at tolerance (tested on
+  every program family the compiler emits), and the backend is recorded in
+  the banner, the gate line, `--report`, and `bench.json`. `--backend cpu`
+  is the reference and is bit-identical to the pre-backend runtime.
+
+The G1a copy-in/copy-out harness (`metal_gemm.mm`) remains as the hardware
+test of the compiler-emitted GEMM source.
 
 ---
 
@@ -373,7 +402,7 @@ gate rejection with the device left untouched. Determinism across
 | Component | Platforms |
 |---|---|
 | Compiler + runtime + tools | macOS (Apple Clang 15+), Linux (GCC 13+ / Clang 19+ with libstdc++) — both CI-tested |
-| Metal GEMM harness, `sysctlbyname` detection | Apple only |
+| Metal executor backend (`--backend metal|auto`), Metal GEMM harness, `sysctlbyname` detection | Apple only |
 | sysfs core-topology scan, `_SC_LEVEL*` cache queries | Linux only |
 | Windows | Code paths exist in `durable_io.cc` and MSVC flag arms in the build, but untested in CI, and `std::aligned_alloc` is unavailable on MSVC — treat as unsupported |
 | Emitted packages | Any C++23 toolchain + POSIX I/O; cross-compile with `CXX=` and `SEEML_TILE_FLAGS=` |

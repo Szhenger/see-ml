@@ -253,6 +253,7 @@ int main(int argc, char** argv) {
   auto repeats_s = args.TakeValue("--repeats", "3");
   auto fixtures_csv = args.TakeValue("--fixtures", "");
   auto peak_s = args.TakeValue("--peak-gflops", "");
+  auto backend_s = args.TakeValue("--backend", "cpu");
   for (auto* v : {&out_path, &threads_csv, &lo_s, &hi_s, &repeats_s,
                   &fixtures_csv, &peak_s})
     if (!*v) return Fail(v->error());
@@ -261,6 +262,7 @@ int main(int argc, char** argv) {
   if (out_path->empty())
     return Fail("--out is required\nusage: seeml-bench --out bench.json "
                 "[--threads 1,8] [--steps-lo 20] [--steps-hi 80] "
+                "[--backend cpu|metal|auto] "
                 "[--repeats 3] [--fixtures name,...] [--peak-gflops F] "
                 "[--version]");
 
@@ -278,6 +280,23 @@ int main(int argc, char** argv) {
     peak_gflops = *p;
   }
 
+  if (!backend_s) return Fail(backend_s.error());
+  const auto backend_kind = rt::ParseBackendKind(*backend_s);
+  if (!backend_kind)
+    return Fail("--backend must be cpu, metal or auto, got '" + *backend_s +
+                "'");
+  // The report records the backend that actually ran (the per-backend
+  // gate keys rows by it): resolve `auto` once, the way every fixture's
+  // engine will, so the field never says "auto".
+  std::string backend_resolved;
+  {
+    rt::UpdateEngine probe;
+    if (auto ok = probe.SelectBackend(*backend_kind); !ok)
+      return Fail(ok.error());
+    backend_resolved = probe.backend_name();
+    if (!probe.backend_note().empty())
+      std::fprintf(stderr, "seeml-bench: %s\n", probe.backend_note().c_str());
+  }
   auto thread_names = SplitCsv("--threads", *threads_csv);
   if (!thread_names) return Fail(thread_names.error());
   std::vector<uint64_t> threads;
@@ -325,12 +344,13 @@ int main(int argc, char** argv) {
   // every schema-1 key is unchanged, so stored baselines remain comparable.
   std::fprintf(out,
                "{\n  \"seeml_version\": \"%s\",\n  \"schema\": 2,\n"
-               "  \"host\": \"%s\",\n"
+               "  \"host\": \"%s\",\n  \"backend\": \"%s\",\n"
                "  \"config\": {\"steps_lo\": %" PRIu64 ", \"steps_hi\": %"
                PRIu64 ", \"repeats\": %" PRIu64 ", \"threads\": \"%s\", "
                "\"peak_gflops\": %.1f},\n"
                "  \"fixtures\": {",
-               seeml::update::kSeemlVersion, HostString().c_str(), *lo, *hi,
+               seeml::update::kSeemlVersion, HostString().c_str(),
+               backend_resolved.c_str(), *lo, *hi,
                *repeats, threads_csv->c_str(), peak_gflops);
 
   bool first_fixture = true;
@@ -347,6 +367,8 @@ int main(int argc, char** argv) {
     const double compile_ms = MsSince(t_compile);
 
     rt::UpdateEngine engine;
+    if (auto ok = engine.SelectBackend(*backend_kind); !ok)
+      return Fail(f->name + (": " + ok.error()));
     const auto t_load = Clock::now();
     if (auto ok = engine.LoadFromMemory(compiled->plan.data(),
                                         compiled->plan.size());

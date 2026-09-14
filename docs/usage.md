@@ -83,7 +83,7 @@ seeml-update-compile --source model.smf --out pkg/ ... --no-embed
 python3 tool/pack_update.py pkg/ --build          # writes update_plan_embedded.S, runs build.sh
 ```
 
-The packer is standard-library Python on the build host only; the package it leaves behind is the same dependency-free C++ (the stub needs only the preprocessor and assembler every C++ toolchain carries), the `.seeu` is untouched, and the binary trains the very same bits as the C-array build — CI asserts all three on every change. The embedded plan is page-aligned (`--page-align`, default 16 KiB), which is also what zero-copy GPU residency will want. `build.sh` prefers the stub whenever one is present, so `pack_update.py` also upgrades an unmodified package emitted before `--no-embed` existed (it rewrites the one compile line and drops the old C array); a hand-edited `build.sh` is refused rather than guessed at.
+The packer is standard-library Python on the build host only; the package it leaves behind is the same dependency-free C++ (the stub needs only the preprocessor and assembler every C++ toolchain carries), the `.seeu` is untouched, and the binary trains the very same bits as the C-array build — CI asserts all three on every change. The embedded plan is page-aligned (`--page-align`, default 16 KiB) and, on Apple, placed in writable data — exactly what the Metal backend's zero-copy residency wants: a packed package trains from the plan's own pages, a heap-loaded plan is copied once. `build.sh` prefers the stub whenever one is present, so `pack_update.py` also upgrades an unmodified package emitted before `--no-embed` existed (it rewrites the one compile line and drops the old C array); a hand-edited `build.sh` is refused rather than guessed at.
 
 Compilation is also your first line of defense: infeasible memory footprints, shape mismatches, a loss that can't see any trainable parameter — all fail *here*, on the build host, with a one-line `"<unit>: <message>"` diagnostic.
 
@@ -117,6 +117,10 @@ model_update --model model.smf --data corpus.sds --out updated.smf \
 | `--checkpoint-every N` | steps between checkpoints (0 = off) |
 | `--resume` | resume from `--checkpoint` if present; `--steps N` then means N *further* steps |
 | `--loss-log curve.csv` | write the per-step loss curve |
+| `--backend cpu\|metal\|auto` | the executor (cpu; or `$SEEML_BACKEND`). `cpu` is the bitwise-deterministic reference and builds anywhere; `metal` runs the update on an Apple GPU and is an error where none exists; `auto` takes the GPU when present and says so, else cpu |
+| `--min-improvement F` | commit only if the gated loss fell by at least the fraction F of its initial value (0 = any strict fall) |
+| `--require-accuracy` | additionally require held-out accuracy not to drop; a usage error on plans without class labels or without a validation split |
+| `--report report.json` | write the backend, the gate parameters, the loss and accuracy pairs, the verdict and whether the commit landed as JSON (written last; an unwritable path is a warning, the exit code still carries the verdict) |
 | `--force` | commit even if the gate shows no improvement |
 
 What happens, in order:
@@ -124,7 +128,7 @@ What happens, in order:
 1. **Load + verify** — the plan's hash is checked, then every instruction operand is bounds-validated *before anything executes*. One arena allocation, sized at compile time. A corrupt or foreign plan is refused at this door.
 2. **Split + shuffle** — the last `--val-frac` (here 10%) of the corpus is held out for validation; training batches are then served through a seeded per-epoch permutation. Same `--seed`, same batches, same bits — on any machine.
 3. **Train** — N steps of forward + backward + clip + optimizer. Interruptible: checkpoints (`--checkpoint`, `--checkpoint-every`) are hash-bound to the plan and fsync-durable, and `--resume` picks up from one — optimizer momentum, step counter, *and* the data-shuffle position, which is replayed so a resumed run produces the same bits as one that was never interrupted. `--steps` after `--resume` counts further steps, not a total. A non-finite loss aborts immediately rather than continuing on garbage.
-4. **Gate** — validation loss is evaluated before and after training with the plan's eval program. No improvement → exit code 3 and the device is left *untouched* (`--force` overrides, if you must).
+4. **Gate** — validation loss is evaluated before and after training with the plan's eval program. No improvement — or less than `--min-improvement`, or a dropped accuracy under `--require-accuracy` — → exit code 3 and the device is left *untouched* (`--force` overrides, if you must). The gate line names the failing gate and the backend that produced the numbers.
 5. **Merge + commit** — deltas `Δ = (α/r)·A@B` are materialized and added to the pristine f32 weights of the source file (which must hash-match the plan), written durably, renamed atomically. A power cut at any moment leaves the old model or the new one — never a torn file.
 
 Exit codes are the API for your update orchestrator: `0` committed, `1` runtime error, `2` bad arguments, `3` regression-gate rejection. `--loss-log` writes the full per-step CSV loss curve once training completes (it is not appended live, so tail it after the run, not during).

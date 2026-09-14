@@ -124,6 +124,8 @@ add_library(seeml_update_rt STATIC
     runtime/executor/loss.cc
     runtime/executor/optimizer.cc
     runtime/executor/attention.cc
+    runtime/executor/backend.cc
+    runtime/executor/cpu_backend.cc
     runtime/feeder/dataset.cc
     runtime/feeder/batch_pipeline.cc
     runtime/custodian/durable_io.cc
@@ -142,6 +144,18 @@ if(APPLE)
         PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(seeml_update_rt PUBLIC
         "-framework Metal" "-framework Foundation")
+endif()
+option(SEEML_NO_METAL "Build the Metal executor backend's stub on Apple hosts too (the G1a harness is unaffected)" OFF)
+# The Metal executor backend (G1b): the real backend on Apple hosts, the
+# stub (--backend metal is an error, auto degrades to cpu) everywhere else.
+# No non-Apple translation unit references a Metal symbol.
+if(APPLE AND NOT SEEML_NO_METAL)
+    target_sources(seeml_update_rt PRIVATE runtime/executor/metal_backend.mm)
+    set_source_files_properties(runtime/executor/metal_backend.mm
+        PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+else()
+    target_sources(seeml_update_rt PRIVATE
+        runtime/executor/metal_backend_stub.cc)
 endif()
 
 # ==============================================================================
@@ -214,6 +228,7 @@ seeml_add_test(seeml_dataset_test         test/runtime/feeder/dataset_test.cc)
 seeml_add_test(seeml_batch_pipeline_test  test/runtime/feeder/batch_pipeline_test.cc)
 seeml_add_test(seeml_kernels_test         test/runtime/executor/kernels_test.cc)
 seeml_add_test(seeml_metal_gemm_test      test/runtime/executor/metal_gemm_test.cc)
+seeml_add_test(seeml_metal_backend_test   test/runtime/executor/metal_backend_test.cc)
 seeml_add_test(seeml_validator_test       test/runtime/validator/validator_test.cc)
 seeml_add_test(seeml_custodian_test       test/runtime/custodian/custodian_test.cc)
 seeml_add_test(seeml_engine_test          test/runtime/engine/engine_test.cc)
