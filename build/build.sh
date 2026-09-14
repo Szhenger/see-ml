@@ -63,6 +63,8 @@ compile runtime/executor/normalization.cc     rt_normalization.o
 compile runtime/executor/loss.cc              rt_loss.o
 compile runtime/executor/optimizer.cc         rt_optimizer.o
 compile runtime/executor/attention.cc         rt_attention.o
+compile runtime/executor/backend.cc           rt_backend.o
+compile runtime/executor/cpu_backend.cc       rt_cpu_backend.o
 
 # Metal GEMM dispatch (G1a) exists only on Apple hosts; elsewhere the
 # hardware-gated suite reduces to one vacuous test and nothing links the
@@ -70,11 +72,18 @@ compile runtime/executor/attention.cc         rt_attention.o
 # ObjC++ front end rejects it) — the rest of the tree is standard C++23.
 METAL_OBJS=""
 METAL_LDFLAGS=""
-if [ "$(uname)" = "Darwin" ]; then
+if [ "$(uname)" = "Darwin" ] && [ -z "${SEEML_NO_METAL:-}" ]; then
   echo "  OBJCXX runtime/executor/metal_gemm.mm"
   eval "$CXX $FLAGS -x objective-c++ -fobjc-arc -c runtime/executor/metal_gemm.mm -o build/rt_metal_gemm.o"
-  METAL_OBJS="build/rt_metal_gemm.o"
+  # The Metal executor backend (G1b) rides the same toolchain gate; the
+  # stub takes its place everywhere Metal does not exist.
+  echo "  OBJCXX runtime/executor/metal_backend.mm"
+  eval "$CXX $FLAGS -x objective-c++ -fobjc-arc -c runtime/executor/metal_backend.mm -o build/rt_metal_backend.o"
+  METAL_OBJS="build/rt_metal_gemm.o build/rt_metal_backend.o"
   METAL_LDFLAGS="-framework Metal -framework Foundation"
+else
+  compile runtime/executor/metal_backend_stub.cc rt_metal_backend.o
+  METAL_OBJS="build/rt_metal_backend.o"
 fi
 compile runtime/feeder/dataset.cc             dataset.o
 compile runtime/feeder/batch_pipeline.cc      batch_pipeline.o
@@ -110,7 +119,8 @@ LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/logger.o \
       build/rt_gemm.o build/rt_elementwise.o build/rt_activation.o \
       build/rt_normalization.o build/rt_loss.o build/rt_optimizer.o \
-      build/rt_attention.o \
+      build/rt_attention.o build/rt_backend.o build/rt_cpu_backend.o \
+      $METAL_OBJS \
       build/dataset.o \
       build/batch_pipeline.o build/durable_io.o build/plan_validator.o \
       build/checkpoint.o build/engine_contract.o build/update_engine.o \
@@ -120,7 +130,7 @@ TESTING="build/seetest_registry.o build/seetest_main.o \
          build/fixtures_corpora.o build/fixtures_probes.o"
 
 echo "  LINK seeml-update-compile"
-eval "$CXX -pthread build/seeml_update_compile.o $LIBS -o build/seeml-update-compile"
+eval "$CXX -pthread build/seeml_update_compile.o $LIBS $METAL_LDFLAGS -o build/seeml-update-compile"
 echo "  LINK seeml-seeu-dump"
 # PlanSelfHash (the v4 integrity seal) runs on the parallel substrate.
 eval "$CXX -pthread build/seeml_seeu_dump.o build/parallel_for.o -o build/seeml-seeu-dump"
@@ -130,7 +140,7 @@ if seeml_bench_enabled; then
   eval "$CXX $FLAGS -c tool/seeml_bench.cc -o build/seeml_bench.o"
   eval "$CXX -pthread build/seeml_bench.o build/fixtures_models.o \
         build/fixtures_corpora.o build/fixtures_probes.o \
-        $LIBS $METAL_OBJS $METAL_LDFLAGS -o build/seeml-bench"
+        $LIBS $METAL_LDFLAGS -o build/seeml-bench"
 fi
 
 for suite in \
@@ -153,6 +163,6 @@ for suite in \
   name="seeml_$(basename "$suite")"
   echo "  CXX+LINK $name"
   eval "$CXX $FLAGS -c 'test/$suite.cc' -o 'build/$name.o'"
-  eval "$CXX -pthread 'build/$name.o' $TESTING $LIBS $METAL_OBJS $METAL_LDFLAGS -o 'build/$name'"
+  eval "$CXX -pthread 'build/$name.o' $TESTING $LIBS $METAL_LDFLAGS -o 'build/$name'"
 done
 echo "build complete"

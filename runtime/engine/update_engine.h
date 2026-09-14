@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "source/plan/update_types.h"
+#include "runtime/executor/backend.h"
 #include "runtime/feeder/dataset.h"
 
 // =============================================================================
@@ -31,7 +32,9 @@
 //   feeder/       SDS corpus decode and pipelined batch staging — gated by
 //                 VerifyFeederContract
 //   executor/     the kernel families the dispatcher executes — gated by
-//                 VerifyExecutorContract (via validator/)
+//                 VerifyExecutorContract (via validator/) — behind the
+//                 ExecutorBackend seam: the CPU library is the reference,
+//                 a GPU backend (Metal) is opt-in per SelectBackend
 //   validator/    load-time bounds proof of every instruction operand
 //   custodian/    durable state: checkpoints and the atomic commit path
 //   diagnostics/  every error crossing the engine's Train boundary must be
@@ -118,11 +121,25 @@ struct TrainReport {
 
 class UpdateEngine {
  public:
-  UpdateEngine() = default;
+  UpdateEngine();
   ~UpdateEngine();
 
   UpdateEngine(const UpdateEngine&) = delete;
   UpdateEngine& operator=(const UpdateEngine&) = delete;
+
+  /// Chooses the executor backend (default: cpu). kAuto resolves to Metal
+  /// when a device exists and to the CPU otherwise (backend_note() says
+  /// which and why); kMetal is a hard error where unavailable. May be
+  /// called before or after a Load — a loaded plan is re-bound, and a
+  /// backend that cannot bind it is refused, leaving the current one.
+  [[nodiscard]] std::expected<void, std::string> SelectBackend(
+      BackendKind requested);
+  /// The resolved backend: its name ("cpu" | "metal"), its device label,
+  /// and the fallback note from an `auto` resolution (empty if none).
+  BackendKind backend_kind() const { return backend_kind_; }
+  const char* backend_name() const;
+  std::string backend_device() const;
+  const std::string& backend_note() const { return backend_note_; }
 
   /// Loads a plan the caller keeps alive (embedded object-file byte arrays).
   [[nodiscard]] std::expected<void, std::string> LoadFromMemory(
@@ -200,14 +217,18 @@ class UpdateEngine {
       Dataset& data, uint64_t steps, const TrainOptions& options);
   [[nodiscard]] std::expected<void, std::string> ValidateDataset(
       Dataset& data) const;
-  void Execute(const std::vector<seeml::update::UpdateInstruction>& program);
-  void ExecuteRange(const std::vector<seeml::update::UpdateInstruction>& program,
-                    size_t begin, size_t end);
+  /// Dispatches [begin, end) of `program` through the backend and flushes
+  /// it, so the arena is coherent when the range returns. A backend failure
+  /// (a GPU command buffer that did not complete) is an executor error.
+  [[nodiscard]] std::expected<void, std::string> Execute(
+      const std::vector<seeml::update::UpdateInstruction>& program);
+  [[nodiscard]] std::expected<void, std::string> ExecuteRange(
+      const std::vector<seeml::update::UpdateInstruction>& program,
+      size_t begin, size_t end);
   /// Execute(train_program_), phase-timed under SEEML_STEP_TIMING.
-  void ExecuteTrainProgram();
+  [[nodiscard]] std::expected<void, std::string> ExecuteTrainProgram();
 
   const float* ReadPtr(uint64_t ref) const;
-  const int8_t* ReadPtrQ8(uint64_t ref) const;
   float* WritePtr(uint64_t ref);
 
   seeml::update::PlanHeader header_{};
@@ -227,7 +248,14 @@ class UpdateEngine {
   std::vector<seeml::update::EmitEntry> emit_table_;
 
   uint8_t* arena_ = nullptr;              // single aligned allocation
+  size_t arena_bytes_ = 0;                // its rounded-up length
   const uint8_t* rodata_ = nullptr;       // points into the plan blob
+  // The executor behind the seam (backend.h); constructed as the CPU
+  // reference, replaced by SelectBackend. Declared after the address
+  // spaces it binds; the destructor still releases it explicitly first.
+  std::unique_ptr<ExecutorBackend> backend_;
+  BackendKind backend_kind_ = BackendKind::kCpu;
+  std::string backend_note_;
   uint64_t step_ = 0;                     // 1-indexed AdamW timestep
   uint64_t num_classes_ = 0;              // softmax width, 0 = no class loss
   uint64_t vocab_bound_ = 0;              // narrowest embedding table, 0 = none

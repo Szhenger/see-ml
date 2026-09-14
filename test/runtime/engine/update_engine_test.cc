@@ -744,6 +744,78 @@ TEST(UpdateEngineTrain, ShouldStopInterruptsAndLossCurveRecords) {
   EXPECT_EQ(report.loss_curve.size(), 25u);
 }
 
+TEST(UpdateEngineBackend, KindsParseAndNameRoundTrip) {
+  using seeml::update_rt::BackendKind;
+  using seeml::update_rt::BackendKindName;
+  using seeml::update_rt::ParseBackendKind;
+  for (BackendKind k : {BackendKind::kCpu, BackendKind::kMetal,
+                        BackendKind::kAuto}) {
+    auto parsed = ParseBackendKind(BackendKindName(k));
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(static_cast<int>(*parsed), static_cast<int>(k));
+  }
+  EXPECT_FALSE(ParseBackendKind("gpu").has_value());
+  EXPECT_FALSE(ParseBackendKind("CPU").has_value());
+  EXPECT_FALSE(ParseBackendKind("").has_value());
+}
+
+TEST(UpdateEngineBackend, ExplicitCpuSelectionIsTheDefaultBitForBit) {
+  // The seam is zero-cost on the reference path: an engine that never
+  // called SelectBackend and one that selected cpu explicitly (before and
+  // after the load) train to identical bits.
+  const std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
+  ASSERT_FALSE(plan.empty());
+  auto run = [&](int mode, std::vector<float>* curve,
+                 std::vector<uint8_t>* persistent) {
+    UpdateEngine engine;
+    if (mode == 1)
+      EXPECT_OK(engine.SelectBackend(seeml::update_rt::BackendKind::kCpu));
+    EXPECT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
+    if (mode == 2)
+      EXPECT_OK(engine.SelectBackend(seeml::update_rt::BackendKind::kCpu));
+    EXPECT_EQ(std::string(engine.backend_name()), "cpu");
+    EXPECT_TRUE(engine.backend_note().empty());
+    auto data = MakeClassificationData(30, kInDim, 5);
+    EXPECT_OK(data);
+    data->EnableShuffle(3);
+    TrainOptions options = Quiet();
+    options.record_loss_curve = true;
+    auto report = engine.Train(*data, 12, options);
+    EXPECT_OK(report);
+    if (!report) return;
+    *curve = report->loss_curve;
+    persistent->assign(engine.arena(),
+                       engine.arena() + engine.header().persistent_size);
+  };
+  std::vector<float> c0, c1, c2;
+  std::vector<uint8_t> p0, p1, p2;
+  run(0, &c0, &p0);
+  run(1, &c1, &p1);
+  run(2, &c2, &p2);
+  ASSERT_EQ(c0.size(), 12u);
+  EXPECT_TRUE(c0 == c1);
+  EXPECT_TRUE(c0 == c2);
+  EXPECT_TRUE(p0 == p1);
+  EXPECT_TRUE(p0 == p2);
+}
+
+TEST(UpdateEngineBackend, AutoNeverFailsAndMetalFailsLoudlyWhenAbsent) {
+  using seeml::update_rt::BackendKind;
+  UpdateEngine engine;
+  EXPECT_OK(engine.SelectBackend(BackendKind::kAuto));
+  const bool on_metal = std::string(engine.backend_name()) == "metal";
+  // auto resolves to a concrete backend and explains a fallback.
+  EXPECT_TRUE(on_metal || !engine.backend_note().empty());
+  UpdateEngine strict;
+  auto r = strict.SelectBackend(BackendKind::kMetal);
+  if (on_metal) {
+    EXPECT_OK(r);
+  } else {
+    EXPECT_ERROR(r);
+    EXPECT_EQ(std::string(strict.backend_name()), "cpu");  // unchanged
+  }
+}
+
 TEST(UpdateEngineTrain, TrainingIsBitwiseInvariantAcrossThreadCounts) {
   // The whole update — batch pipeline, parallel kernels, ordered loss
   // reductions — must compute identical BITS at any pool width: with one

@@ -141,7 +141,12 @@ constexpr const char* kUsage =
     "usage: model_update --model <source.smf> --data <corpus.sds>"
     " [--out updated.smf] [--steps N] [--seed S]"
     " [--val-frac F] [--checkpoint ckpt] [--checkpoint-every N]"
-    " [--resume] [--loss-log curve.csv] [--force] [--help]\n";
+    " [--resume] [--loss-log curve.csv] [--backend cpu|metal|auto]"
+    " [--force] [--help]\n"
+    "  --backend: the executor (default cpu, or $SEEML_BACKEND). cpu is the\n"
+    "  bitwise-deterministic reference and builds anywhere; metal runs the\n"
+    "  update on an Apple GPU (an error where none exists); auto takes the\n"
+    "  GPU when present and says so, else cpu.\n";
 
 /// Every argv slot must be a known flag or a known flag's value: the
 /// compiler CLI treats unconsumed arguments as hard errors, and the device
@@ -151,7 +156,8 @@ bool ArgsOk(int argc, char** argv) {
   static const char* const kValueFlags[] = {
       "--model",      "--data",     "--out",
       "--steps",      "--seed",     "--val-frac",
-      "--checkpoint", "--loss-log", "--checkpoint-every"};
+      "--checkpoint", "--loss-log", "--checkpoint-every",
+      "--backend"};
   static const char* const kBoolFlags[] = {"--force", "--resume", "--help",
                                            "-h"};
   for (int i = 1; i < argc; ++i) {
@@ -228,11 +234,38 @@ int main(int argc, char** argv) {
     return 2;
   }
 
+  // The executor backend: the flag wins over $SEEML_BACKEND, which wins
+  // over the cpu default. Selected before the plan loads, so the load
+  // binds the arena to the backend that will execute it.
+  const char* backend_env = std::getenv("SEEML_BACKEND");
+  const std::string backend_text =
+      Arg(argc, argv, "--backend",
+          backend_env && *backend_env ? backend_env : "cpu");
+  const auto backend_kind =
+      seeml::update_rt::ParseBackendKind(backend_text);
+  if (!backend_kind) {
+    std::fprintf(stderr,
+                 "model_update: --backend must be cpu, metal or auto, got "
+                 "'%s'\n",
+                 backend_text.c_str());
+    return 2;
+  }
+
   seeml::update_rt::UpdateEngine engine;
+  if (auto r = engine.SelectBackend(*backend_kind); !r) {
+    std::fprintf(stderr, "backend: %s\n", r.error().c_str());
+    return 1;
+  }
+  if (!engine.backend_note().empty())
+    std::fprintf(stderr, "seeml-update: %s\n", engine.backend_note().c_str());
   if (auto r = engine.LoadFromMemory(kSeemlUpdatePlan, kSeemlUpdatePlanSize); !r) {
     std::fprintf(stderr, "load: %s\n", r.error().c_str());
     return 1;
   }
+  // The backend is recorded wherever results are compared (the per-backend
+  // determinism doctrine): the banner, the gate line below, and any report.
+  std::fprintf(stderr, "seeml-update: backend %s (%s)\n",
+               engine.backend_name(), engine.backend_device().c_str());
 
   // Fail fast: the plan's emit offsets are only meaningful inside the exact
   // file it was compiled from, and commit would refuse anyway — but only
@@ -286,8 +319,10 @@ int main(int argc, char** argv) {
                report->initial_avg_loss, report->final_avg_loss,
                (unsigned long long)report->steps);
   if (report->has_validation)
-    std::fprintf(stderr, "seeml-update: validation loss %.6f -> %.6f\n",
-                 report->val_initial_loss, report->val_final_loss);
+    std::fprintf(stderr,
+                 "seeml-update: validation loss %.6f -> %.6f [backend %s]\n",
+                 report->val_initial_loss, report->val_final_loss,
+                 engine.backend_name());
   if (report->has_val_accuracy)
     std::fprintf(stderr, "seeml-update: validation accuracy %.4f -> %.4f\n",
                  report->val_initial_accuracy, report->val_final_accuracy);
@@ -337,6 +372,9 @@ constexpr const char* kVendoredSources[] = {
     "runtime/executor/activation.cc",     "runtime/executor/normalization.cc",
     "runtime/executor/loss.cc",           "runtime/executor/optimizer.cc",
     "runtime/executor/attention.cc",
+    "runtime/executor/backend.h",         "runtime/executor/backend.cc",
+    "runtime/executor/cpu_backend.cc",    "runtime/executor/metal_backend.h",
+    "runtime/executor/metal_backend_stub.cc",
     "runtime/feeder/dataset.h",           "runtime/feeder/dataset.cc",
     "runtime/feeder/batch_pipeline.h",    "runtime/feeder/batch_pipeline.cc",
     "runtime/validator/plan_validator.h", "runtime/validator/plan_validator.cc",
@@ -399,7 +437,8 @@ std::string BuildScript(const GemmTiling* tiling) {
   s += "$CXX $FLAGS -c source/parallel/parallel_for.cc -o parallel_for.o\n";
   s += "for unit in executor/gemm executor/elementwise executor/activation "
        "executor/normalization executor/loss executor/optimizer "
-       "executor/attention "
+       "executor/attention executor/backend executor/cpu_backend "
+       "executor/metal_backend_stub "
        "feeder/dataset feeder/batch_pipeline validator/plan_validator "
        "custodian/durable_io custodian/checkpoint engine/contract "
        "engine/update_engine; do\n";
@@ -408,6 +447,7 @@ std::string BuildScript(const GemmTiling* tiling) {
   s += "$CXX $FLAGS update_main.o update_plan_embedded.o update_engine.o "
        "contract.o dataset.o batch_pipeline.o gemm.o elementwise.o "
        "activation.o normalization.o loss.o optimizer.o attention.o "
+       "backend.o cpu_backend.o metal_backend_stub.o "
        "parallel_for.o durable_io.o plan_validator.o checkpoint.o "
        "-o model_update\n";
   s += "# The .o files are intermediates; the deliverable is the binary.\n";
