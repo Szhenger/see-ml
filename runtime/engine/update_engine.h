@@ -85,7 +85,8 @@ struct EvalMetrics {
 /// The fields are unconditional so the header is identical under both
 /// builds (no ODR hazard between differently-configured objects).
 struct StepTimings {
-  uint64_t steps = 0;         // training-stream executions accumulated
+  uint64_t steps = 0;         // optimizer steps accumulated (G grad
+                              // executions each under accumulation)
   double fwd_seconds = 0.0;
   double bwd_seconds = 0.0;
   double opt_seconds = 0.0;

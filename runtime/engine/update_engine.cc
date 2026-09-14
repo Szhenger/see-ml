@@ -383,7 +383,6 @@ std::expected<void, std::string> UpdateEngine::ExecuteTrainProgram() {
       !r)
     return r;
   const auto t3 = clock::now();
-  ++timings_.steps;
   timings_.fwd_seconds += std::chrono::duration<double>(t1 - t0).count();
   timings_.bwd_seconds += std::chrono::duration<double>(t2 - t1).count();
   timings_.opt_seconds += std::chrono::duration<double>(t3 - t2).count();
@@ -453,6 +452,9 @@ void UpdateEngine::ExecuteTrainOnce() {
   // adapter parameters, so deltas materialized by an earlier RunMerge are
   // stale and commit must re-merge first.
   merged_ = false;
+#ifdef SEEML_STEP_TIMING
+  ++timings_.steps;
+#endif
   if (auto r = ExecuteTrainProgram(); !r) {
     // A verification hook, not a product path: the CPU backend never fails,
     // and a GPU failure here is a bug the test must not paper over.
@@ -668,6 +670,10 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
       // once. The reported loss is the mean over the G micro-batch losses
       // — the loss of the effective batch. With G == 1 the grad program IS
       // the whole step and the loop body is the classic one.
+      // An error return from inside this loop leaves the accumulators
+      // partially folded; a failed Train() ends the engine's usable state
+      // (checkpoints are written only after the step program), so no
+      // resume ever starts from them.
       double loss_sum = 0.0;
       for (uint64_t g = 0; g < grad_accum_; ++g) {
         feeder.NextBatch(input_slot, label_slot);
@@ -680,6 +686,9 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
           return std::unexpected(r.error());
       }
       ++executed;
+#ifdef SEEML_STEP_TIMING
+      ++timings_.steps;  // one optimizer step: G grad executions + the step
+#endif
 
       const float loss = static_cast<float>(loss_sum /
                                             static_cast<double>(grad_accum_));

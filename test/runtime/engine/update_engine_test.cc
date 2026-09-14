@@ -794,6 +794,27 @@ TEST(UpdateEngineAccumulation, StepsCountOptimizerStepsAndConsumeGBatches) {
   EXPECT_TRUE(straight_bytes == resumed_bytes);
 }
 
+TEST(UpdateEngineAccumulation, SgdWithClipTrainsAndImproves) {
+  UpdateConfig config = BaseConfig(kBatch);
+  config.optimizer.kind = OptimizerKind::kSgd;
+  config.optimizer.clip_norm = 0.5f;
+  config.optimizer.lr = 5e-2f;
+  config.grad_accum_steps = 2;
+  const std::vector<uint8_t> plan = CompilePlan(config);
+  ASSERT_FALSE(plan.empty());
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
+  auto data = MakeClassificationData(40, kInDim, 6);
+  ASSERT_OK(data);
+  data->EnableShuffle(2);
+  TrainOptions options = Quiet();
+  options.record_loss_curve = true;
+  ASSERT_OK_AND_ASSIGN(auto report, engine.Train(*data, 30, options));
+  EXPECT_EQ(report.steps, 30u);
+  EXPECT_EQ(report.loss_curve.size(), 30u);
+  EXPECT_LT(report.final_avg_loss, report.initial_avg_loss);
+}
+
 TEST(UpdateEngineAccumulation, IsBitwiseInvariantAcrossThreadCounts) {
   UpdateConfig config = BaseConfig(kBatch);
   config.grad_accum_steps = 2;

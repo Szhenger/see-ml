@@ -285,6 +285,31 @@ TEST(UpdateCompiler, GradientAccumulationSplitsTheStream) {
   EXPECT_EQ(accum.persistent_size, plain.persistent_size + grad_bytes);
 }
 
+TEST(UpdateCompiler, GradientAccumulationSplitsAnSgdStream) {
+  // SGD has no moments: per trainable the step program is clip + step +
+  // zero, and the grad program's folds precede the first clip.
+  SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 52);
+  UpdateConfig config = BaseConfig(kBatch);
+  config.optimizer.kind = OptimizerKind::kSgd;
+  config.optimizer.clip_norm = 0.5f;
+  config.grad_accum_steps = 2;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate c, UpdateCompiler(config).Compile(model));
+  const PlanHeader h = HeaderOf(c);
+  const size_t trainables = 2 * c.adapters.size();
+  std::vector<UpdateInstruction> step(h.step_instr_count);
+  std::memcpy(step.data(), c.plan.data() + h.step_instr_offset,
+              step.size() * sizeof(UpdateInstruction));
+  EXPECT_EQ(step.size(), 3 * trainables);
+  EXPECT_EQ(CountOpcode(step, OpCode::kClipNorm), trainables);
+  EXPECT_EQ(CountOpcode(step, OpCode::kSgdStep), trainables);
+  EXPECT_EQ(CountOpcode(step, OpCode::kFill), trainables);
+  EXPECT_EQ(static_cast<OpCode>(step[0].opcode), OpCode::kClipNorm);
+  const auto grad = TrainProgramOf(c);
+  EXPECT_EQ(CountOpcode(grad, OpCode::kAccumulate), trainables);
+  EXPECT_EQ(CountOpcode(grad, OpCode::kSgdStep), 0u);
+  EXPECT_EQ(CountOpcode(grad, OpCode::kClipNorm), 0u);
+}
+
 TEST(UpdateCompiler, RejectsTeacherShapeMismatch) {
   SmfModel student = MakeMlp(kInDim, kHidden, kOutDim, 8);
   UpdateConfig config = BaseConfig(kBatch);

@@ -211,7 +211,7 @@ struct EmitEntry {
 
 // The header layout is the compiler↔runtime ABI. Additive version bumps
 // carve new fields out of `reserved` and MUST NOT change this size — a v7
-// carve of reserved[4] into input_kind/pad4/seq_len/reserved[2] is
+// carve of reserved[4] into input_kind/grad_accum_steps/seq_len/step_instr_offset+count is
 // byte-exact only if this holds. Compiler-enforce it rather than argue it.
 static_assert(sizeof(PlanHeader) == 280, "PlanHeader layout is part of the ABI.");
 static_assert(sizeof(EmitEntry) == 24, "EmitEntry layout is part of the ABI.");

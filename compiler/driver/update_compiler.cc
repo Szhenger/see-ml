@@ -526,6 +526,9 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   // when the plan accumulates) is about plans that train.
   const uint32_t recorded_accum = config_.emit_optimizer ? accum : 1;
   header.grad_accum_steps = recorded_accum;
+  uint64_t accumulator_bytes = 0;
+  for (const ParamInit& pi : binding->params)
+    if (pi.value->id().ends_with(".grad_acc")) accumulator_bytes += pi.bytes;
   header.lr_schedule = static_cast<uint32_t>(config_.optimizer.lr_schedule);
   header.warmup_steps = config_.optimizer.warmup_steps;
   header.min_lr_factor = config_.optimizer.min_lr_factor;
@@ -655,10 +658,20 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   seeml::diag::Note(generating::kDriver, "plan compiled — " +
                std::to_string(header.train_instr_count) + " train + " +
                std::to_string(header.eval_instr_count) + " eval + " +
-               std::to_string(header.merge_instr_count) + " merge instrs, " +
-               "arena " + std::to_string(header.arena_size) + " B (" +
-               std::to_string(header.persistent_size) + " B persistent), " +
-               "rodata " + std::to_string(header.rodata_size) + " B");
+               std::to_string(header.merge_instr_count) + " merge" +
+               (header.step_instr_count
+                    ? " + " + std::to_string(header.step_instr_count) + " step"
+                    : std::string()) +
+               " instrs, arena " + std::to_string(header.arena_size) + " B (" +
+               std::to_string(header.persistent_size) + " B persistent" +
+               (recorded_accum > 1
+                    ? ", " + std::to_string(accumulator_bytes) +
+                          " B of it gradient accumulators for an effective "
+                          "batch of " +
+                          std::to_string(static_cast<uint64_t>(batch) *
+                                         recorded_accum)
+                    : std::string()) +
+               "), rodata " + std::to_string(header.rodata_size) + " B");
 
   // Backend boundary: the assembled plan must be internally consistent with
   // the adapters and gradients it claims to train.
