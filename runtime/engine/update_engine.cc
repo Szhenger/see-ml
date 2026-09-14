@@ -30,6 +30,15 @@ float BitsToF32(uint64_t bits) {
   return std::bit_cast<float>(static_cast<uint32_t>(bits));
 }
 
+// The KL temperature word packs (loss_scale bits << 32) | T bits. A zero
+// high word is a pre-v8 plan: no scale was ever written, and 1.0 selects
+// the pre-change behavior (schema.h, the additive-field rule).
+float KlTemperatureOf(uint64_t word) { return BitsToF32(word & 0xFFFFFFFFu); }
+float KlLossScaleOf(uint64_t word) {
+  const uint64_t hi = word >> 32;
+  return hi == 0 ? 1.0f : BitsToF32(hi);
+}
+
 }  // namespace
 
 UpdateEngine::~UpdateEngine() {
@@ -431,13 +440,15 @@ void UpdateEngine::ExecuteRange(
         k::KLDistillFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
                         WritePtr(ins.in[2]), WritePtr(ins.in[3]),
                         WritePtr(ins.out[0]), ins.out[1] >> 32,
-                        ins.out[1] & 0xFFFFFFFFu, BitsToF32(ins.out[2]));
+                        ins.out[1] & 0xFFFFFFFFu, KlTemperatureOf(ins.out[2]),
+                        KlLossScaleOf(ins.out[2]));
         break;
       case up::OpCode::kKLDistillBwd:
         k::KLDistillBwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
                         ReadPtr(ins.in[2]), WritePtr(ins.in[3]),
                         ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
-                        BitsToF32(ins.out[1]));
+                        KlTemperatureOf(ins.out[1]),
+                        KlLossScaleOf(ins.out[1]));
         break;
       case up::OpCode::kSgdStep:
         k::SgdStep(WritePtr(ins.in[0]), ReadPtr(ins.in[1]), ins.out[0],

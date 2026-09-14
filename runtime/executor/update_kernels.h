@@ -139,11 +139,18 @@ void MseBwd(const float* pred, const float* target, const float* seed,
             float* dpred, size_t n);
 
 // Distillation: p = softmax(logits / T).
-// loss = (1/N) sum_n KL(p_t_n || p_s_n);  dstudent = seed * (p_s - p_t)/(N*T)
+//   loss     = loss_scale * (1/N) sum_n KL(p_t_n || p_s_n)
+//   dstudent = seed * loss_scale * (p_s - p_t) / (N*T)
+// The compiler sets loss_scale = T^2 (Hinton et al.: the soft-target term's
+// gradient then scales as T, commensurate with a hard-label term at any
+// temperature) and carries it in the plan; loss_scale = 1 reproduces the
+// pre-v8 unscaled divergence bit-for-bit.
 void KLDistillFwd(const float* s_logits, const float* t_logits, float* loss,
-                  float* p_s, float* p_t, size_t N, size_t C, float T);
+                  float* p_s, float* p_t, size_t N, size_t C, float T,
+                  float loss_scale);
 void KLDistillBwd(const float* p_s, const float* p_t, const float* seed,
-                  float* dlogits, size_t N, size_t C, float T);
+                  float* dlogits, size_t N, size_t C, float T,
+                  float loss_scale);
 
 // --- Gradient conditioning ---------------------------------------------------
 // Per-tensor L2 norm clip in place: g *= min(1, max_norm / ||g||_2).

@@ -149,6 +149,11 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   auto make_kl = [&]() {
     sir::Operation* op = block.appendOp("sc_high.kl_distill");
     op->setAttribute("temperature", config_.temperature);
+    // Hinton et al.: the soft-target loss is scaled by T^2 so its gradient
+    // (T*(p_s - p_t)/N) stays commensurate with the hard-label term at any
+    // temperature; without it, --temperature covertly re-weights xent+kl.
+    // The objective is decided here, once; the runtime only multiplies.
+    op->setAttribute("loss_scale", config_.temperature * config_.temperature);
     op->addOperand(build.output);
     op->addOperand(teacher_out);
     sir::Value* l = op->addResult("loss.kl", sir::DataType::F32, sir::Shape{});

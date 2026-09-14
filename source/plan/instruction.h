@@ -44,9 +44,11 @@ enum class OpCode : uint16_t {
   kMseFwd = 13,          // in: pred, target, loss;               out[0]=count
   kMseBwd = 14,          // in: pred, target, seed, dpred;        out[0]=count
   kKLDistillFwd = 15,  // in: s_logits, t_logits, loss, p_s; out[0]=p_t ref,
-                       // out[1]=N<<32|C, out[2]=temperature f32 bits
+                       // out[1]=N<<32|C, out[2]=loss_scale bits<<32 |
+                       // temperature f32 bits (v8: scale = T^2; a zero high
+                       // word — every pre-v8 plan — means scale 1.0)
   kKLDistillBwd = 16,  // in: p_s, p_t, seed, dlogits; out[0]=N<<32|C,
-                       // out[1]=temperature f32 bits
+                       // out[1]=loss_scale bits<<32 | temperature f32 bits
   // Optimizers (in-place; hyperparameters live in the PlanHeader).
   kSgdStep = 17,    // in: p, g;             out[0] = count
   kAdamWStep = 18,  // in: p, g, m, v;       out[0] = count

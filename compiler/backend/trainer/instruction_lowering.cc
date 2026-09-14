@@ -13,6 +13,11 @@ namespace generating = seeml::diag::generating;
 namespace {
 
 uint64_t F32Bits(float f) { return std::bit_cast<uint32_t>(f); }
+// Two immediates in one word: (hi bits << 32) | lo bits. Used for the KL
+// temperature word, whose high half is the v8 loss scale (instruction.h).
+uint64_t F32BitsPair(float hi, float lo) {
+  return (F32Bits(hi) << 32) | F32Bits(lo);
+}
 
 }  // namespace
 
@@ -308,7 +313,9 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[3] = ref(op->result(1));    // p_s
       ins.out[0] = ref(op->result(2));   // p_t
       ins.out[1] = pack32(s->shape().dims.at(0), s->shape().dims.at(1));
-      ins.out[2] = F32Bits(op->getAttrAs<float>("temperature").value_or(1.0f));
+      ins.out[2] = F32BitsPair(
+          op->getAttrAs<float>("loss_scale").value_or(1.0f),
+          op->getAttrAs<float>("temperature").value_or(1.0f));
     } else if (m == "sc_low.kl_grad") {
       const sir::Value* d = op->result(0);
       set(OpCode::kKLDistillBwd);
@@ -317,7 +324,9 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[2] = ref(op->operand(2));   // seed
       ins.in[3] = ref(d);                // dlogits
       ins.out[0] = pack32(d->shape().dims.at(0), d->shape().dims.at(1));
-      ins.out[1] = F32Bits(op->getAttrAs<float>("temperature").value_or(1.0f));
+      ins.out[1] = F32BitsPair(
+          op->getAttrAs<float>("loss_scale").value_or(1.0f),
+          op->getAttrAs<float>("temperature").value_or(1.0f));
     } else if (m == "sc_low.sgd_step") {
       set(OpCode::kSgdStep);
       ins.in[0] = ref(op->operand(0));

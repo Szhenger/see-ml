@@ -98,7 +98,7 @@ A 40-byte header, then fixed-size records — which means sample k lives at a *c
 
 ## SEEU — Update Plan (`.seeu`, v7)
 
-The star of the show: the fully AOT-compiled update. One file containing three instruction streams (train / eval / merge), the frozen weights, the persistent segment's initial image, and the emit table — every section addressed by a single `PlanHeader` at offset 0 (authoritative definition: `source/plan/schema.h`; every section 64-byte aligned). Versioning is additive: see the version history below (currently v7).
+The star of the show: the fully AOT-compiled update. One file containing three instruction streams (train / eval / merge), the frozen weights, the persistent segment's initial image, and the emit table — every section addressed by a single `PlanHeader` at offset 0 (authoritative definition: `source/plan/schema.h`; every section 64-byte aligned). Versioning is additive: see the version history below (currently v8).
 
 Key header fields:
 
@@ -117,7 +117,7 @@ Key header fields:
 
 Notice the "zeroed field" trick in `plan_hash`: you can't hash a file that contains its own hash (the act of writing the digest would change it), so the digest is computed with that one field held at zero, then patched in. The verifier replays the same convention.
 
-Version history: v2 added the eval program, integrity hashes, and LR schedule; v3 moved `source_model_hash` to `ContentHash64`; v4 moved `plan_hash` to the chunked-parallel `PlanSelfHash`; v5 gave the instruction `flags` word meaning (fused GEMM epilogues); v6 added the transformer opcode family (RMSNorm, RoPE, causal attention and its backward primitives); v7 added token-native input — `input_kind` and `seq_len` carved from `reserved`, plus the `kEmbedFwd` gather over a rodata-only table. Each new opcode is version-gated: a plan carrying one below its introducing version is corruption, not forward compatibility. The gather's *index* bound is the feeder contract's runtime job — every token id is proven inside both the narrowest embedding table and the narrowest softmax width before anything executes, exactly how class labels are bounded.
+Version history: v2 added the eval program, integrity hashes, and LR schedule; v3 moved `source_model_hash` to `ContentHash64`; v4 moved `plan_hash` to the chunked-parallel `PlanSelfHash`; v5 gave the instruction `flags` word meaning (fused GEMM epilogues); v6 added the transformer opcode family (RMSNorm, RoPE, causal attention and its backward primitives); v7 added token-native input — `input_kind` and `seq_len` carved from `reserved`, plus the `kEmbedFwd` gather over a rodata-only table; v8 gave the high half of the `kKLDistill{Fwd,Bwd}` temperature word meaning as the distillation loss scale (`T²`, so the soft-target gradient stays commensurate with a hard-label term) — zero there, as in every pre-v8 plan, reads as 1.0. Each new opcode is version-gated: a plan carrying one below its introducing version is corruption, not forward compatibility. The gather's *index* bound is the feeder contract's runtime job — every token id is proven inside both the narrowest embedding table and the narrowest softmax width before anything executes, exactly how class labels are bounded.
 
 Why do hyperparameters live in the *header* while clip lives in the *stream*? Because a learning rate is a number the runtime consults, but clipping changes which instructions exist — structure belongs to the program, parameters to the header, and each fact has exactly one home ([compiler.md](compiler.md)).
 

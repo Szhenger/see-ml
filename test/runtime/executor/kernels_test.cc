@@ -272,12 +272,13 @@ TEST(KLDistill, IdenticalLogitsGiveZeroLossAndGradient) {
   std::vector<float> p_s(N * C), p_t(N * C);
   float loss = -1.0f;
   k::KLDistillFwd(logits.data(), logits.data(), &loss, p_s.data(), p_t.data(),
-                  N, C, 2.0f);
+                  N, C, 2.0f, 4.0f);
   EXPECT_NEAR(loss, 0.0f, 1e-6);
 
   const float seed = 1.0f;
   std::vector<float> dlogits(N * C);
-  k::KLDistillBwd(p_s.data(), p_t.data(), &seed, dlogits.data(), N, C, 2.0f);
+  k::KLDistillBwd(p_s.data(), p_t.data(), &seed, dlogits.data(), N, C, 2.0f,
+                  4.0f);
   for (float d : dlogits) EXPECT_NEAR(d, 0.0f, 1e-7);
 }
 
@@ -288,7 +289,7 @@ TEST(KLDistill, DivergentLogitsGivePositiveLossAndZeroSumRows) {
   std::vector<float> p_s(C), p_t(C);
   float loss = 0.0f;
   k::KLDistillFwd(s_logits.data(), t_logits.data(), &loss, p_s.data(),
-                  p_t.data(), N, C, 1.0f);
+                  p_t.data(), N, C, 1.0f, 1.0f);
   EXPECT_GT(loss, 0.0f);
 
   // Cached distributions are proper softmaxes.
@@ -297,7 +298,8 @@ TEST(KLDistill, DivergentLogitsGivePositiveLossAndZeroSumRows) {
 
   const float seed = 1.0f;
   std::vector<float> dlogits(C);
-  k::KLDistillBwd(p_s.data(), p_t.data(), &seed, dlogits.data(), N, C, 1.0f);
+  k::KLDistillBwd(p_s.data(), p_t.data(), &seed, dlogits.data(), N, C, 1.0f,
+                  1.0f);
   // dstudent = (p_s - p_t) / (N*T): rows sum to zero.
   EXPECT_NEAR(dlogits[0] + dlogits[1] + dlogits[2], 0.0f, 1e-6);
   EXPECT_NEAR(dlogits[0], p_s[0] - p_t[0], 1e-6);
@@ -309,11 +311,70 @@ TEST(KLDistill, TemperatureSoftensDistributions) {
   const std::vector<float> t_logits = {0, 4};
   std::vector<float> p_s(C), p_t(C);
   float sharp = 0.0f, soft = 0.0f;
+  // Unscaled (loss_scale = 1): the divergence itself flattens with T.
   k::KLDistillFwd(s_logits.data(), t_logits.data(), &sharp, p_s.data(),
-                  p_t.data(), N, C, 1.0f);
+                  p_t.data(), N, C, 1.0f, 1.0f);
   k::KLDistillFwd(s_logits.data(), t_logits.data(), &soft, p_s.data(),
-                  p_t.data(), N, C, 8.0f);
+                  p_t.data(), N, C, 8.0f, 1.0f);
   EXPECT_GT(sharp, soft);  // high temperature flattens the divergence
+}
+
+TEST(KLDistill, LossScaleIsHintonTemperatureSquared) {
+  // loss(T, scale) == scale * loss(T, 1) exactly (one f32 multiply), and
+  // with scale = T^2 the gradient is T*(p_s - p_t)/N — the convention the
+  // compiler emits (#13), commensurate with a hard-label term at any T.
+  const size_t N = 2, C = 3;
+  const std::vector<float> s_logits = {2, 0, -1, 0.5f, 0.5f, -2};
+  const std::vector<float> t_logits = {0, 1, 0, -1, 2, 0};
+  const float T = 2.0f;
+  std::vector<float> p_s(N * C), p_t(N * C);
+  float plain = 0.0f, scaled = 0.0f;
+  k::KLDistillFwd(s_logits.data(), t_logits.data(), &plain, p_s.data(),
+                  p_t.data(), N, C, T, 1.0f);
+  k::KLDistillFwd(s_logits.data(), t_logits.data(), &scaled, p_s.data(),
+                  p_t.data(), N, C, T, T * T);
+  EXPECT_EQ(scaled, plain * (T * T));
+
+  const float seed = 1.0f;
+  std::vector<float> dlogits(N * C);
+  k::KLDistillBwd(p_s.data(), p_t.data(), &seed, dlogits.data(), N, C, T,
+                  T * T);
+  for (size_t i = 0; i < N * C; ++i)
+    EXPECT_NEAR(dlogits[i], T * (p_s[i] - p_t[i]) / static_cast<float>(N),
+                1e-6);
+}
+
+TEST(KLDistill, ScaledGradientMatchesFiniteDifferences) {
+  // d loss / d s_logit at T = 2 with the T^2 scale, central differences in
+  // double against the f32 kernel pair (G13's ask: the kernel-level FD
+  // check the sign/monotonicity tests never gave this loss).
+  const size_t N = 2, C = 4;
+  std::vector<float> s_logits = {1.5f, -0.5f, 0.25f, 2.0f,
+                                 -1.0f, 0.0f, 0.75f, 0.5f};
+  const std::vector<float> t_logits = {0.0f, 1.0f, -1.0f, 0.5f,
+                                       2.0f, -0.5f, 0.0f, 1.0f};
+  const float T = 2.0f, scale = T * T;
+  std::vector<float> p_s(N * C), p_t(N * C), dlogits(N * C);
+  float loss = 0.0f;
+  const float seed = 1.0f;
+  k::KLDistillFwd(s_logits.data(), t_logits.data(), &loss, p_s.data(),
+                  p_t.data(), N, C, T, scale);
+  k::KLDistillBwd(p_s.data(), p_t.data(), &seed, dlogits.data(), N, C, T,
+                  scale);
+  const float eps = 1e-2f;
+  for (size_t i = 0; i < N * C; ++i) {
+    const float saved = s_logits[i];
+    float plus = 0.0f, minus = 0.0f;
+    s_logits[i] = saved + eps;
+    k::KLDistillFwd(s_logits.data(), t_logits.data(), &plus, p_s.data(),
+                    p_t.data(), N, C, T, scale);
+    s_logits[i] = saved - eps;
+    k::KLDistillFwd(s_logits.data(), t_logits.data(), &minus, p_s.data(),
+                    p_t.data(), N, C, T, scale);
+    s_logits[i] = saved;
+    const double numeric = (static_cast<double>(plus) - minus) / (2.0 * eps);
+    EXPECT_NEAR(dlogits[i], numeric, 2e-4);
+  }
 }
 
 // --- Optimizers -----------------------------------------------------------------------
@@ -458,7 +519,7 @@ TEST(ParallelDeterminism, LossReductionsAreThreadCountInvariant) {
   auto kl = [&](float* out) {
     std::vector<float> p_s(N * C), p_t(N * C);
     k::KLDistillFwd(logits.data(), targets.data(), out, p_s.data(),
-                    p_t.data(), N, C, 2.0f);
+                    p_t.data(), N, C, 2.0f, 4.0f);
   };
   EXPECT_BITWISE_EQ_F32(RunAtWidth(1, 64, xent), RunAtWidth(8, 64, xent));
   EXPECT_BITWISE_EQ_F32(RunAtWidth(1, 1, mse), RunAtWidth(8, 1, mse));

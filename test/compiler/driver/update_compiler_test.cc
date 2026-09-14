@@ -208,6 +208,28 @@ TEST(UpdateCompiler, DistillationRequiresAndUsesTeacher) {
   EXPECT_EQ(CountOpcode(instrs, OpCode::kKLDistillFwd), 1u);
   // Teacher weights ride along frozen: no adapters on them.
   EXPECT_EQ(compiled.adapters.size(), 2u);
+
+  // The objective is decided here: the plan carries T in the low word and
+  // the Hinton T^2 scale in the high word of the temperature operand, on
+  // both the forward and its VJP (#13).
+  const auto bits = [](float f) {
+    return uint64_t{std::bit_cast<uint32_t>(f)};
+  };
+  const float T = config.temperature;
+  const uint64_t want = (bits(T * T) << 32) | bits(T);
+  size_t fwd = 0, bwd = 0;
+  for (const auto& ins : instrs) {
+    if (ins.opcode == static_cast<uint16_t>(OpCode::kKLDistillFwd)) {
+      EXPECT_EQ(ins.out[2], want);
+      ++fwd;
+    } else if (ins.opcode == static_cast<uint16_t>(OpCode::kKLDistillBwd)) {
+      EXPECT_EQ(ins.out[1], want);
+      ++bwd;
+    }
+  }
+  EXPECT_EQ(fwd, 1u);
+  EXPECT_EQ(bwd, 1u);
+  EXPECT_EQ(HeaderOf(compiled).version, seeml::update::kSeeuKlScaleVersion);
 }
 
 TEST(UpdateCompiler, RejectsTeacherShapeMismatch) {

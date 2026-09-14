@@ -102,7 +102,7 @@ shapes — the gap the C2 SIMD and G1b Metal projects are priced against.
 |---|---|---|
 | **CI wall time per job** | each ci.yml job's duration trend | the per-diff feedback loop; when build-and-test crosses ~10 min, precompiled-header or unity-build work pays |
 | **full local build time** | `build/build.sh` clean | same loop locally; the single biggest dev-speed lever in a -O2 -Werror tree |
-| **suite runtime top-10** | slowest tests trend | keeps the 345-test suite honest — one 60 s test taxes every diff forever |
+| **suite runtime top-10** | slowest tests trend | keeps the 356-test suite honest — one 60 s test taxes every diff forever |
 | **fuzz corpus coverage** | edges covered nightly (libFuzzer `-print_final_stats`) | whether the fourth arm (compile-of-SMF) is still finding new ground or needs structure-aware mutators |
 
 ## Reference points from this branch (not benchmarks — sanity anchors)

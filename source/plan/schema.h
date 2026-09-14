@@ -40,7 +40,20 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // 1 = i32 token ids) and seq_len (rows per sequence; the feeder serves
 // batch/seq_len token records per step). One new opcode, kEmbedFwd, gated
 // exactly like the v6 family.
-inline constexpr uint32_t kSeeuVersion = 7;
+// v8: the distillation loss carries its scale. The high 32 bits of the
+// kKLDistill{Fwd,Bwd} temperature word hold the f32 bits of a loss scale
+// the compiler sets to T^2 (Hinton et al.'s convention, so the soft-target
+// gradient stays commensurate with a hard-label term as T varies). Additive:
+// pre-v8 plans have a zero high word, which the runtime reads as 1.0 — the
+// unscaled divergence they were compiled for, bit-for-bit. A pre-v8 runtime
+// would silently drop the scale, which is why plans that carry it declare
+// v8 (and are rejected by older runtimes as newer than they can prove).
+inline constexpr uint32_t kSeeuVersion = 8;
+
+// The version that introduced the distillation loss scale: plans below it
+// must carry a zero high word on the KL temperature operand, and are
+// validated to.
+inline constexpr uint32_t kSeeuKlScaleVersion = 8;
 
 // The version that introduced the transformer opcodes: plans below it must
 // not carry them, and are validated to.
