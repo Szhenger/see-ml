@@ -203,6 +203,17 @@ review exists to prevent exactly that.
 > projection. Verified by decoder finite-difference gradient checks and a
 > full train→merge→commit system test.
 
+> **Status: T2 import path SHIPPED (2026-09-14, #69).** `export_model.py
+> --hf`: a NumPy-only walker for Llama-class checkpoints (llama / qwen2 /
+> SmolLM2) — hand-parsed safetensors (F32/F16/BF16), `[out,in]` → `[in,out]`,
+> GQA → MHA by kv-head repetition, HF rotate-half RoPE → interleaved pairs
+> by a q/k feature permutation (exact: scores are a dot product over d),
+> `rope_theta` → per-op base, Qwen2 q/k/v biases as `AddBias`, tied /
+> untied head; `--text-corpus` via the checkpoint's tokenizer, `--hf-parity`
+> against `transformers` through a SeeML-semantics NumPy forward.
+> SmolLM-135M: max |Δ logits| 6.4e-05 at S=128. The `RMSNorm eps` line of
+> this phase is refused-unless-accepted until P7 (#96) adds the attribute.
+
 **Phase T2 — remaining scope (M/L).** Embedding lookup (frozen gather —
 needs-grad pruning already guarantees no backward reaches it; until then
 corpora carry pre-embedded rows), a Hugging-Face import path in

@@ -5,3 +5,5 @@
 # stack the Python plane is gated on (Python 3.14.7, torch 2.14, NumPy 2.5).
 torch>=1.7    # nn.SiLU is the newest module the exporter touches
 numpy>=1.17   # np.random.Generator API used by --demo
+# Optional (tier 2), never needed to import or export: transformers for
+# --hf-parity, tokenizers for --text-corpus. `--hf` itself is NumPy only.

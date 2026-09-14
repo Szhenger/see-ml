@@ -298,6 +298,271 @@ class GoldenDemoTest(unittest.TestCase):
             self.assertEqual(sha256(os.path.join(out, name)), digest, name)
 
 
+
+# --- Hugging Face import (T2, #69) ----------------------------------------
+
+def hf_tiny_config(model_type="llama", D=16, H=4, Hkv=2, F=24, L=2, V=20,
+                   eps=1e-5, theta=10000.0, tied=True, max_pos=64):
+    return {"model_type": model_type, "architectures": ["LlamaForCausalLM"],
+            "hidden_size": D, "num_attention_heads": H,
+            "num_key_value_heads": Hkv, "intermediate_size": F,
+            "num_hidden_layers": L, "vocab_size": V, "rms_norm_eps": eps,
+            "rope_theta": theta, "tie_word_embeddings": tied,
+            "max_position_embeddings": max_pos, "hidden_act": "silu",
+            "attention_bias": model_type == "qwen2", "mlp_bias": False,
+            "rope_scaling": None, "torch_dtype": "float32"}
+
+
+def hf_tiny_tensors(cfg, seed=0, scale=0.2):
+    """A random checkpoint in Hugging Face's [out, in] layout and names."""
+    rng = np.random.default_rng(seed)
+    D, H, Hkv, F, L, V = (cfg[k] for k in ("hidden_size", "num_attention_heads",
+                                           "num_key_value_heads",
+                                           "intermediate_size",
+                                           "num_hidden_layers", "vocab_size"))
+    d = D // H
+    m = lambda *shape: (rng.standard_normal(shape) * scale).astype(np.float32)
+    t = {"model.embed_tokens.weight": m(V, D),
+         "model.norm.weight": (1 + m(D)).astype(np.float32)}
+    if not cfg["tie_word_embeddings"]:
+        t["lm_head.weight"] = m(V, D)
+    for i in range(L):
+        p = f"model.layers.{i}."
+        t[p + "input_layernorm.weight"] = (1 + m(D)).astype(np.float32)
+        t[p + "post_attention_layernorm.weight"] = (1 + m(D)).astype(np.float32)
+        t[p + "self_attn.q_proj.weight"] = m(H * d, D)
+        t[p + "self_attn.k_proj.weight"] = m(Hkv * d, D)
+        t[p + "self_attn.v_proj.weight"] = m(Hkv * d, D)
+        t[p + "self_attn.o_proj.weight"] = m(D, H * d)
+        if cfg.get("attention_bias"):
+            t[p + "self_attn.q_proj.bias"] = m(H * d)
+            t[p + "self_attn.k_proj.bias"] = m(Hkv * d)
+            t[p + "self_attn.v_proj.bias"] = m(Hkv * d)
+        t[p + "mlp.gate_proj.weight"] = m(F, D)
+        t[p + "mlp.up_proj.weight"] = m(F, D)
+        t[p + "mlp.down_proj.weight"] = m(D, F)
+    return t
+
+
+def hf_reference_logits(cfg, t, tokens):
+    """Hugging Face Llama semantics, written independently of the importer:
+    [out, in] Linears, rotate-half RoPE on (c, c + d/2), GQA by repeat_kv,
+    causal softmax, SwiGLU, RMSNorm at the checkpoint's eps."""
+    D, H, Hkv = cfg["hidden_size"], cfg["num_attention_heads"], cfg["num_key_value_heads"]
+    d = D // H
+    B, S = tokens.shape
+    eps = cfg["rms_norm_eps"]
+    x = t["model.embed_tokens.weight"][tokens]
+
+    def rms(v, g):
+        return v / np.sqrt(np.mean(v * v, axis=-1, keepdims=True) + eps) * g
+
+    inv = cfg["rope_theta"] ** (-np.arange(0, d, 2, dtype=np.float64) / d)
+    ang = np.arange(S)[:, None] * inv[None, :]           # [S, d/2]
+    cos = np.cos(np.concatenate([ang, ang], -1)).astype(np.float32)  # [S, d]
+    sin = np.sin(np.concatenate([ang, ang], -1)).astype(np.float32)
+
+    def rot_half(v):  # [B, h, S, d]
+        v1, v2 = v[..., : d // 2], v[..., d // 2:]
+        return np.concatenate([-v2, v1], -1)
+
+    mask = np.triu(np.ones((S, S), bool), 1)
+    for i in range(cfg["num_hidden_layers"]):
+        p = f"model.layers.{i}."
+        n1 = rms(x, t[p + "input_layernorm.weight"])
+        lin = lambda name, v: v @ t[p + name + ".weight"].T + t.get(p + name + ".bias", 0)
+        q = lin("self_attn.q_proj", n1).reshape(B, S, H, d).transpose(0, 2, 1, 3)
+        k = lin("self_attn.k_proj", n1).reshape(B, S, Hkv, d).transpose(0, 2, 1, 3)
+        v = lin("self_attn.v_proj", n1).reshape(B, S, Hkv, d).transpose(0, 2, 1, 3)
+        q = q * cos + rot_half(q) * sin
+        k = k * cos + rot_half(k) * sin
+        k = np.repeat(k, H // Hkv, axis=1)
+        v = np.repeat(v, H // Hkv, axis=1)
+        sc = q @ k.transpose(0, 1, 3, 2) / np.sqrt(d)
+        sc = np.where(mask, -np.inf, sc)
+        sc = np.exp(sc - sc.max(-1, keepdims=True))
+        pr = sc / sc.sum(-1, keepdims=True)
+        a = (pr @ v).transpose(0, 2, 1, 3).reshape(B, S, H * d)
+        x = x + a @ t[p + "self_attn.o_proj.weight"].T
+        n2 = rms(x, t[p + "post_attention_layernorm.weight"])
+        g = n2 @ t[p + "mlp.gate_proj.weight"].T
+        u = n2 @ t[p + "mlp.up_proj.weight"].T
+        x = x + ((g / (1 + np.exp(-g))) * u) @ t[p + "mlp.down_proj.weight"].T
+    nf = rms(x, t["model.norm.weight"])
+    head = t.get("lm_head.weight", t["model.embed_tokens.weight"])
+    return (nf @ head.T).astype(np.float32)
+
+
+def write_safetensors(path, tensors, dtype="F32"):
+    """A minimal safetensors writer (the format the importer parses)."""
+    header, blobs, off = {}, [], 0
+    for name, arr in tensors.items():
+        a = np.ascontiguousarray(arr, dtype=np.float32)
+        if dtype == "BF16":
+            raw = (a.view(np.uint32) >> 16).astype("<u2").tobytes()
+        elif dtype == "F16":
+            raw = a.astype("<f2").tobytes()
+        else:
+            raw = a.astype("<f4").tobytes()
+        header[name] = {"dtype": dtype, "shape": list(a.shape),
+                        "data_offsets": [off, off + len(raw)]}
+        blobs.append(raw)
+        off += len(raw)
+    hj = json.dumps(header).encode()
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(hj)))
+        f.write(hj)
+        for b in blobs:
+            f.write(b)
+
+
+def write_hf_dir(d, cfg, tensors, dtype="F32"):
+    with open(os.path.join(d, "config.json"), "w") as f:
+        json.dump(cfg, f)
+    write_safetensors(os.path.join(d, "model.safetensors"), tensors, dtype)
+
+
+@unittest.skipIf(np is None, "NumPy not installed")
+class HfImportTest(unittest.TestCase):
+    def test_safetensors_reader_widens_every_dtype(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        rng = np.random.default_rng(3)
+        want = {"a": rng.standard_normal((3, 5)).astype(np.float32),
+                "b": np.arange(7, dtype=np.float32)}
+        for dtype in ("F32", "BF16", "F16"):
+            path = os.path.join(d, dtype + ".safetensors")
+            write_safetensors(path, want, dtype)
+            got = em.read_safetensors(path)
+            self.assertEqual(set(got), set(want))
+            for k in want:
+                self.assertEqual(got[k].dtype, np.float32)
+                self.assertEqual(got[k].shape, want[k].shape)
+                tol = {"F32": 0.0, "BF16": 1e-2, "F16": 1e-3}[dtype]
+                np.testing.assert_allclose(got[k], want[k], rtol=tol, atol=tol)
+        # BF16 round trip of bf16-representable values is exact.
+        exact = {"c": (np.arange(-8, 8, dtype=np.float32) * 0.25)}
+        write_safetensors(os.path.join(d, "x.safetensors"), exact, "BF16")
+        np.testing.assert_array_equal(
+            em.read_safetensors(os.path.join(d, "x.safetensors"))["c"],
+            exact["c"])
+
+    def _check_mapping(self, cfg, seed):
+        t = hf_tiny_tensors(cfg, seed)
+        conv = em.hf_llama_to_seeml(cfg, t, seq_len=8)
+        rng = np.random.default_rng(seed + 100)
+        tokens = rng.integers(0, cfg["vocab_size"], (2, 8))
+        want = hf_reference_logits(cfg, t, tokens)
+        got = em.reference_decoder_logits(conv["embedding"], conv["blocks"],
+                                          conv["head"], conv["num_heads"],
+                                          conv["rope_base"], tokens)
+        self.assertEqual(got.shape, want.shape)
+        np.testing.assert_allclose(got, want, rtol=2e-4, atol=2e-4)
+        return conv
+
+    def test_gqa_repetition_and_rope_permutation_reproduce_hf_logits(self):
+        # GQA (4 heads over 2 kv heads), tied head, theta 10000.
+        conv = self._check_mapping(hf_tiny_config(), 1)
+        self.assertTrue(any("GQA" in n for n in conv["notes"]))
+        self.assertTrue(any("tied" in n for n in conv["notes"]))
+        # MHA (H == Hkv), untied head, a Llama-3-style base.
+        conv = self._check_mapping(hf_tiny_config(H=4, Hkv=4, tied=False,
+                                                  theta=500000.0), 2)
+        self.assertFalse(any("GQA" in n for n in conv["notes"]))
+        self.assertEqual(conv["rope_base"], 500000.0)
+        # Qwen2-class: q/k/v biases ride the permutation and the repetition.
+        conv = self._check_mapping(hf_tiny_config(model_type="qwen2"), 3)
+        self.assertIn("bq", conv["blocks"][0])
+        self.assertIn("bk", conv["blocks"][0])
+
+    def test_refuses_what_the_runtime_cannot_compute(self):
+        cfg = hf_tiny_config()
+        t = hf_tiny_tensors(cfg)
+        with self.assertRaisesRegex(ValueError, "rms_norm_eps"):
+            em.hf_llama_to_seeml(hf_tiny_config(eps=1e-6), t, 8)
+        conv = em.hf_llama_to_seeml(hf_tiny_config(eps=1e-6), t, 8,
+                                    allow_eps_drift=True)
+        self.assertTrue(any("eps drift" in n for n in conv["notes"]))
+        with self.assertRaisesRegex(ValueError, "max_position_embeddings"):
+            em.hf_llama_to_seeml(cfg, t, 65)
+        with self.assertRaisesRegex(ValueError, "hidden_act"):
+            em.hf_llama_to_seeml(dict(cfg, hidden_act="gelu"), t, 8)
+        with self.assertRaisesRegex(ValueError, "rope_scaling"):
+            em.hf_llama_to_seeml(dict(cfg, rope_scaling={"type": "linear"}), t, 8)
+        with self.assertRaisesRegex(ValueError, "model_type"):
+            em.hf_llama_to_seeml(dict(cfg, model_type="gpt2"), t, 8)
+        with self.assertRaisesRegex(ValueError, "num_key_value_heads"):
+            em.hf_llama_to_seeml(dict(cfg, num_key_value_heads=3), t, 8)
+        with self.assertRaisesRegex(ValueError, "lacks tensor"):
+            em.hf_llama_to_seeml(cfg, {k: v for k, v in t.items()
+                                       if "o_proj" not in k}, 8)
+
+    def test_cli_imports_a_checkpoint_directory(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        cfg = hf_tiny_config()
+        write_hf_dir(d, cfg, hf_tiny_tensors(cfg, 5), "BF16")
+        script = os.path.join(REPO, "tool", "export_model.py")
+        out = os.path.join(d, "m.smf")
+        # --hf needs --seq-len; --rope-base cannot apply to --hf.
+        r = subprocess.run([sys.executable, script, "--hf", d, out],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        r = subprocess.run([sys.executable, script, "--hf", d, out,
+                            "--seq-len", "8", "--rope-base", "1"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        r = subprocess.run([sys.executable, script, "--hf", d, out,
+                            "--seq-len", "8"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("token-native", r.stdout)
+        self.assertIn("GQA", r.stderr)
+        digest = sha256(out)
+        # Deterministic: the same checkpoint exports the same bytes.
+        subprocess.run([sys.executable, script, "--hf", d, out,
+                        "--seq-len", "8"], check=True, capture_output=True)
+        self.assertEqual(sha256(out), digest)
+        # The SMF is one the compiler accepts (when a build is present).
+        compiler = os.path.join(REPO, "build", "seeml-update-compile")
+        if os.path.exists(compiler):
+            r = subprocess.run([compiler, "--source", out, "--out",
+                                os.path.join(d, "pkg"), "--data-batch", "16",
+                                "--steps", "2"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        # eps drift is refused at the CLI, accepted with the flag.
+        write_hf_dir(d, hf_tiny_config(eps=1e-6), hf_tiny_tensors(cfg, 5))
+        r = subprocess.run([sys.executable, script, "--hf", d, out,
+                            "--seq-len", "8"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("rms_norm_eps", r.stderr)
+        r = subprocess.run([sys.executable, script, "--hf", d, out,
+                            "--seq-len", "8", "--allow-eps-drift"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+def have_transformers():
+    try:
+        import transformers  # noqa: F401
+        return have_torch()
+    except ImportError:
+        return False
+
+
+@unittest.skipIf(np is None or not have_transformers(),
+                 "transformers not installed")
+class HfParityTest(unittest.TestCase):
+    def test_numpy_reference_matches_transformers_on_a_synthetic_llama(self):
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        cfg = hf_tiny_config(D=32, H=4, Hkv=2, F=48, L=2, V=40)
+        write_hf_dir(d, cfg, hf_tiny_tensors(cfg, 9))
+        config, tensors = em.load_hf_checkpoint(d)
+        conv = em.hf_llama_to_seeml(config, tensors, seq_len=16)
+        delta, scale = em.hf_parity(d, conv)
+        self.assertLess(delta, 1e-4 * (1.0 + scale))
+
+
 @unittest.skipIf(np is None or not have_torch(), "PyTorch not installed")
 class TorchExportTest(unittest.TestCase):
     def test_sequential_export_matches_the_oracle_and_runs_under_no_grad(self):
