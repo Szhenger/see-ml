@@ -3,6 +3,9 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -108,6 +111,32 @@ float BitsToF32(uint64_t bits) {
 struct Extent {
   uint64_t off, bytes;
 };
+
+// Whether every page of [ptr, ptr + len) is mapped writable. A no-copy
+// MTLBuffer over read-only pages (an .incbin plan in __TEXT,__const) leaves
+// them unreadable from the CPU afterwards — the embedding gather then dies
+// with a protection fault — so zero-copy residency is offered only to
+// writable memory; everything else is copied once at Bind.
+bool PagesWritable(const void* ptr, uint64_t len) {
+  mach_vm_address_t addr = reinterpret_cast<mach_vm_address_t>(ptr);
+  const mach_vm_address_t end = addr + len;
+  while (addr < end) {
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    mach_vm_address_t probe = addr;
+    if (mach_vm_region(mach_task_self(), &probe, &size, VM_REGION_BASIC_INFO_64,
+                       reinterpret_cast<vm_region_info_t>(&info), &count,
+                       &object) != KERN_SUCCESS)
+      return false;
+    if (object != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), object);
+    if (probe > addr) return false;  // a hole inside the range
+    if (!(info.protection & VM_PROT_WRITE)) return false;
+    addr = probe + size;
+  }
+  return true;
+}
 bool Overlaps(const Extent& a, const Extent& b) {
   return a.off < b.off + b.bytes && b.off < a.off + a.bytes;
 }
@@ -302,7 +331,7 @@ std::expected<void, std::string> MetalBackend::Bind(
     if (rodata_bytes > 0) {
       const uint64_t wrapped = (rodata_bytes + page - 1) & ~(page - 1);
       if (reinterpret_cast<uintptr_t>(rodata) % page == 0 &&
-          wrapped <= rodata_mapped_bytes) {
+          wrapped <= rodata_mapped_bytes && PagesWritable(rodata, wrapped)) {
         rodata_buf = [device_
             newBufferWithBytesNoCopy:const_cast<uint8_t*>(rodata)
                               length:wrapped

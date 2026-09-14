@@ -142,7 +142,14 @@ constexpr const char* kUsage =
     " [--out updated.smf] [--steps N] [--seed S]"
     " [--val-frac F] [--checkpoint ckpt] [--checkpoint-every N]"
     " [--resume] [--loss-log curve.csv] [--backend cpu|metal|auto]"
+    " [--min-improvement F] [--require-accuracy] [--report report.json]"
     " [--force] [--help]\n"
+    "  --min-improvement F: commit only if the gated loss fell by at least\n"
+    "  the fraction F of its initial value (default 0: any strict fall).\n"
+    "  --require-accuracy: additionally require held-out accuracy not to\n"
+    "  drop (class-label plans with a validation split only).\n"
+    "  --report FILE: write the backend, the gate parameters, the loss and\n"
+    "  accuracy pairs and the verdict as JSON.\n"
     "  --backend: the executor (default cpu, or $SEEML_BACKEND). cpu is the\n"
     "  bitwise-deterministic reference and builds anywhere; metal runs the\n"
     "  update on an Apple GPU (an error where none exists); auto takes the\n"
@@ -157,9 +164,9 @@ bool ArgsOk(int argc, char** argv) {
       "--model",      "--data",     "--out",
       "--steps",      "--seed",     "--val-frac",
       "--checkpoint", "--loss-log", "--checkpoint-every",
-      "--backend"};
+      "--backend",    "--min-improvement", "--report"};
   static const char* const kBoolFlags[] = {"--force", "--resume", "--help",
-                                           "-h"};
+                                           "-h", "--require-accuracy"};
   for (int i = 1; i < argc; ++i) {
     // Empty argv slots are shell debris (a quoted-but-unset "$VAR"), not
     // typos: nothing can be misread from one, and the pre-strict runner
@@ -218,16 +225,21 @@ int main(int argc, char** argv) {
   const bool force = Has(argc, argv, "--force");
 
   uint64_t steps = 0, seed = 0;
-  double val_frac = 0.1;
+  double val_frac = 0.1, min_improvement = 0.0;
   // The negated in-range form rejects NaN, which `< 0.0 || >= 1.0` lets
-  // through — and a NaN val_frac silently disables the validation gate.
+  // through — and a NaN val_frac silently disables the validation gate
+  // (a NaN margin would silently pass it).
   if (!ParseU64(Arg(argc, argv, "--steps", "0"), &steps) ||
       !ParseU64(Arg(argc, argv, "--seed", "0"), &seed) ||
       !ParseF64(Arg(argc, argv, "--val-frac", "0.1"), &val_frac) ||
-      !(val_frac >= 0.0 && val_frac < 1.0)) {
+      !(val_frac >= 0.0 && val_frac < 1.0) ||
+      !ParseF64(Arg(argc, argv, "--min-improvement", "0"), &min_improvement) ||
+      !(min_improvement >= 0.0 && min_improvement < 1.0)) {
     std::fprintf(stderr, "invalid numeric argument\n");
     return 2;
   }
+  const bool require_accuracy = Has(argc, argv, "--require-accuracy");
+  const std::string report_path = Arg(argc, argv, "--report", "");
 
   if (model.empty() || data.empty()) {
     std::fputs(kUsage, stderr);
@@ -263,9 +275,19 @@ int main(int argc, char** argv) {
     return 1;
   }
   // The backend is recorded wherever results are compared (the per-backend
-  // determinism doctrine): the banner, the gate line below, and any report.
+  // determinism doctrine): the banner, the gate line below, and the report.
   std::fprintf(stderr, "seeml-update: backend %s (%s)\n",
                engine.backend_name(), engine.backend_device().c_str());
+  // --require-accuracy needs something to measure: class labels (the
+  // eval program's softmax) and a validation split. Refusing up front is
+  // the CLI's rule — a flag that cannot apply is a usage error, never a
+  // silently vacuous gate.
+  if (require_accuracy && (engine.header().label_kind != 1 || val_frac <= 0.0)) {
+    std::fprintf(stderr,
+                 "model_update: --require-accuracy needs a class-label plan "
+                 "and a validation split (--val-frac > 0)\n");
+    return 2;
+  }
 
   // Fail fast: the plan's emit offsets are only meaningful inside the exact
   // file it was compiled from, and commit would refuse anyway — but only
@@ -338,12 +360,62 @@ int main(int argc, char** argv) {
   }
 
   // Regression gate: a failed update must leave the device untouched.
-  // With a validation split this gates on held-out loss, not training loss.
-  if (!report->improved() && !force) {
+  // With a validation split this gates on held-out loss, not training
+  // loss; --min-improvement demands a margin and --require-accuracy a
+  // second, task-level opinion (#67). The verdict names the gate that
+  // failed, and the report records the parameters next to the loss pair
+  // and the backend that produced them.
+  const bool loss_ok = report->ImprovedBy(static_cast<float>(min_improvement));
+  const bool acc_ok = !require_accuracy ||
+                      (report->has_val_accuracy && report->AccuracyHeld());
+  const bool accepted = loss_ok && acc_ok;
+  std::fprintf(stderr,
+               "seeml-update: gate min-improvement %.4g require-accuracy %s"
+               " -> %s [backend %s]\n",
+               min_improvement, require_accuracy ? "yes" : "no",
+               accepted ? "accepted" : (force ? "forced" : "rejected"),
+               engine.backend_name());
+  if (!report_path.empty()) {
+    std::FILE* f = std::fopen(report_path.c_str(), "w");
+    if (f) {
+      std::fprintf(f,
+                   "{\n  \"schema\": 1,\n  \"backend\": \"%s\",\n"
+                   "  \"device\": \"%s\",\n  \"steps\": %llu,\n"
+                   "  \"train_loss\": [%.8g, %.8g],\n",
+                   engine.backend_name(), engine.backend_device().c_str(),
+                   (unsigned long long)report->steps, report->initial_avg_loss,
+                   report->final_avg_loss);
+      if (report->has_validation)
+        std::fprintf(f, "  \"validation_loss\": [%.8g, %.8g],\n",
+                     report->val_initial_loss, report->val_final_loss);
+      if (report->has_val_accuracy)
+        std::fprintf(f, "  \"validation_accuracy\": [%.6g, %.6g],\n",
+                     report->val_initial_accuracy, report->val_final_accuracy);
+      std::fprintf(f,
+                   "  \"gate\": {\"min_improvement\": %.8g, "
+                   "\"require_accuracy\": %s, \"loss_ok\": %s, "
+                   "\"accuracy_ok\": %s, \"forced\": %s},\n"
+                   "  \"verdict\": \"%s\"\n}\n",
+                   min_improvement, require_accuracy ? "true" : "false",
+                   loss_ok ? "true" : "false", acc_ok ? "true" : "false",
+                   (!accepted && force) ? "true" : "false",
+                   accepted ? "accepted" : (force ? "forced" : "rejected"));
+      std::fclose(f);
+    } else {
+      std::fprintf(stderr, "seeml-update: cannot write --report '%s'\n",
+                   report_path.c_str());
+    }
+  }
+  if (!accepted && !force) {
     std::fprintf(stderr,
-                 "seeml-update: REJECTED — %s loss did not improve; source"
-                 " model left untouched (--force to override)\n",
-                 report->has_validation ? "validation" : "training");
+                 "seeml-update: REJECTED — %s; source model left untouched"
+                 " (--force to override)\n",
+                 !loss_ok ? (report->has_validation
+                                 ? "validation loss did not improve by the "
+                                   "required margin"
+                                 : "training loss did not improve by the "
+                                   "required margin")
+                          : "validation accuracy dropped");
     return 3;
   }
 

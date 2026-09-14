@@ -744,6 +744,37 @@ TEST(UpdateEngineTrain, ShouldStopInterruptsAndLossCurveRecords) {
   EXPECT_EQ(report.loss_curve.size(), 25u);
 }
 
+TEST(UpdateEngineGate, ImprovedByAndAccuracyHeld) {
+  seeml::update_rt::TrainReport r;
+  r.has_validation = true;
+  r.val_initial_loss = 2.0f;
+  r.val_final_loss = 1.9f;  // a 5% fall
+  EXPECT_TRUE(r.improved());
+  EXPECT_TRUE(r.ImprovedBy(0.0f));   // zero margin == improved()
+  EXPECT_TRUE(r.ImprovedBy(0.05f));  // exactly at the margin
+  EXPECT_FALSE(r.ImprovedBy(0.06f));
+  r.val_final_loss = 1.9999999f;     // a calibration-only drift
+  EXPECT_TRUE(r.ImprovedBy(0.0f));
+  EXPECT_FALSE(r.ImprovedBy(0.01f));
+  r.val_final_loss = 2.0f;           // no strict fall: fails at every margin
+  EXPECT_FALSE(r.ImprovedBy(0.0f));
+  EXPECT_FALSE(r.ImprovedBy(0.5f));
+  // Without a split the training windows carry the gate.
+  seeml::update_rt::TrainReport t;
+  t.initial_avg_loss = 1.0f;
+  t.final_avg_loss = 0.5f;
+  EXPECT_TRUE(t.ImprovedBy(0.5f));
+  EXPECT_FALSE(t.ImprovedBy(0.51f));
+  // Accuracy: vacuous without a measurement, strict "did not drop" with one.
+  EXPECT_TRUE(r.AccuracyHeld());
+  r.has_val_accuracy = true;
+  r.val_initial_accuracy = 0.40f;
+  r.val_final_accuracy = 0.40f;
+  EXPECT_TRUE(r.AccuracyHeld());
+  r.val_final_accuracy = 0.39f;
+  EXPECT_FALSE(r.AccuracyHeld());
+}
+
 TEST(UpdateEngineBackend, KindsParseAndNameRoundTrip) {
   using seeml::update_rt::BackendKind;
   using seeml::update_rt::BackendKindName;

@@ -117,6 +117,26 @@ struct TrainReport {
     return has_validation ? val_final_loss < val_initial_loss
                           : final_avg_loss < initial_avg_loss;
   }
+
+  /// The gate with a margin (#67): the loss must fall by at least
+  /// `min_fraction` of its initial value. Zero is exactly improved() —
+  /// today's strict comparison — so a calibration-only drift of 1e-7 still
+  /// passes at the default and is refused at any positive margin.
+  bool ImprovedBy(float min_fraction) const {
+    if (!improved()) return false;
+    if (!(min_fraction > 0.0f)) return true;
+    const float before = has_validation ? val_initial_loss : initial_avg_loss;
+    const float after = has_validation ? val_final_loss : final_avg_loss;
+    return after <= before * (1.0f - min_fraction);
+  }
+
+  /// The accuracy gate (#67): held-out argmax accuracy must not have
+  /// dropped. Vacuously true when the plan reports no accuracy (MSE,
+  /// distillation, no validation split) — callers that require it must
+  /// check has_val_accuracy first and treat its absence as a usage error.
+  bool AccuracyHeld() const {
+    return !has_val_accuracy || val_final_accuracy >= val_initial_accuracy;
+  }
 };
 
 class UpdateEngine {

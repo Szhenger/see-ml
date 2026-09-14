@@ -94,8 +94,20 @@ void BlockedNN(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
 
 // Dot-product core shared by GemmNT and GemmNTQ8 over the C-row range
 // [m_begin, m_end): C[m,n] = A row · B row. Four output columns per pass
-// reuse the streamed A row from L1 four times and run four independent
-// accumulator chains.
+// reuse the streamed A row from L1 four times.
+//
+// The K reduction runs in eight fixed lanes — lane l accumulates every
+// k ≡ l (mod 8) — combined in lane order once the row is done (#66). A
+// single serial chain per column cannot vectorize under the bitwise
+// contract (the compiler may not reassociate), and ran 3–5x slower than
+// GemmNN at equal FLOPs; eight independent chains give the vectorizer two
+// full NEON/SSE registers per column with no reassociation at all: the
+// lane assignment and the combine order are pure functions of K, never of
+// the tiling or the thread count, so every width computes identical bits.
+// The reduction order changed exactly once, here, by design — results
+// differ from the pre-#66 serial chain, as any kernel change does.
+inline constexpr size_t kNtLanes = 8;
+
 template <typename BType>
 void BlockedNT(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
                float* SEEML_RESTRICT C, size_t m_begin, size_t m_end, size_t N,
@@ -110,26 +122,51 @@ void BlockedNT(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
         const BType* SEEML_RESTRICT b1 = B + (n + 1) * K;
         const BType* SEEML_RESTRICT b2 = B + (n + 2) * K;
         const BType* SEEML_RESTRICT b3 = B + (n + 3) * K;
-        float acc0 = 0.0f, acc1 = 0.0f, acc2 = 0.0f, acc3 = 0.0f;
-        for (size_t k = 0; k < K; ++k) {
+        float acc0[kNtLanes] = {}, acc1[kNtLanes] = {}, acc2[kNtLanes] = {},
+              acc3[kNtLanes] = {};
+        size_t k = 0;
+        for (; k + kNtLanes <= K; k += kNtLanes) {
+          for (size_t l = 0; l < kNtLanes; ++l) {
+            const float a = a_row[k + l];
+            acc0[l] += a * static_cast<float>(b0[k + l]);
+            acc1[l] += a * static_cast<float>(b1[k + l]);
+            acc2[l] += a * static_cast<float>(b2[k + l]);
+            acc3[l] += a * static_cast<float>(b3[k + l]);
+          }
+        }
+        for (; k < K; ++k) {  // tail: the same k -> lane rule
           const float a = a_row[k];
-          acc0 += a * static_cast<float>(b0[k]);
-          acc1 += a * static_cast<float>(b1[k]);
-          acc2 += a * static_cast<float>(b2[k]);
-          acc3 += a * static_cast<float>(b3[k]);
+          const size_t l = k % kNtLanes;
+          acc0[l] += a * static_cast<float>(b0[k]);
+          acc1[l] += a * static_cast<float>(b1[k]);
+          acc2[l] += a * static_cast<float>(b2[k]);
+          acc3[l] += a * static_cast<float>(b3[k]);
+        }
+        float s0 = acc0[0], s1 = acc1[0], s2 = acc2[0], s3 = acc3[0];
+        for (size_t l = 1; l < kNtLanes; ++l) {  // fixed combine order
+          s0 += acc0[l];
+          s1 += acc1[l];
+          s2 += acc2[l];
+          s3 += acc3[l];
         }
         float* c_at = C + m * N + n;
-        c_at[0] = alpha * acc0;
-        c_at[1] = alpha * acc1;
-        c_at[2] = alpha * acc2;
-        c_at[3] = alpha * acc3;
+        c_at[0] = alpha * s0;
+        c_at[1] = alpha * s1;
+        c_at[2] = alpha * s2;
+        c_at[3] = alpha * s3;
       }
       for (; n < n1; ++n) {
         const BType* SEEML_RESTRICT b_row = B + n * K;
-        float acc = 0.0f;
-        for (size_t k = 0; k < K; ++k)
-          acc += a_row[k] * static_cast<float>(b_row[k]);
-        C[m * N + n] = alpha * acc;
+        float acc[kNtLanes] = {};
+        size_t k = 0;
+        for (; k + kNtLanes <= K; k += kNtLanes)
+          for (size_t l = 0; l < kNtLanes; ++l)
+            acc[l] += a_row[k + l] * static_cast<float>(b_row[k + l]);
+        for (; k < K; ++k)
+          acc[k % kNtLanes] += a_row[k] * static_cast<float>(b_row[k]);
+        float sum = acc[0];
+        for (size_t l = 1; l < kNtLanes; ++l) sum += acc[l];
+        C[m * N + n] = alpha * sum;
       }
     }
   }

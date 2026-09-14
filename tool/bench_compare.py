@@ -37,11 +37,15 @@ import sys
 
 
 def tier_a(report):
-    """{(fixture, threads): rows_per_s} from a seeml-bench JSON object."""
+    """{(fixture, threads, backend): rows_per_s} from a seeml-bench JSON
+    object. The backend joins the key (per-backend determinism doctrine:
+    a metal row is never compared against a cpu row); reports that predate
+    the field are cpu, the only backend that existed."""
     out = {}
+    backend = report.get("backend", "cpu")
     for name, fx in report.get("fixtures", {}).items():
         for t, m in fx.get("threads", {}).items():
-            out[(name, t)] = float(m["rows_per_s"])
+            out[(name, t, backend)] = float(m["rows_per_s"])
     return out
 
 
@@ -55,19 +59,19 @@ def compare(label, base, cur, max_regression):
     failures, skipped, compared = [], [], 0
     for key, base_v in sorted(base.items()):
         if key not in cur:
-            skipped.append(f"{key[0]}@{key[1]}t: in {label} only")
+            skipped.append(f"{key[0]}@{key[1]}t/{key[2]}: in {label} only")
             continue
         compared += 1
         cur_v = cur[key]
         delta = (cur_v - base_v) / base_v if base_v > 0 else 0.0
-        line = (f"{key[0]}@{key[1]}t: {base_v:.0f} -> {cur_v:.0f} rows/s "
+        line = (f"{key[0]}@{key[1]}t/{key[2]}: {base_v:.0f} -> {cur_v:.0f} rows/s "
                 f"({delta:+.1%}) vs {label}")
         if delta < -max_regression:
             failures.append(line)
         else:
             print(f"bench_compare: OK   {line}")
     for key in sorted(cur.keys() - base.keys()):
-        skipped.append(f"{key[0]}@{key[1]}t: new, not in {label}")
+        skipped.append(f"{key[0]}@{key[1]}t/{key[2]}: new, not in {label}")
     for s in skipped:
         print(f"bench_compare: SKIP {s}")
     for f_ in failures:
