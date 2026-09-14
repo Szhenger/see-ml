@@ -230,6 +230,24 @@ the backend choice must be recorded wherever results are compared (the
 regression gate, checkpoints do not care — the persistent segment is
 backend-neutral f32).
 
+> **Status: G1b-1…4 + G1c SHIPPED (2026-09-14)**, with #66 and #67 on
+> the CPU side. `ExecutorBackend` seam + `CpuBackend` (bit-identical,
+> tested); `MetalBackend` with zero-copy arena/rodata residency, one
+> command buffer per program with validator-extent hazard tracking, and a
+> runtime-owned kernel library covering every opcode but the losses and
+> the embedding gather; packages vendor the backend with a Darwin branch
+> in `build.sh`; a macOS CI job proves `--backend auto` degrades on a
+> Metal-less runner. Measured on an Apple M5, D=512 / 8 heads / S=128 /
+> 4-block token decoder at 512 tokens per step: **Metal ≈ 2,260 tok/s vs
+> CPU ≈ 1,140 tok/s** (2.0×); the CPU itself gained 1.14–1.62× rows/s from
+> #66 (bwd/fwd 2.0–3.0× → 1.2–1.7×). Not yet done: the SmolLM-135M field
+> run the release gate (#65) prices (≥ 800 tok/s on M4; the shapes above
+> exceed it, the model itself was not run here), `simdgroup` tiles for the
+> attention family (per-thread row kernels today), and GEMM tile tuning
+> (P2). The plan below was the design; what shipped follows it, with one
+> delta: the kernel library is runtime-owned (`metal_kernels.h`) rather
+> than compiler-emitted, so CPU and GPU semantics version together.
+
 > **Status: G1b/G1c PLANNED for v1.3.0 (2026-08-22)** — tracked as
 > milestone *v1.3.0 — GPU fine-tuning* on GitHub: epic #59, phases
 > #60–#64, release gate #65, with #66/#67 on the CPU side. The plan below

@@ -98,6 +98,15 @@ An int8 GEMM gets one extra rule: its quantized B operand must live in rodata �
 
 `update_kernels.h` is the façade; implementations are partitioned per kernel family, all sharing `kernel_policy.h`. Every kernel is allocation-free over caller-provided arena/rodata pointers. Two ideas run through the whole library — determinism and numerical care — so let's establish both before touring the families.
 
+### backend — who executes the instruction stream
+
+Between the engine and the kernels sits one seam, `ExecutorBackend` (`backend.h`): `Bind` the two address spaces, `Execute` one validated instruction, `Flush` any deferred work. The engine decodes, validates and sequences the plan and reads its results off the arena; a backend only executes. Two exist:
+
+- **cpu** (`cpu_backend.cc`) — the kernel library below, called at the very same sites in the very same argument order as before the seam existed. It is the reference: the rest of this section's determinism guarantee is its guarantee, and `--backend cpu` is bit-identical to the pre-backend runtime.
+- **metal** (`metal_backend.mm`, Apple only) — wraps the page-aligned arena as a shared GPU buffer once (zero-copy; the frozen weights too when the plan is page-aligned and writable, as the `.incbin` package is), batches consecutive GPU instructions into one command buffer, and lets a CPU-resident instruction (the losses, the embedding gather) run only after the pending GPU work it depends on — decided from the very operand extents the validator proved. Every `ExecuteRange` ends with a `Flush`, so the arena is coherent whenever the engine reads it.
+
+Determinism is **per-backend**: each is bitwise-reproducible against itself; CPU and GPU compare at tolerance (the GPU contracts FMAs and has no double accumulators), and the backend's name travels with every number it produced — the banner, the gate line, `--report`, `bench.json`. `--backend auto` takes the GPU when a device exists and says so; otherwise it says so and runs on the CPU.
+
 ### Determinism: same bits, any thread count
 
 Floating-point addition is not associative: `(a + b) + c` and `a + (b + c)` can differ in the last bit. So if you split a sum across threads and combine "whenever threads finish," your result depends on scheduling — run twice, get two answers. SeeML forbids this categorically, with one policy (`kernel_policy.h` + `source/parallel/`):

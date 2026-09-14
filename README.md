@@ -104,8 +104,10 @@ What SeeML can train today, stated up front:
 - **Target machine.** The compiler derives its cache tilings from the
   machine it runs on (host = target). The emitted package cross-compiles
   (set `CXX`), but tilings remain build-host-derived hints. Execution is
-  CPU; on Apple hosts a hardware-validated Metal GEMM dispatch harness
-  exists (roadmap Project 5), but the engine does not yet dispatch to it.
+  CPU by default — the bitwise-deterministic reference — and, on Apple
+  hosts, an opt-in Metal backend (`model_update --backend metal|auto`):
+  zero-copy residency, batched dispatch, every opcode but the losses on the
+  GPU, compared against the CPU at tolerance (roadmap Project 5).
 - **Integrity, not authenticity.** All hashing is FNV-1a — a corruption and
   mismatch detector, not a signature. Authenticate plans in your update
   transport.
