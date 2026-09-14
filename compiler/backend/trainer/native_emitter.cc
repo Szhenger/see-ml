@@ -375,6 +375,7 @@ constexpr const char* kVendoredSources[] = {
     "runtime/executor/backend.h",         "runtime/executor/backend.cc",
     "runtime/executor/cpu_backend.cc",    "runtime/executor/metal_backend.h",
     "runtime/executor/metal_backend_stub.cc",
+    "runtime/executor/metal_backend.mm",  "runtime/executor/metal_kernels.h",
     "runtime/feeder/dataset.h",           "runtime/feeder/dataset.cc",
     "runtime/feeder/batch_pipeline.h",    "runtime/feeder/batch_pipeline.cc",
     "runtime/validator/plan_validator.h", "runtime/validator/plan_validator.cc",
@@ -438,18 +439,35 @@ std::string BuildScript(const GemmTiling* tiling) {
   s += "for unit in executor/gemm executor/elementwise executor/activation "
        "executor/normalization executor/loss executor/optimizer "
        "executor/attention executor/backend executor/cpu_backend "
-       "executor/metal_backend_stub "
        "feeder/dataset feeder/batch_pipeline validator/plan_validator "
        "custodian/durable_io custodian/checkpoint engine/contract "
        "engine/update_engine; do\n";
   s += "  $CXX $FLAGS -c \"runtime/$unit.cc\" -o \"$(basename $unit).o\"\n";
   s += "done\n";
+  s += "# The Metal executor backend (--backend metal|auto) exists on Apple\n";
+  s += "# hosts only: its Objective-C++ unit needs clang and the Metal +\n";
+  s += "# Foundation frameworks, JIT-compiles its kernels at run time (no\n";
+  s += "# Metal toolchain needed to build), and degrades to the CPU where no\n";
+  s += "# device exists. Everywhere else — and under SEEML_NO_METAL=1 — the\n";
+  s += "# stub takes its place and the package stays a plain C++ build, so a\n";
+  s += "# Linux or Windows package is byte-for-byte what it was before.\n";
+  s += "METAL_OBJ=metal_backend_stub.o\n";
+  s += "METAL_LDFLAGS=\"\"\n";
+  s += "if [ \"$(uname -s)\" = \"Darwin\" ] && [ -z \"${SEEML_NO_METAL:-}\" ]; then\n";
+  s += "  $CXX $FLAGS -x objective-c++ -fobjc-arc -c "
+       "runtime/executor/metal_backend.mm -o metal_backend.o\n";
+  s += "  METAL_OBJ=metal_backend.o\n";
+  s += "  METAL_LDFLAGS=\"-framework Metal -framework Foundation\"\n";
+  s += "else\n";
+  s += "  $CXX $FLAGS -c runtime/executor/metal_backend_stub.cc "
+       "-o metal_backend_stub.o\n";
+  s += "fi\n";
   s += "$CXX $FLAGS update_main.o update_plan_embedded.o update_engine.o "
        "contract.o dataset.o batch_pipeline.o gemm.o elementwise.o "
        "activation.o normalization.o loss.o optimizer.o attention.o "
-       "backend.o cpu_backend.o metal_backend_stub.o "
+       "backend.o cpu_backend.o $METAL_OBJ "
        "parallel_for.o durable_io.o plan_validator.o checkpoint.o "
-       "-o model_update\n";
+       "$METAL_LDFLAGS -o model_update\n";
   s += "# The .o files are intermediates; the deliverable is the binary.\n";
   s += "rm -f ./*.o\n";
   s += "echo \"built: $(pwd)/model_update\"\n";

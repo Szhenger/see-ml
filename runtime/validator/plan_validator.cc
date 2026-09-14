@@ -9,9 +9,12 @@ namespace seeml::update_rt {
 
 namespace up = seeml::update;
 
-std::expected<void, std::string> ValidateInstruction(
+namespace {
+
+std::expected<void, std::string> ValidateInstructionImpl(
     const up::UpdateInstruction& ins, uint64_t arena_size,
-    uint64_t rodata_size, uint32_t plan_version) {
+    uint64_t rodata_size, uint32_t plan_version,
+    InstructionExtents* extents) {
   // Flags discipline before any operand math. Pre-v5 plans predate the
   // flags vocabulary: a nonzero word there is corruption, not a feature.
   // From v5 on, every set bit must be a defined epilogue bit AND defined
@@ -43,12 +46,10 @@ std::expected<void, std::string> ValidateInstruction(
   // every written range before the instruction is accepted. A single ref
   // that is read and written through one pointer (SGD's param, GemmAcc's C)
   // is one operand, not an alias.
-  struct OperandRange {
-    uint64_t off, bytes;
-    bool write, rodata;
-  };
-  OperandRange ranges[8];
-  size_t num_ranges = 0;
+  using OperandRange = OperandExtent;
+  OperandRange* ranges = extents->ranges;
+  size_t& num_ranges = extents->count;
+  num_ranges = 0;
 
   // elem_bytes: f32/i32 operands are 4 bytes; quantized weights are 1.
   // A ref is admitted only if its extent is nonzero (every kernel
@@ -373,6 +374,27 @@ std::expected<void, std::string> ValidateInstruction(
   // must be a load error — Execute() would silently skip it.
   return diag::validating::Error("unknown opcode " +
                                  std::to_string(ins.opcode));
+}
+
+}  // namespace
+
+std::expected<void, std::string> ValidateInstruction(
+    const up::UpdateInstruction& ins, uint64_t arena_size,
+    uint64_t rodata_size, uint32_t plan_version) {
+  InstructionExtents extents;
+  return ValidateInstructionImpl(ins, arena_size, rodata_size, plan_version,
+                                 &extents);
+}
+
+std::expected<InstructionExtents, std::string> DescribeInstruction(
+    const up::UpdateInstruction& ins, uint64_t arena_size,
+    uint64_t rodata_size, uint32_t plan_version) {
+  InstructionExtents extents;
+  if (auto r = ValidateInstructionImpl(ins, arena_size, rodata_size,
+                                       plan_version, &extents);
+      !r)
+    return std::unexpected(r.error());
+  return extents;
 }
 
 }  // namespace seeml::update_rt

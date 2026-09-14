@@ -156,6 +156,7 @@ for suite in \
     compiler/diagnostics/diagnostics_test \
     runtime/feeder/dataset_test runtime/feeder/batch_pipeline_test \
     runtime/executor/kernels_test runtime/executor/metal_gemm_test \
+    runtime/executor/metal_backend_test \
     runtime/validator/validator_test \
     runtime/custodian/custodian_test \
     runtime/engine/engine_test runtime/engine/update_engine_test \

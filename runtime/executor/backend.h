@@ -70,11 +70,14 @@ class ExecutorBackend {
   /// Binds the address spaces for the plan about to execute. `arena` is
   /// kArenaAlignment-aligned and `arena_bytes` a multiple of it; both
   /// pointers stay valid until the next Bind or the backend's destruction.
+  /// `rodata_mapped_bytes` is how much readable memory follows `rodata`
+  /// inside the plan blob (>= rodata_bytes): a GPU backend may wrap the
+  /// frozen weights zero-copy only if whole pages of the blob cover them.
   /// A backend that cannot bind (no device, a buffer wrap refused) reports
   /// why and leaves nothing half-bound.
   [[nodiscard]] virtual std::expected<void, std::string> Bind(
       uint8_t* arena, uint64_t arena_bytes, const uint8_t* rodata,
-      uint64_t rodata_bytes) = 0;
+      uint64_t rodata_bytes, uint64_t rodata_mapped_bytes) = 0;
 
   /// Executes (or enqueues) one validated instruction. The engine's
   /// validator proved every operand before dispatch; the backend trusts the

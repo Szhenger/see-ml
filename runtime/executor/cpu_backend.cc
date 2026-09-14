@@ -42,7 +42,7 @@ class CpuBackend final : public ExecutorBackend {
   std::string device() const override { return "host CPU"; }
 
   std::expected<void, std::string> Bind(uint8_t* arena, uint64_t,
-                                        const uint8_t* rodata,
+                                        const uint8_t* rodata, uint64_t,
                                         uint64_t) override {
     arena_ = arena;
     rodata_ = rodata;

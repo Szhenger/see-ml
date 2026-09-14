@@ -43,7 +43,8 @@ std::expected<void, std::string> UpdateEngine::SelectBackend(
   // switch is refused and the current backend keeps its binding.
   if (arena_) {
     if (auto r = sel->backend->Bind(arena_, arena_bytes_, rodata_,
-                                    header_.rodata_size);
+                                    header_.rodata_size,
+                                    plan_size_ - header_.rodata_offset);
         !r)
       return diag::executing::Error(
           "backend '" + std::string(sel->backend->name()) +
@@ -268,11 +269,13 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   // refusal releases the candidate arena and re-binds the previous plan, so
   // a rejected re-Load still leaves the old plan fully executable.
   if (auto r = backend_->Bind(arena, arena_bytes, plan + header.rodata_offset,
-                              header.rodata_size);
+                              header.rodata_size,
+                              plan_size - header.rodata_offset);
       !r) {
     std::free(arena);
     if (arena_)
-      (void)backend_->Bind(arena_, arena_bytes_, rodata_, header_.rodata_size);
+      (void)backend_->Bind(arena_, arena_bytes_, rodata_, header_.rodata_size,
+                           plan_size_ - header_.rodata_offset);
     return diag::executing::Error("backend '" +
                                   std::string(backend_->name()) +
                                   "' cannot bind the plan: " + r.error());
