@@ -132,6 +132,11 @@ std::expected<void, std::string> ValidateInstructionImpl(
     return diag::validating::Error(
         "transformer opcode " + std::to_string(ins.opcode) + " in a pre-v" +
         std::to_string(up::kSeeuTransformerVersion) + " plan");
+  if (ins.opcode == static_cast<uint16_t>(up::OpCode::kAccumulate) &&
+      plan_version < up::kSeeuGradAccumVersion)
+    return diag::validating::Error(
+        "accumulate opcode in a pre-v" +
+        std::to_string(up::kSeeuGradAccumVersion) + " plan");
   if (ins.opcode == static_cast<uint16_t>(up::OpCode::kEmbedFwd) &&
       plan_version < up::kSeeuTokenVersion)
     return diag::validating::Error(
@@ -267,6 +272,10 @@ std::expected<void, std::string> ValidateInstructionImpl(
       if (auto r = kl_scale_ok(d1); !r) return r;
       return disjoint();
     case up::OpCode::kSgdStep:
+      if (!ref_ok(ins.in[0], d0, true) || !ref_ok(ins.in[1], d0, false))
+        return fail();
+      return disjoint();
+    case up::OpCode::kAccumulate:  // dst (read+write, one operand), src
       if (!ref_ok(ins.in[0], d0, true) || !ref_ok(ins.in[1], d0, false))
         return fail();
       return disjoint();

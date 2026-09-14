@@ -247,18 +247,27 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   // step) — again under the per-pass verification gate, which subsumes the
   // former end-of-pipeline SSA validation.
   std::unordered_map<sir::Value*, sir::Value*> param_grads;
+  // Gradient accumulation (roadmap 2a): each micro-batch's gradient is a
+  // mean over its own rows, so the seed dL/dL = 1/G makes G folded
+  // gradients the mean over the effective batch of batch x G rows.
+  const uint32_t accum = std::max<uint32_t>(1, config_.grad_accum_steps);
   {
     PassManager pm;
     pm.Add("autodiff", [&](sir::Block& b) -> std::expected<void, std::string> {
-      auto grads = TrainableAutodiff().Run(b, loss, trainables);
+      auto grads = TrainableAutodiff(1.0f / static_cast<float>(accum))
+                       .Run(b, loss, trainables);
       if (!grads) return std::unexpected(grads.error());
       param_grads = std::move(*grads);
       return {};
     });
-    if (config_.emit_optimizer)
+    // The optimizer pass also owns the accumulators, so under accumulation
+    // it runs even for the optimizer-less finite-difference builds (which
+    // then get the folds and no step).
+    if (config_.emit_optimizer || accum > 1)
       pm.Add("optimizer", [&](sir::Block& b) {
         return OptimizerSynthesizer(config_.optimizer.kind,
-                                    config_.optimizer.clip_norm)
+                                    config_.optimizer.clip_norm, accum,
+                                    config_.emit_optimizer)
             .Run(b, param_grads);
       });
     if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
@@ -387,6 +396,33 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   auto train_instrs = LowerOps(train_ops, resolve_train, quant_scales);
   if (!train_instrs) return std::unexpected(train_instrs.error());
 
+  // Under gradient accumulation the lowered stream is two programs: the
+  // grad program (forward, backward, the folds) and the step program (clip,
+  // step, zero), split at the first step-program instruction — the
+  // synthesizer appended every fold before the first of those. With no
+  // accumulation the whole stream is the one-batch training program.
+  std::vector<UpdateInstruction> step_instrs;
+  if (accum > 1 && config_.emit_optimizer) {
+    auto is_step = [](const UpdateInstruction& ins) {
+      const auto op = static_cast<OpCode>(ins.opcode);
+      return op == OpCode::kClipNorm || op == OpCode::kSgdStep ||
+             op == OpCode::kAdamWStep;
+    };
+    auto split = std::find_if(train_instrs->begin(), train_instrs->end(),
+                              is_step);
+    if (split == train_instrs->end())
+      return generating::Error(generating::kDriver,
+                               "gradient accumulation requested but the "
+                               "stream carries no optimizer step");
+    step_instrs.assign(split, train_instrs->end());
+    train_instrs->erase(split, train_instrs->end());
+    for (const UpdateInstruction& ins : *train_instrs)
+      if (is_step(ins))
+        return generating::Error(generating::kDriver,
+                                 "optimizer instruction inside the grad "
+                                 "program");
+  }
+
   auto eval_instrs = LowerOps(primal_ops, resolve_train, quant_scales);
   if (!eval_instrs) return std::unexpected(eval_instrs.error());
 
@@ -484,6 +520,12 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   header.weight_decay = config_.optimizer.weight_decay;
   header.batch = static_cast<uint64_t>(batch);
   header.default_steps = config_.default_steps;
+  // An optimizer-less plan (the finite-difference hook) has nothing to
+  // step: it keeps the 1/G seed and the folds, but records no
+  // accumulation — the runtime's contract (a step program exists exactly
+  // when the plan accumulates) is about plans that train.
+  const uint32_t recorded_accum = config_.emit_optimizer ? accum : 1;
+  header.grad_accum_steps = recorded_accum;
   header.lr_schedule = static_cast<uint32_t>(config_.optimizer.lr_schedule);
   header.warmup_steps = config_.optimizer.warmup_steps;
   header.min_lr_factor = config_.optimizer.min_lr_factor;
@@ -500,6 +542,9 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   header.eval_instr_offset = off;
   header.eval_instr_count = eval_instrs->size();
   off += eval_instrs->size() * sizeof(UpdateInstruction);
+  header.step_instr_offset = off;
+  header.step_instr_count = step_instrs.size();
+  off += step_instrs.size() * sizeof(UpdateInstruction);
   // rodata on a page boundary (schema.h kSeeuRodataAlignment): with the
   // plan itself page-aligned, a GPU backend wraps the frozen weights
   // zero-copy instead of duplicating them.
@@ -529,6 +574,9 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
       merge_instrs->size() * sizeof(UpdateInstruction));
   put(header.eval_instr_offset, eval_instrs->data(),
       eval_instrs->size() * sizeof(UpdateInstruction));
+  if (!step_instrs.empty())
+    put(header.step_instr_offset, step_instrs.data(),
+        step_instrs.size() * sizeof(UpdateInstruction));
   if (!binding->rodata.empty())
     put(header.rodata_offset, binding->rodata.data(), binding->rodata.size());
   if (!persist_init.empty())
@@ -563,12 +611,17 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   merge->block->print(dump);
   result.sir_dump = dump.str();
 
-  for (const auto& [p, g] : param_grads)
-    result.params.push_back(
-        {.id = std::string(p->id()),
-         .param_ref = binding->refs.at(p),
-         .grad_ref = binding->refs.at(g),
-         .count = static_cast<uint64_t>(p->shape().volume())});
+  for (const auto& [p, g] : param_grads) {
+    ParamDebugInfo info{.id = std::string(p->id()),
+                        .param_ref = binding->refs.at(p),
+                        .grad_ref = binding->refs.at(g),
+                        .count = static_cast<uint64_t>(p->shape().volume())};
+    // The accumulator the step program consumes under accumulation.
+    for (const ParamInit& pi : binding->params)
+      if (pi.value->id() == std::string(p->id()) + ".grad_acc")
+        info.acc_ref = binding->refs.at(pi.value);
+    result.params.push_back(info);
+  }
   std::sort(result.params.begin(), result.params.end(),
             [](const ParamDebugInfo& a, const ParamDebugInfo& b) {
               return a.id < b.id;
@@ -593,6 +646,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   result.arena_size = header.arena_size;
   result.persistent_size = header.persistent_size;
   result.train_instruction_count = header.train_instr_count;
+  result.step_instruction_count = step_instrs.size();
+  result.grad_accum_steps = recorded_accum;
   result.merge_instruction_count = header.merge_instr_count;
   result.eval_instruction_count = header.eval_instr_count;
   result.rodata_size = header.rodata_size;

@@ -48,6 +48,7 @@ struct ParamDebugInfo {
   std::string id;
   uint64_t param_ref = kNullRef;  // arena ref of the parameter
   uint64_t grad_ref = kNullRef;   // arena ref of its gradient
+  uint64_t acc_ref = kNullRef;    // its accumulator (grad_accum_steps > 1)
   uint64_t count = 0;             // element count
 };
 
@@ -74,6 +75,8 @@ struct CompiledUpdate {
   uint64_t train_instruction_count = 0;
   uint64_t merge_instruction_count = 0;
   uint64_t eval_instruction_count = 0;
+  uint64_t step_instruction_count = 0;  // 0 unless grad_accum_steps > 1
+  uint32_t grad_accum_steps = 1;
   uint64_t rodata_size = 0;
 };
 

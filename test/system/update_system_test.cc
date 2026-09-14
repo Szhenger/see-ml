@@ -211,6 +211,76 @@ TEST(UpdateSystem, GradientsMatchFiniteDifferences) {
   GradientCheck(compiled, engine, 4242);
 }
 
+TEST(UpdateSystem, AccumulatedGradientsMatchTheLargeBatchGradient) {
+  // (b = 8, G = 4) folding four consecutive 8-row slices must equal the
+  // (b = 32, G = 1) gradient over the same 32 rows. The 1/G seed keeps
+  // every per-row adjoint bitwise-identical (division by a power of two);
+  // only the row-sum association differs (four 8-row GEMMs folded vs one
+  // 32-row GEMM), so the comparison is at f32 round-off, not bitwise.
+  const int64_t in_dim = 5, hidden = 7, out_dim = 3;
+  SmfModel model = MakeMlp(in_dim, hidden, out_dim, 71);
+  UpdateConfig big = BaseConfig(32);
+  big.lora.rank = 3;
+  big.emit_optimizer = false;
+  UpdateConfig micro = BaseConfig(8);
+  micro.lora.rank = 3;
+  micro.emit_optimizer = false;
+  micro.grad_accum_steps = 4;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate cbig, UpdateCompiler(big).Compile(model));
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate cmicro,
+                       UpdateCompiler(micro).Compile(model));
+  ASSERT_EQ(HeaderOf(cmicro).step_instr_count, 0u);  // folds, no step
+
+  std::mt19937_64 rng(7171);
+  std::normal_distribution<float> dist(0.0f, 1.0f);
+  std::vector<float> x(32 * in_dim);
+  for (auto& v : x) v = dist(rng);
+  std::vector<int32_t> labels(32);
+  for (size_t i = 0; i < 32; ++i) labels[i] = static_cast<int32_t>(i % out_dim);
+
+  // Identical adapter state on both engines: nudge lora_B off zero.
+  auto nudge = [&](const CompiledUpdate& c, UpdateEngine& e) {
+    std::mt19937_64 r(99);
+    std::normal_distribution<float> d(0.0f, 1.0f);
+    for (const auto& p : c.params)
+      if (p.id.find(".lora_B") != std::string::npos)
+        for (uint64_t i = 0; i < p.count; ++i)
+          WriteArenaF32(e, p.param_ref, i, 0.05f * d(r));
+  };
+  UpdateEngine ebig, emicro;
+  ASSERT_OK(ebig.LoadFromMemory(cbig.plan.data(), cbig.plan.size()));
+  ASSERT_OK(emicro.LoadFromMemory(cmicro.plan.data(), cmicro.plan.size()));
+  nudge(cbig, ebig);
+  nudge(cmicro, emicro);
+  // No optimizer, so the plan records no accumulation to the runtime: the
+  // folds are driven by hand below, one micro-batch per execution.
+  EXPECT_EQ(emicro.grad_accum_steps(), 1u);
+
+  FillSlots(ebig, x, labels);
+  ebig.ExecuteTrainOnce();
+  for (int g = 0; g < 4; ++g) {
+    std::vector<float> xs(x.begin() + g * 8 * in_dim,
+                          x.begin() + (g + 1) * 8 * in_dim);
+    std::vector<int32_t> ls(labels.begin() + g * 8, labels.begin() + (g + 1) * 8);
+    FillSlots(emicro, xs, ls);
+    emicro.ExecuteTrainOnce();
+  }
+  size_t checked = 0;
+  for (const auto& pb : cbig.params) {
+    const auto pm = std::find_if(cmicro.params.begin(), cmicro.params.end(),
+                                 [&](const auto& q) { return q.id == pb.id; });
+    ASSERT_TRUE(pm != cmicro.params.end());
+    ASSERT_NE(pm->acc_ref, kNullRef);
+    for (uint64_t i = 0; i < pb.count; ++i) {
+      const float want = ReadArenaF32(ebig, pb.grad_ref, i);
+      const float got = ReadArenaF32(emicro, pm->acc_ref, i);
+      EXPECT_NEAR(got, want, 1e-6 + 1e-5 * std::fabs(want));
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 20u);
+}
+
 TEST(UpdateSystem, DistillationGradientsMatchFiniteDifferences) {
   // The T^2-scaled KL loss (#13) and the composite (1-w)·xent + w·kl, each
   // checked through the compiled backward against the compiled forward —

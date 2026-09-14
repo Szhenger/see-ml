@@ -50,6 +50,8 @@ The engine also mirrors the compiler's outermost discipline: `Train` wraps `Trai
 
 ### Training: the loop that is barely a loop
 
+Under gradient accumulation (a v9 plan with `grad_accum_steps = G > 1`) one optimizer step is `G` executions of the grad program — one micro-batch fed each — followed by one execution of the step program; the reported loss is the mean of the `G` micro-batch losses, the AdamW timestep and the learning-rate schedule advance once per optimizer step, and checkpoints (and the feeder replay on resume, which skips `steps × G × batch` rows) align to optimizer-step boundaries. With `G = 1` the grad program is the whole step and nothing below changes.
+
 Each step `s` (with `step_ = s + 1`, 1-indexed, because AdamW's bias correction needs a step number that starts at 1):
 
 1. Ask the feeder for the next batch (which was staged *during* the previous step — see below).

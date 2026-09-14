@@ -90,7 +90,7 @@ TEST(EngineContract, ExecutorContractSpeaksAsThePlanValidator) {
   up::PlanHeader header{};
   header.arena_size = 1024;
 
-  const auto r = VerifyExecutorContract(std::span(&bogus, 1), {}, {}, {},
+  const auto r = VerifyExecutorContract(std::span(&bogus, 1), {}, {}, {}, {},
                                         header);
   ASSERT_FALSE(r.has_value());
   EXPECT_TRUE(WellFormedDiagnostic(r.error()));
@@ -122,15 +122,15 @@ TEST(EngineContract, ExecutorContractBindsEmbeddingTokensToTheStagedSlot) {
   emb.out[0] = 4;
   emb.out[1] = (uint64_t{8} << 32) | 4;
   std::vector<up::UpdateInstruction> train = {emb};
-  EXPECT_OK(VerifyExecutorContract(train, {}, {}, {}, header));
+  EXPECT_OK(VerifyExecutorContract(train, {}, {}, {}, {}, header));
   // Tokens read from anywhere but the staged slot: rejected.
   train[0].in[0] = up::MakeArenaRef(512);
-  EXPECT_ERROR_CONTAINS(VerifyExecutorContract(train, {}, {}, {}, header),
+  EXPECT_ERROR_CONTAINS(VerifyExecutorContract(train, {}, {}, {}, {}, header),
                         "staged input slot");
   // Embedding in a plan that does not declare token input: rejected.
   train[0].in[0] = up::MakeArenaRef(0);
   header.input_kind = 0;
-  EXPECT_ERROR_CONTAINS(VerifyExecutorContract(train, {}, {}, {}, header),
+  EXPECT_ERROR_CONTAINS(VerifyExecutorContract(train, {}, {}, {}, {}, header),
                         "without token input");
 }
 

@@ -45,6 +45,23 @@ TEST(PlanValidator, AcceptsInBoundsOperands) {
                                 kArena, kRodata, up::kSeeuVersion));
 }
 
+TEST(PlanValidator, AccumulateIsVersionGatedAndInPlace) {
+  up::UpdateInstruction acc;
+  acc.opcode = static_cast<uint16_t>(up::OpCode::kAccumulate);
+  acc.in[0] = up::MakeArenaRef(0);    // dst: read + written, one operand
+  acc.in[1] = up::MakeArenaRef(256);  // src
+  acc.out[0] = 32;
+  EXPECT_OK(ValidateInstruction(acc, kArena, kRodata, up::kSeeuVersion));
+  EXPECT_ERROR(ValidateInstruction(acc, kArena, kRodata,
+                                   up::kSeeuGradAccumVersion - 1));
+  acc.in[1] = up::MakeArenaRef(64);  // src overlaps the written dst
+  EXPECT_ERROR(ValidateInstruction(acc, kArena, kRodata, up::kSeeuVersion));
+  acc.in[1] = up::MakeRodataRef(0);  // a rodata source is fine
+  EXPECT_OK(ValidateInstruction(acc, kArena, kRodata, up::kSeeuVersion));
+  acc.in[0] = up::MakeRodataRef(0);  // a rodata destination is not
+  EXPECT_ERROR(ValidateInstruction(acc, kArena, kRodata, up::kSeeuVersion));
+}
+
 TEST(PlanValidator, KlLossScaleIsVersionGated) {
   // N=2, C=3 -> 6 floats per logit/prob tensor, disjoint arena slots; the
   // loss is one float. T = 2 in the low word; the v8 scale in the high word.

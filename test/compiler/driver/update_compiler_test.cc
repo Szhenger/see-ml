@@ -229,7 +229,60 @@ TEST(UpdateCompiler, DistillationRequiresAndUsesTeacher) {
   }
   EXPECT_EQ(fwd, 1u);
   EXPECT_EQ(bwd, 1u);
-  EXPECT_EQ(HeaderOf(compiled).version, seeml::update::kSeeuKlScaleVersion);
+  EXPECT_TRUE(HeaderOf(compiled).version >= seeml::update::kSeeuKlScaleVersion);
+}
+
+TEST(UpdateCompiler, GradientAccumulationSplitsTheStream) {
+  // G = 4: the train section becomes the grad program (forward, backward,
+  // one fold per trainable into a persistent accumulator) and a step
+  // section carries clip / step / zero; the seed is 1/G. G = 1 (the
+  // default) is the classic one-batch program with no step section.
+  SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 51);
+  UpdateConfig config = BaseConfig(kBatch);
+  config.optimizer.clip_norm = 1.0f;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate plain,
+                       UpdateCompiler(config).Compile(model));
+  config.grad_accum_steps = 4;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate accum,
+                       UpdateCompiler(config).Compile(model));
+  const PlanHeader hp = HeaderOf(plain), ha = HeaderOf(accum);
+  EXPECT_EQ(hp.grad_accum_steps, 1u);
+  EXPECT_EQ(hp.step_instr_count, 0u);
+  EXPECT_EQ(ha.grad_accum_steps, 4u);
+  EXPECT_GT(ha.step_instr_count, 0u);
+  EXPECT_EQ(ha.version, kSeeuGradAccumVersion);
+  const size_t trainables = 2 * accum.adapters.size();
+
+  const auto grad = TrainProgramOf(accum);
+  EXPECT_EQ(CountOpcode(grad, OpCode::kAccumulate), trainables);
+  EXPECT_EQ(CountOpcode(grad, OpCode::kAdamWStep), 0u);
+  EXPECT_EQ(CountOpcode(grad, OpCode::kClipNorm), 0u);
+  EXPECT_EQ(CountOpcode(TrainProgramOf(plain), OpCode::kAccumulate), 0u);
+  EXPECT_EQ(CountOpcode(TrainProgramOf(plain), OpCode::kAdamWStep), trainables);
+
+  std::vector<UpdateInstruction> step(ha.step_instr_count);
+  std::memcpy(step.data(), accum.plan.data() + ha.step_instr_offset,
+              step.size() * sizeof(UpdateInstruction));
+  EXPECT_EQ(CountOpcode(step, OpCode::kClipNorm), trainables);
+  EXPECT_EQ(CountOpcode(step, OpCode::kAdamWStep), trainables);
+  EXPECT_EQ(CountOpcode(step, OpCode::kFill), trainables);  // the zeroes
+  EXPECT_EQ(CountOpcode(step, OpCode::kAccumulate), 0u);
+  // The seed carries 1/G: exactly one fill of 0.25 in the grad program.
+  size_t quarter_seeds = 0;
+  for (const auto& ins : grad)
+    if (ins.opcode == static_cast<uint16_t>(OpCode::kFill) &&
+        std::bit_cast<float>(static_cast<uint32_t>(ins.in[1])) == 0.25f)
+      ++quarter_seeds;
+  EXPECT_EQ(quarter_seeds, 1u);
+  // One extra grad-sized set in the persistent segment, activations
+  // unchanged (the arena beyond it is the same micro-batch workspace).
+  uint64_t grad_bytes = 0;  // each accumulator is a 64-byte-aligned slot
+  for (const auto& p : accum.params) {
+    grad_bytes += (p.count * sizeof(float) + 63) & ~uint64_t{63};
+    EXPECT_NE(p.acc_ref, kNullRef);
+  }
+  for (const auto& p : plain.params) EXPECT_EQ(p.acc_ref, kNullRef);
+  EXPECT_EQ(accum.persistent_size, plain.persistent_size + grad_bytes);
 }
 
 TEST(UpdateCompiler, RejectsTeacherShapeMismatch) {

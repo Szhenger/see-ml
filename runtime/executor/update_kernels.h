@@ -162,6 +162,9 @@ void AdamWStep(float* p, const float* g, float* m, float* v, size_t n,
                float lr, float beta1, float beta2, float eps,
                float weight_decay, uint64_t step);
 
+// --- Gradient accumulation (plan v9): dst += src, in place -------------------
+void Accumulate(float* dst, const float* src, size_t n);
+
 // --- Utility -------------------------------------------------------------------
 void Fill(float* dst, float value, size_t n);
 void Copy(const float* src, float* dst, size_t n);

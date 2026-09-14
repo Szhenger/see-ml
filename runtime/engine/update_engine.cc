@@ -151,13 +151,17 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   std::memcpy(merge.data(), plan + header.merge_instr_offset, merge_bytes);
   std::vector<up::UpdateInstruction> eval(header.eval_instr_count);
   std::memcpy(eval.data(), plan + header.eval_instr_offset, eval_bytes);
+  std::vector<up::UpdateInstruction> step(header.step_instr_count);
+  std::memcpy(step.data(), plan + header.step_instr_offset,
+              header.step_instr_count * sizeof(up::UpdateInstruction));
   std::vector<up::EmitEntry> emit(header.emit_count);
   std::memcpy(emit.data(), plan + header.emit_table_offset, emit_bytes);
 
   // Executor boundary: every operand ref of every instruction is
   // bounds-proven by the validator and every emit entry targets the arena —
   // after this, Execute() dispatches the programs blindly.
-  if (auto ok = VerifyExecutorContract(train, merge, eval, emit, header); !ok)
+  if (auto ok = VerifyExecutorContract(train, merge, eval, step, emit, header);
+      !ok)
     return std::unexpected(ok.error());
 
   // Softmax class-width discipline (the kernels index rows of this width
@@ -303,6 +307,8 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   train_program_ = std::move(train);
   merge_program_ = std::move(merge);
   eval_program_ = std::move(eval);
+  step_program_ = std::move(step);
+  grad_accum_ = std::max<uint64_t>(1, header.grad_accum_steps);
 #ifdef SEEML_STEP_TIMING
   // Phase boundaries for the step-latency split (docs/benchmarks.md, Tier
   // A): the forward pass ends after the LAST loss-forward instruction
@@ -348,6 +354,20 @@ std::expected<void, std::string> UpdateEngine::Execute(
 /// a plain Execute() unless the runtime is built with -DSEEML_STEP_TIMING
 /// (the benchmark-harness build), so the shipped runtime never reads a
 /// clock inside the step.
+/// The optimizer program under gradient accumulation; charged to the
+/// optimizer phase of the step-timing split.
+std::expected<void, std::string> UpdateEngine::ExecuteStepProgram() {
+#ifdef SEEML_STEP_TIMING
+  using clock = std::chrono::steady_clock;
+  const auto t0 = clock::now();
+  auto r = Execute(step_program_);
+  timings_.opt_seconds += std::chrono::duration<double>(clock::now() - t0).count();
+  return r;
+#else
+  return Execute(step_program_);
+#endif
+}
+
 std::expected<void, std::string> UpdateEngine::ExecuteTrainProgram() {
 #ifdef SEEML_STEP_TIMING
   using clock = std::chrono::steady_clock;
@@ -588,8 +608,10 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
       // advance one record per seq_len rows) and replays per-epoch
       // permutations from the shuffle seed, so the position is exact even
       // across epoch boundaries.
+      // Under accumulation each optimizer step consumed G micro-batches.
       uint64_t served = 0;
-      if (!MulOk(step_, header_.batch, &served))
+      if (!MulOk(step_, header_.batch, &served) ||
+          !MulOk(served, grad_accum_, &served))
         return diag::executing::Error("resumed step count overflows the "
                                       "feeder position");
       if (auto r = data.SkipServed(served); !r)
@@ -641,11 +663,26 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
         break;
       }
       step_ = s + 1;  // 1-indexed timestep for AdamW bias correction
-      feeder.NextBatch(input_slot, label_slot);
-      if (auto r = ExecuteTrainProgram(); !r) return std::unexpected(r.error());
+      // Gradient accumulation: G grad executions (one micro-batch each,
+      // folded into the persistent accumulators), then the step program
+      // once. The reported loss is the mean over the G micro-batch losses
+      // — the loss of the effective batch. With G == 1 the grad program IS
+      // the whole step and the loop body is the classic one.
+      double loss_sum = 0.0;
+      for (uint64_t g = 0; g < grad_accum_; ++g) {
+        feeder.NextBatch(input_slot, label_slot);
+        if (auto r = ExecuteTrainProgram(); !r)
+          return std::unexpected(r.error());
+        loss_sum += LossValue();
+      }
+      if (!step_program_.empty()) {
+        if (auto r = ExecuteStepProgram(); !r)
+          return std::unexpected(r.error());
+      }
       ++executed;
 
-      const float loss = LossValue();
+      const float loss = static_cast<float>(loss_sum /
+                                            static_cast<double>(grad_accum_));
       // A non-finite loss means the parameters (and any AdamW moments) are
       // already poisoned; continuing can only burn energy. Fail the update —
       // the source model on disk is untouched by construction.

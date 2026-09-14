@@ -233,6 +233,9 @@ kernel void k_fill(KSIG, uint g [[thread_position_in_grid]]) {
 kernel void k_copy(KSIG, uint g [[thread_position_in_grid]]) {
   if (g < p.n) WF(1)[g] = RF(0)[g];
 }
+kernel void k_accumulate(KSIG, uint g [[thread_position_in_grid]]) {
+  if (g < p.n) WF(0)[g] += RF(1)[g];
+}
 // p.f: lr, weight_decay
 kernel void k_sgd(KSIG, uint g [[thread_position_in_grid]]) {
   if (g >= p.n) return;

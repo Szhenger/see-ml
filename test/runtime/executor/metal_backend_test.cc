@@ -138,6 +138,13 @@ std::vector<Family> Families() {
     c.default_steps = 12;
     add("mlp_xent_adamw_clip_cosine", UpdateCompiler(c).Compile(m), ClassData);
   }
+  {  // gradient accumulation: the grad + step programs, kAccumulate on GPU
+    SmfModel m = MakeMlp(16, 32, 4, 39);
+    UpdateConfig c = BaseConfig(8);
+    c.grad_accum_steps = 2;
+    c.optimizer.clip_norm = 0.5f;
+    add("mlp_xent_grad_accum_2", UpdateCompiler(c).Compile(m), ClassData);
+  }
   {  // same model, SGD, quantized base: the q8 GEMM pair
     SmfModel m = MakeMlp(16, 32, 4, 32);
     UpdateConfig c = BaseConfig(16);

@@ -102,7 +102,9 @@ What SeeML can train today, stated up front:
   to the pristine f32 source file, quantization error is never baked into
   the committed model.
 - **Shapes.** The batch size is fixed at compile time and baked into the
-  plan; the dataset must match the compiled geometry.
+  plan; the dataset must match the compiled geometry. `--grad-accum G`
+  accumulates `G` micro-batch gradients per optimizer step, so the
+  effective batch can exceed what one forward+backward fits in memory.
 - **Target machine.** The compiler derives its cache tilings from the
   machine it runs on (host = target). The emitted package cross-compiles
   (set `CXX`), but tilings remain build-host-derived hints. Execution is

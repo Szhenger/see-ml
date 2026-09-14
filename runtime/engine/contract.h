@@ -56,6 +56,7 @@ namespace seeml::update_rt {
     std::span<const seeml::update::UpdateInstruction> train,
     std::span<const seeml::update::UpdateInstruction> merge,
     std::span<const seeml::update::UpdateInstruction> eval,
+    std::span<const seeml::update::UpdateInstruction> step,
     std::span<const seeml::update::EmitEntry> emit_table,
     const seeml::update::PlanHeader& header);
 

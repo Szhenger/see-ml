@@ -219,7 +219,11 @@ class UpdateEngine {
 
   /// Executes the training instruction stream once against whatever is in the
   /// I/O slots right now (no data feeding). Used for gradient verification.
+  /// Under gradient accumulation this is ONE grad execution: it folds the
+  /// slots' micro-batch into the accumulators and never steps.
   void ExecuteTrainOnce();
+  /// Micro-batches accumulated per optimizer step (1 = the classic step).
+  uint64_t grad_accum_steps() const { return grad_accum_; }
 
   /// The step-latency accumulator (zeros unless built with
   /// -DSEEML_STEP_TIMING; reset by every successful Load).
@@ -247,6 +251,8 @@ class UpdateEngine {
       size_t begin, size_t end);
   /// Execute(train_program_), phase-timed under SEEML_STEP_TIMING.
   [[nodiscard]] std::expected<void, std::string> ExecuteTrainProgram();
+  /// Execute(step_program_) (gradient accumulation), timed as optimizer.
+  [[nodiscard]] std::expected<void, std::string> ExecuteStepProgram();
 
   const float* ReadPtr(uint64_t ref) const;
   float* WritePtr(uint64_t ref);
@@ -265,6 +271,10 @@ class UpdateEngine {
   std::vector<seeml::update::UpdateInstruction> train_program_;
   std::vector<seeml::update::UpdateInstruction> merge_program_;
   std::vector<seeml::update::UpdateInstruction> eval_program_;
+  // Gradient accumulation (v9): the optimizer program, run once per
+  // grad_accum_ executions of train_program_; empty when grad_accum_ == 1.
+  std::vector<seeml::update::UpdateInstruction> step_program_;
+  uint64_t grad_accum_ = 1;
   std::vector<seeml::update::EmitEntry> emit_table_;
 
   uint8_t* arena_ = nullptr;              // single aligned allocation

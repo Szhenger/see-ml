@@ -17,7 +17,10 @@
 //       [--warmup 0]                   warmup steps (cosine schedule)
 //       [--min-lr-factor 0]            cosine floor as a fraction of --lr
 //       [--quantize-base]              int8-quantize frozen weights in rodata
-//       [--steps 1000]                 default step count baked into the plan
+//       [--steps 1000]                 default optimizer-step count baked into the plan
+//       [--grad-accum 1]               micro-batches accumulated per optimizer step
+//                                      (activations scale with --data-batch, the
+//                                      effective batch is data-batch x grad-accum)
 //       [--report report.json]         machine-readable compile report
 //       [--no-embed]                   skip the decimal byte-array TU; embed
 //                                      the plan with tool/pack_update.py
@@ -70,6 +73,7 @@ void PrintUsage() {
                "  [--weight-decay WD] [--clip-norm C]\n"
                "  [--lr-schedule const|cosine] [--warmup N]\n"
                "  [--min-lr-factor F] [--quantize-base] [--steps N]\n"
+               "  [--grad-accum G]\n"
                "  [--no-fuse-epilogue] [--report out.json]\n"
                "  [--no-embed] [--build] [--version]\n");
 }
@@ -234,6 +238,12 @@ int main(int argc, char** argv) {
     if (!ParseU64(*v, &config.default_steps))
       return Fail("--steps must be a non-negative integer, got '" + *v + "'");
   }
+  if (auto v = args.TakeValue("--grad-accum")) {
+    uint64_t g = 0;
+    if (!ParseU64(*v, &g) || g < 1 || g > 0xFFFFFFFFull)
+      return Fail("--grad-accum must be a positive integer, got '" + *v + "'");
+    config.grad_accum_steps = static_cast<uint32_t>(g);
+  }
   if (auto v = args.TakeValue("--loss")) {
     if (*v == "xent") config.loss = LossKind::kSoftmaxXEnt;
     else if (*v == "mse") config.loss = LossKind::kMse;
@@ -393,6 +403,9 @@ int main(int argc, char** argv) {
                  "  \"train_instructions\": %" PRIu64 ",\n"
                  "  \"eval_instructions\": %" PRIu64 ",\n"
                  "  \"merge_instructions\": %" PRIu64 ",\n"
+                 "  \"step_instructions\": %" PRIu64 ",\n"
+                 "  \"grad_accum_steps\": %u,\n"
+                 "  \"effective_batch\": %" PRIu64 ",\n"
                  "  \"quantized_base\": %s,\n"
                  "  \"embedded_tu\": %s,\n"
                  "  \"adapters\": [",
@@ -401,6 +414,8 @@ int main(int argc, char** argv) {
                  compiled->train_instruction_count,
                  compiled->eval_instruction_count,
                  compiled->merge_instruction_count,
+                 compiled->step_instruction_count, compiled->grad_accum_steps,
+                 static_cast<uint64_t>(config.batch) * compiled->grad_accum_steps,
                  config.quantize_base ? "true" : "false",
                  embedded_tu_json.c_str());
     for (size_t i = 0; i < compiled->adapters.size(); ++i) {

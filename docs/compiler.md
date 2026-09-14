@@ -180,6 +180,8 @@ Finally, the pass verifies every trainable actually *received* a gradient. A LoR
 
 A training step isn't finished when gradients exist; the parameters must move. `OptimizerSynthesizer` (`analysis/calculus/optimizer.cc`) appends that movement as ordinary SIR ops, so that *one execution of the program is one complete training step* — forward, backward, clip, update, no interpreter in sight.
 
+**Gradient accumulation** (`--grad-accum G`, roadmap 2a) keeps that shape and splits it in two. The plan compiles at the *micro-batch* `b`, so activation memory scales with `b`; the effective batch is `b·G`. Autodiff seeds `dL/dL = 1/G` instead of 1 (every micro-batch loss is a mean over its own rows, so `G` folded gradients sum to the mean over `b·G` rows — and a power-of-two `G` makes that scaling exact per element). The synthesizer then declares one persistent accumulator per parameter (`p.grad_acc`, zero-initialized, in the checkpointed segment like the AdamW moments) and appends `sc_low.accumulate(acc, grad)` for each — the tail of the **grad program** — before the clip, the step (now on the accumulator) and `sc_low.zero(acc)` — the **step program**. The driver splits the lowered stream at the first step instruction; the plan carries the grad program in its train section and the step program in a v9 section of its own, and the runtime runs `G` grad executions per optimizer step. With `G = 1` nothing changes: no accumulators, no step section, the very same monolithic program.
+
 For each (parameter, gradient) pair — sorted by id, so emission order is deterministic — it appends:
 
 - optionally, `sc_low.clip_norm` (if `--clip-norm` > 0), *before* the step: per-tensor gradient clipping, `g ← g · min(1, max_norm/‖g‖₂)`, where `‖g‖₂` is the gradient's *L2 norm* — its Euclidean length, the square root of the sum of squares. One pathological batch must be prevented from blowing up the parameters — or worse, poisoning AdamW's moment estimates, which have a long memory.
@@ -258,7 +260,7 @@ The merge program is bound into the *same* arena, with one twist: its deltas are
 u16 opcode | u16 flags | u32 pad | u64 in[4] | u64 out[3]
 ```
 
-The instruction set has 31 opcodes — six GEMM variants (`NN`, `NT`, `TN`, accumulating `NN`, and two int8-dequantizing forms), elementwise ops, the activation forward/backward pairs, LayerNorm, the three loss families, the two optimizer steps, clip, fill, copy. The complete enumeration lives in `source/plan/instruction.h`, and [formats.md](formats.md) walks the encoding.
+The instruction set has 43 opcodes — six GEMM variants (`NN`, `NT`, `TN`, accumulating `NN`, and two int8-dequantizing forms), elementwise ops, the activation forward/backward pairs, LayerNorm, the three loss families, the two optimizer steps, clip, fill, copy. The complete enumeration lives in `source/plan/instruction.h`, and [formats.md](formats.md) walks the encoding.
 
 The addressing scheme is worth savoring for its economy. A tensor reference is a single 64-bit word: **bit 63 selects the address space** (0 = mutable arena, 1 = read-only rodata), bits 0–62 are a byte offset. That's the entire memory model — two flat spaces and an offset. No pointers, no relocation, and, on the device, one branchless test tells the validator which bounds to check. Scalars ride along bit-cast into spare operand slots (a GEMM's α, clip's max-norm, fill's value), and dimensions pack into the `out[]` words (a GEMM carries M, N, K; LayerNorm packs rows and columns into one word as `(N << 32) | D`).
 
