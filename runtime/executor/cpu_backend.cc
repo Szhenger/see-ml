@@ -65,6 +65,9 @@ class CpuBackend final : public ExecutorBackend {
     // Validation pinned q8 sources to rodata; see ValidateInstruction.
     return reinterpret_cast<const int8_t*>(rodata_ + up::RefOffset(ref));
   }
+  const uint16_t* ReadPtrBF16(uint64_t ref) const {  // likewise pinned
+    return reinterpret_cast<const uint16_t*>(rodata_ + up::RefOffset(ref));
+  }
   float* WritePtr(uint64_t ref) {
     // Lowering never emits a rodata destination; the frozen weights are
     // physically unwritable from the instruction stream by construction.
@@ -220,6 +223,17 @@ std::expected<void, std::string> CpuBackend::Execute(
       break;
     case up::OpCode::kAccumulate:
       k::Accumulate(WritePtr(ins.in[0]), ReadPtr(ins.in[1]), ins.out[0]);
+      break;
+    case up::OpCode::kGemmNNBF16:
+      k::GemmNNBF16(ReadPtr(ins.in[0]), ReadPtrBF16(ins.in[1]),
+                    WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2],
+                    ins.flags & up::kFlagEpilogueBias ? ReadPtr(ins.in[3])
+                                                      : nullptr,
+                    up::EpilogueActOf(ins.flags));
+      break;
+    case up::OpCode::kGemmNTBF16:
+      k::GemmNTBF16(ReadPtr(ins.in[0]), ReadPtrBF16(ins.in[1]),
+                    WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2]);
       break;
     case up::OpCode::kRmsNormFwd:
       k::RmsNormFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),

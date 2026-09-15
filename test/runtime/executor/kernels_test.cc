@@ -126,6 +126,43 @@ TEST(Gemm, Q8ActEpilogueMatchesUnfusedSequence) {
   for (size_t i = 0; i < M * N; ++i) EXPECT_EQ(got[i], want[i]);
 }
 
+TEST(Gemm, Bf16VariantsAreBitwiseTheF32GemmsOverTheWidenedMatrix) {
+  using seeml::update::Bf16BitsToFloat32;
+  using seeml::update::EpilogueAct;
+  using seeml::update::Float32ToBf16Bits;
+  const size_t M = 37, N = 259, K = 21;  // ragged, tile-crossing
+  const std::vector<float> a = RandnVector(M * K, 71);
+  const std::vector<float> b = RandnVector(K * N, 72);
+  const std::vector<float> bt = RandnVector(N * K, 73);
+  const std::vector<float> bias = RandnVector(N, 74);
+  std::vector<uint16_t> bh(b.size()), bth(bt.size());
+  std::vector<float> bw(b.size()), btw(bt.size());  // the widened matrices
+  for (size_t i = 0; i < b.size(); ++i) {
+    bh[i] = Float32ToBf16Bits(b[i]);
+    bw[i] = Bf16BitsToFloat32(bh[i]);
+    EXPECT_NEAR(bw[i], b[i], 4e-3 * std::fabs(b[i]) + 1e-38);  // 8-bit mantissa
+  }
+  for (size_t i = 0; i < bt.size(); ++i) {
+    bth[i] = Float32ToBf16Bits(bt[i]);
+    btw[i] = Bf16BitsToFloat32(bth[i]);
+  }
+  std::vector<float> want(M * N), got(M * N);
+  k::GemmNN(a.data(), bw.data(), want.data(), M, N, K, bias.data(),
+            EpilogueAct::kGelu);
+  k::GemmNNBF16(a.data(), bh.data(), got.data(), M, N, K, bias.data(),
+                EpilogueAct::kGelu);
+  for (size_t i = 0; i < M * N; ++i) EXPECT_EQ(got[i], want[i]);
+  k::GemmNT(a.data(), btw.data(), want.data(), M, N, K);
+  k::GemmNTBF16(a.data(), bth.data(), got.data(), M, N, K);
+  for (size_t i = 0; i < M * N; ++i) EXPECT_EQ(got[i], want[i]);
+  // Round-to-nearest-even and NaN quieting, spot-checked.
+  EXPECT_EQ(Float32ToBf16Bits(1.0f), 0x3F80u);
+  EXPECT_EQ(Bf16BitsToFloat32(Float32ToBf16Bits(1.00390625f)), 1.0f);  // tie -> even
+  EXPECT_EQ(Bf16BitsToFloat32(Float32ToBf16Bits(1.01171875f)), 1.015625f);
+  EXPECT_TRUE(std::isnan(Bf16BitsToFloat32(Float32ToBf16Bits(
+      std::numeric_limits<float>::quiet_NaN()))));
+}
+
 TEST(Gemm, AccNNAccumulatesScaledProduct) {
   const std::vector<float> a = {1, 0, 0, 1};  // I2
   const std::vector<float> b = {5, 6, 7, 8};

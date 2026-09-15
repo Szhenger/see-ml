@@ -211,6 +211,63 @@ TEST(UpdateSystem, GradientsMatchFiniteDifferences) {
   GradientCheck(compiled, engine, 4242);
 }
 
+TEST(UpdateSystem, Bf16BaseGradientsMatchFiniteDifferences) {
+  // The compiled backward through bf16-widened frozen weights is the exact
+  // derivative of the compiled forward through the same widened weights —
+  // the finite-difference suite at the decoder's loosened tolerance.
+  const int64_t dim = 8, heads = 2, seq = 4, ffn = 10, vocab = 3;
+  const int64_t batch = 8;
+  SmfModel model = seeml::testing::MakeTinyDecoder(dim, heads, seq, ffn,
+                                                   vocab, 24);
+  UpdateConfig config = BaseConfig(batch);
+  config.lora.rank = 2;
+  config.emit_optimizer = false;
+  config.bf16_base = true;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+  size_t bf16_adapters = 0;
+  for (const auto& ad : compiled.adapters) bf16_adapters += ad.bf16;
+  EXPECT_EQ(bf16_adapters, compiled.adapters.size());
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+  std::mt19937_64 rng(2424);
+  std::normal_distribution<float> dist(0.0f, 1.0f);
+  std::vector<float> x(batch * dim);
+  for (auto& v : x) v = dist(rng);
+  FillSlots(engine, x, {1, 2, 0, 1, 2, 0, 1, 2});
+  GradientCheck(compiled, engine, 2424, /*tol=*/3e-2);
+}
+
+TEST(UpdateSystem, Bf16BaseTrainsWithinADriftBudgetOfF32) {
+  // Storage precision only: the same update on f32 and bf16 rodata must
+  // track each other — the drift budget the roadmap asks for. bf16 rounds
+  // every frozen weight to 8 mantissa bits (2^-9 relative), so the loss
+  // trajectories agree to well under a percent on this MLP.
+  const int64_t in_dim = 16, hidden = 32, out_dim = 4, batch = 16;
+  SmfModel model = MakeMlp(in_dim, hidden, out_dim, 61);
+  float curves[2][2];
+  int i = 0;
+  for (const bool bf16 : {false, true}) {
+    UpdateConfig config = BaseConfig(batch);
+    config.bf16_base = bf16;
+    config.optimizer.lr = 5e-3f;
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                         UpdateCompiler(config).Compile(model));
+    UpdateEngine engine;
+    ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(),
+                                    compiled.plan.size()));
+    ASSERT_OK_AND_ASSIGN(Dataset data, MakeClassificationData(256, in_dim, 62));
+    data.EnableShuffle(3);
+    ASSERT_OK_AND_ASSIGN(auto report, engine.Train(data, 60, Quiet()));
+    curves[i][0] = report.initial_avg_loss;
+    curves[i][1] = report.final_avg_loss;
+    ++i;
+  }
+  EXPECT_NEAR(curves[1][0], curves[0][0], 1e-2 * curves[0][0]);
+  EXPECT_NEAR(curves[1][1], curves[0][1], 1e-2 * curves[0][1]);
+  EXPECT_LT(curves[1][1], curves[1][0]);  // and it learns
+}
+
 TEST(UpdateSystem, AccumulatedGradientsMatchTheLargeBatchGradient) {
   // (b = 8, G = 4) folding four consecutive 8-row slices must equal the
   // (b = 32, G = 1) gradient over the same 32 rows. The 1/G seed keeps

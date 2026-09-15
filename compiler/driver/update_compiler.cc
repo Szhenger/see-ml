@@ -288,11 +288,22 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   // lower to the q8 opcode, whose in[3] slot the dequant scale occupies —
   // a fused bias ref has nowhere to ride there.
   std::unordered_map<const sir::Value*, float> quant_scales;
+  std::unordered_set<const sir::Value*> bf16_weights;
+  if (config_.quantize_base && config_.bf16_base)
+    return generating::Error(generating::kDriver,
+                             "quantize_base and bf16_base are mutually "
+                             "exclusive (one storage precision per weight)");
   if (config_.quantize_base) {
     quant_scales = SelectQuantizedWeights(block, build);
     seeml::diag::Note(generating::kDriver,
                       "quantized " + std::to_string(quant_scales.size()) +
                           " frozen weight(s) to int8 rodata");
+  }
+  if (config_.bf16_base) {
+    bf16_weights = SelectBf16Weights(block, build);
+    seeml::diag::Note(generating::kDriver,
+                      "stored " + std::to_string(bf16_weights.size()) +
+                          " frozen weight(s) as bf16 rodata");
   }
 
   // --- 7b. Optimization passes (phase C): epilogue fusion, then the DCE
@@ -356,7 +367,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   pinned.insert(loss);
   for (const auto& [p, g] : param_grads) pinned.insert(g);
 
-  auto binding = BindArena(block, build, pinned, quant_scales);
+  auto binding = BindArena(block, build, pinned, quant_scales, bf16_weights);
   if (!binding) return std::unexpected(binding.error());
 
   // Bind the merge program into the same arena: A/B mirrors resolve through
@@ -393,7 +404,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   std::vector<sir::Operation*> train_ops;
   train_ops.reserve(block.numOps());
   block.walk([&](sir::Operation* op) { train_ops.push_back(op); });
-  auto train_instrs = LowerOps(train_ops, resolve_train, quant_scales);
+  auto train_instrs = LowerOps(train_ops, resolve_train, quant_scales, bf16_weights);
   if (!train_instrs) return std::unexpected(train_instrs.error());
 
   // Under gradient accumulation the lowered stream is two programs: the
@@ -423,7 +434,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
                                  "program");
   }
 
-  auto eval_instrs = LowerOps(primal_ops, resolve_train, quant_scales);
+  auto eval_instrs = LowerOps(primal_ops, resolve_train, quant_scales, bf16_weights);
   if (!eval_instrs) return std::unexpected(eval_instrs.error());
 
   auto resolve_merge =
@@ -437,7 +448,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   std::vector<sir::Operation*> merge_ops;
   merge_ops.reserve(merge->block->numOps());
   merge->block->walk([&](sir::Operation* op) { merge_ops.push_back(op); });
-  auto merge_instrs = LowerOps(merge_ops, resolve_merge, quant_scales);
+  auto merge_instrs = LowerOps(merge_ops, resolve_merge, quant_scales, bf16_weights);
   if (!merge_instrs) return std::unexpected(merge_instrs.error());
 
   // --- 10. Persistent-segment initial image (deterministic, seeded). --------
@@ -643,7 +654,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
          .m = a.frozen_weight->shape().dims.at(1),
          .r = a.A->shape().dims.at(1),
          .scale = a.scale,
-         .quant_scale = q != quant_scales.end() ? q->second : 0.0f});
+         .quant_scale = q != quant_scales.end() ? q->second : 0.0f,
+         .bf16 = bf16_weights.contains(a.frozen_weight)});
   }
 
   result.arena_size = header.arena_size;

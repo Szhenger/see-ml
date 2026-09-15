@@ -1,5 +1,7 @@
 #include "compiler/backend/trainer/arena_binder.h"
 
+#include "source/plan/bf16.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -102,7 +104,8 @@ uint64_t LinearScanTransients(
 std::expected<ArenaBinding, std::string> BindArena(
     sir::Block& train_block, const GraphBuild& build,
     const std::unordered_set<const sir::Value*>& pinned,
-    const std::unordered_map<const sir::Value*, float>& quant_scales) {
+    const std::unordered_map<const sir::Value*, float>& quant_scales,
+    const std::unordered_set<const sir::Value*>& bf16_weights) {
   ArenaBinding binding;
 
   // --- PERSISTENT segment: trainable adapters + optimizer state at offset 0.
@@ -157,6 +160,18 @@ std::expected<ArenaBinding, std::string> BindArena(
           const float r = std::round(data[i] / scale);
           dst[i] = static_cast<int8_t>(std::clamp(r, -127.0f, 127.0f));
         }
+      });
+    } else if (bf16_weights.contains(v)) {
+      // bf16 storage (2c): round-to-nearest-even of the f32 bits, 2 bytes
+      // per element; the kernels widen exactly. Same chunk geometry as the
+      // int8 pack, so the bytes are thread-count independent.
+      const auto* data =
+          reinterpret_cast<const float*>(src->second->data.data());
+      const size_t count = src->second->byte_size / sizeof(float);
+      binding.rodata.resize(offset + count * sizeof(uint16_t), 0);
+      auto* dst = reinterpret_cast<uint16_t*>(binding.rodata.data() + offset);
+      ParallelFor(count, kWeightSweepGrain, [&](size_t b, size_t e, size_t) {
+        for (size_t i = b; i < e; ++i) dst[i] = Float32ToBf16Bits(data[i]);
       });
     } else {
       binding.rodata.resize(offset + src->second->byte_size, 0);

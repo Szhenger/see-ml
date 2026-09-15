@@ -29,7 +29,7 @@ std::expected<void, std::string> ValidateInstructionImpl(
   } else {
     const auto opcode = static_cast<up::OpCode>(ins.opcode);
     const uint16_t allowed =
-        opcode == up::OpCode::kGemmNN
+        (opcode == up::OpCode::kGemmNN || opcode == up::OpCode::kGemmNNBF16)
             ? up::kKnownFlagsMask
             : opcode == up::OpCode::kGemmNNQ8 ? up::kFlagEpilogueActMask
                                               : uint16_t{0};
@@ -132,6 +132,12 @@ std::expected<void, std::string> ValidateInstructionImpl(
     return diag::validating::Error(
         "transformer opcode " + std::to_string(ins.opcode) + " in a pre-v" +
         std::to_string(up::kSeeuTransformerVersion) + " plan");
+  if ((ins.opcode == static_cast<uint16_t>(up::OpCode::kGemmNNBF16) ||
+       ins.opcode == static_cast<uint16_t>(up::OpCode::kGemmNTBF16)) &&
+      plan_version < up::kSeeuBf16Version)
+    return diag::validating::Error(
+        "bf16 GEMM opcode in a pre-v" +
+        std::to_string(up::kSeeuBf16Version) + " plan");
   if (ins.opcode == static_cast<uint16_t>(up::OpCode::kAccumulate) &&
       plan_version < up::kSeeuGradAccumVersion)
     return diag::validating::Error(
@@ -163,19 +169,23 @@ std::expected<void, std::string> ValidateInstructionImpl(
     case up::OpCode::kGemmTN:
     case up::OpCode::kGemmAccNN:
     case up::OpCode::kGemmNNQ8:
-    case up::OpCode::kGemmNTQ8: {
+    case up::OpCode::kGemmNTQ8:
+    case up::OpCode::kGemmNNBF16:
+    case up::OpCode::kGemmNTBF16: {
       // Every layout variant reads M*K (A) and K*N (B), writes M*N (C).
-      const bool q8 = static_cast<up::OpCode>(ins.opcode) ==
-                          up::OpCode::kGemmNNQ8 ||
-                      static_cast<up::OpCode>(ins.opcode) ==
-                          up::OpCode::kGemmNTQ8;
+      const auto oc = static_cast<up::OpCode>(ins.opcode);
+      const bool q8 =
+          oc == up::OpCode::kGemmNNQ8 || oc == up::OpCode::kGemmNTQ8;
+      const bool bf16 =
+          oc == up::OpCode::kGemmNNBF16 || oc == up::OpCode::kGemmNTBF16;
       if (!MulOk(d0, d2, &mk) || !MulOk(d2, d1, &kn) || !MulOk(d0, d1, &mn))
         return fail();
-      // Quantized B must live in rodata: only the compiler's own int8
-      // packing produces it, and it is 1 byte per element.
-      if (q8 && !up::IsRodataRef(ins.in[1])) return fail();
+      // Narrow-storage B must live in rodata: only the compiler's own
+      // packing produces it — 1 byte per element for int8, 2 for bf16.
+      if ((q8 || bf16) && !up::IsRodataRef(ins.in[1])) return fail();
+      const uint64_t b_elem = q8 ? 1 : bf16 ? 2 : sizeof(float);
       if (!ref_ok(ins.in[0], mk, false) ||
-          !ref_ok_w(ins.in[1], kn, false, q8 ? 1 : sizeof(float)) ||
+          !ref_ok_w(ins.in[1], kn, false, b_elem) ||
           !ref_ok(ins.in[2], mn, true))
         return fail();
       // Fused-bias epilogue (flags proved valid for this opcode above):

@@ -97,10 +97,11 @@ What SeeML can train today, stated up front:
   base model is never trained directly. Optimizers: SGD or AdamW, one
   parameter group. Losses: cross-entropy, MSE, KL distillation from a
   teacher model, or a weighted cross-entropy + KL composite.
-- **Numerics.** Training is f32 throughout. `--quantize-base` stores the
-  *frozen* weights as int8 in read-only data; because commit applies deltas
-  to the pristine f32 source file, quantization error is never baked into
-  the committed model.
+- **Numerics.** Training computes in f32 throughout. `--quantize-base`
+  stores the *frozen* weights as int8 in read-only data and `--bf16-base`
+  as bfloat16 (2×, exact widening); because commit applies deltas to the
+  pristine f32 source file, storage rounding is never baked into the
+  committed model.
 - **Shapes.** The batch size is fixed at compile time and baked into the
   plan; the dataset must match the compiled geometry. `--grad-accum G`
   accumulates `G` micro-batch gradients per optimizer step, so the

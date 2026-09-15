@@ -6,6 +6,7 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "compiler/frontend/representation/sir.h"
@@ -34,7 +35,8 @@ using ResolveFn = std::function<std::expected<uint64_t, std::string>(
 LowerOps(const std::vector<seeml::sir::Operation*>& ops,
          const ResolveFn& resolve,
          const std::unordered_map<const seeml::sir::Value*, float>&
-             quant_scales);
+             quant_scales,
+    const std::unordered_set<const seeml::sir::Value*>& bf16_weights = {});
 
 }  // namespace seeml::update
 

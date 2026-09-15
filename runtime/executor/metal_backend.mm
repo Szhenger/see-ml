@@ -76,6 +76,7 @@ static_assert(sizeof(KArgs) == 136, "KArgs must match the MSL layout");
 
 enum Pipe : int {
   kPGemmNN, kPGemmNT, kPGemmTN, kPGemmAcc, kPGemmNNQ8, kPGemmNTQ8,
+  kPGemmNNBF16, kPGemmNTBF16,
   kPAddEW, kPMulEW, kPAddBias, kPReluFwd, kPReluBwd, kPGeluFwd, kPGeluBwd,
   kPSiluFwd, kPSiluBwd, kPScale, kPFill, kPCopy, kPAccumulate, kPSgd, kPAdamW,
   kPReduceRows, kPLnFwd, kPLnBwd, kPRmsFwd, kPRmsBwd,
@@ -86,7 +87,7 @@ enum Pipe : int {
 };
 const char* const kPipeNames[kPipeCount] = {
     "k_gemm_nn", "k_gemm_nt", "k_gemm_tn", "k_gemm_acc", "k_gemm_nn_q8",
-    "k_gemm_nt_q8", "k_add_ew", "k_mul_ew", "k_add_bias", "k_relu_fwd",
+    "k_gemm_nt_q8", "k_gemm_nn_bf16", "k_gemm_nt_bf16", "k_add_ew", "k_mul_ew", "k_add_bias", "k_relu_fwd",
     "k_relu_bwd", "k_gelu_fwd", "k_gelu_bwd", "k_silu_fwd", "k_silu_bwd",
     "k_scale", "k_fill", "k_copy", "k_accumulate", "k_sgd", "k_adamw",
     "k_reduce_rows",
@@ -216,6 +217,8 @@ bool DimsFit32(up::OpCode op, const up::UpdateInstruction& ins) {
     case up::OpCode::kGemmAccNN:
     case up::OpCode::kGemmNNQ8:
     case up::OpCode::kGemmNTQ8:
+    case up::OpCode::kGemmNNBF16:
+    case up::OpCode::kGemmNTBF16:
       return ins.out[0] <= kMax && ins.out[1] <= kMax && ins.out[2] <= kMax &&
              ins.out[0] * ins.out[1] <= kMax && ins.out[0] * ins.out[2] <= kMax &&
              ins.out[2] * ins.out[1] <= kMax;
@@ -513,6 +516,21 @@ std::expected<void, std::string> MetalBackend::Encode(
       a.m = u32(ins.out[0]); a.n = u32(ins.out[1]); a.k = u32(ins.out[2]);
       a.f[0] = BitsToF32(ins.in[3]);
       DispatchGemm(kPGemmAcc, a);
+      return {};
+    case up::OpCode::kGemmNNBF16:
+      ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]);
+      if (ins.flags & up::kFlagEpilogueBias) ref(3, ins.in[3]);
+      a.m = u32(ins.out[0]); a.n = u32(ins.out[1]); a.k = u32(ins.out[2]);
+      a.f[0] = 1.0f;
+      a.flags = static_cast<uint32_t>(up::EpilogueActOf(ins.flags)) |
+                ((ins.flags & up::kFlagEpilogueBias) ? 8u : 0u);
+      DispatchGemm(kPGemmNNBF16, a);
+      return {};
+    case up::OpCode::kGemmNTBF16:
+      ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]);
+      a.m = u32(ins.out[0]); a.n = u32(ins.out[1]); a.k = u32(ins.out[2]);
+      a.f[0] = 1.0f;
+      DispatchGemm(kPGemmNTBF16, a);
       return {};
     case up::OpCode::kGemmNNQ8:
     case up::OpCode::kGemmNTQ8:

@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "compiler/frontend/parser/graph_build.h"
 #include "compiler/frontend/representation/sir.h"
@@ -31,6 +32,14 @@ inline constexpr size_t kWeightSweepGrain = 65536;
 /// scale (max_abs / 127). The max-abs scan parallelizes per tensor with a
 /// deterministic chunk reduction.
 std::unordered_map<const seeml::sir::Value*, float> SelectQuantizedWeights(
+    seeml::sir::Block& block, const GraphBuild& build);
+
+/// The bf16 review (roadmap 2c): the same eligibility — weights consumed
+/// only as the weight operand of matmul kernels — with no scale to derive
+/// (bf16 is a rounding of the f32 bits, exact on widening). Every eligible
+/// weight is selected: there is no range condition, bf16 keeps f32's
+/// exponent.
+std::unordered_set<const seeml::sir::Value*> SelectBf16Weights(
     seeml::sir::Block& block, const GraphBuild& build);
 
 }  // namespace seeml::update

@@ -10,6 +10,38 @@ namespace seeml::update {
 
 namespace sir = seeml::sir;
 
+namespace {
+
+/// A frozen weight is eligible for a storage precision other than f32 iff
+/// every user reads it as the weight operand of a matmul kernel — those
+/// kernels widen on the way into the tile; any other consumer would need
+/// the f32 bytes.
+bool MatmulWeightOnly(const sir::Value* v) {
+  for (const sir::Operation* user : v->users()) {
+    const std::string_view m = user->mnemonic();
+    if (m != "sc_high.matmul" && m != "sc_low.matmul_nt") return false;
+    // v must be exactly the weight operand, never the activation side.
+    if (user->numOperands() != 2 || user->operand(1) != v ||
+        user->operand(0) == v)
+      return false;
+  }
+  return true;
+}
+
+}  // namespace
+
+std::unordered_set<const sir::Value*> SelectBf16Weights(
+    sir::Block& block, const GraphBuild& build) {
+  std::unordered_set<const sir::Value*> selected;
+  block.walk([&](sir::Operation* op) {
+    if (op->mnemonic() != "sc_mem.weight") return;
+    const sir::Value* v = op->result(0);
+    if (!build.weight_sources.contains(v)) return;
+    if (MatmulWeightOnly(v)) selected.insert(v);
+  });
+  return selected;
+}
+
 std::unordered_map<const sir::Value*, float> SelectQuantizedWeights(
     sir::Block& block, const GraphBuild& build) {
   std::unordered_map<const sir::Value*, float> scales;
@@ -18,15 +50,7 @@ std::unordered_map<const sir::Value*, float> SelectQuantizedWeights(
     const sir::Value* v = op->result(0);
     auto src = build.weight_sources.find(v);
     if (src == build.weight_sources.end()) return;
-
-    for (const sir::Operation* user : v->users()) {
-      const std::string_view m = user->mnemonic();
-      if (m != "sc_high.matmul" && m != "sc_low.matmul_nt") return;
-      // v must be exactly the weight operand, never the activation side.
-      if (user->numOperands() != 2 || user->operand(1) != v ||
-          user->operand(0) == v)
-        return;
-    }
+    if (!MatmulWeightOnly(v)) return;
 
     const auto* data = reinterpret_cast<const float*>(src->second->data.data());
     const size_t count = src->second->byte_size / sizeof(float);

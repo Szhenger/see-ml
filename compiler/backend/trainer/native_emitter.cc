@@ -511,6 +511,7 @@ constexpr const char* kVendoredSources[] = {
     "runtime/diagnostics/executing/error.h",
     "runtime/diagnostics/persisting/error.h",
     "source/plan/update_types.h",         "source/plan/config.h",
+    "source/plan/bf16.h",
     "source/plan/instruction.h",          "source/plan/schema.h",
     "source/identity/hash.h",
     "source/parallel/parallel_for.h",     "source/parallel/parallel_for.cc",

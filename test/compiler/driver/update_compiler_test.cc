@@ -250,7 +250,7 @@ TEST(UpdateCompiler, GradientAccumulationSplitsTheStream) {
   EXPECT_EQ(hp.step_instr_count, 0u);
   EXPECT_EQ(ha.grad_accum_steps, 4u);
   EXPECT_GT(ha.step_instr_count, 0u);
-  EXPECT_EQ(ha.version, kSeeuGradAccumVersion);
+  EXPECT_TRUE(ha.version >= kSeeuGradAccumVersion);
   const size_t trainables = 2 * accum.adapters.size();
 
   const auto grad = TrainProgramOf(accum);
@@ -308,6 +308,46 @@ TEST(UpdateCompiler, GradientAccumulationSplitsAnSgdStream) {
   EXPECT_EQ(CountOpcode(grad, OpCode::kAccumulate), trainables);
   EXPECT_EQ(CountOpcode(grad, OpCode::kSgdStep), 0u);
   EXPECT_EQ(CountOpcode(grad, OpCode::kClipNorm), 0u);
+}
+
+TEST(UpdateCompiler, Bf16BaseHalvesRodataAndLowersTheWideningGemms) {
+  SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 53);
+  UpdateConfig f32 = BaseConfig(kBatch);
+  UpdateConfig bf16 = BaseConfig(kBatch);
+  bf16.bf16_base = true;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate a, UpdateCompiler(f32).Compile(model));
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate b, UpdateCompiler(bf16).Compile(model));
+  EXPECT_EQ(HeaderOf(b).version, kSeeuBf16Version);
+  // Both matmul weights are adapted: a forward NN per weight, and a
+  // backward NT (dX through the frozen weight) for every weight but the
+  // first — nothing trainable sits before layer 1's input, so autodiff
+  // prunes that adjoint.
+  const auto instrs = TrainProgramOf(b);
+  EXPECT_EQ(CountOpcode(instrs, OpCode::kGemmNNBF16), b.adapters.size());
+  EXPECT_EQ(CountOpcode(instrs, OpCode::kGemmNTBF16), b.adapters.size() - 1);
+  // The adapter GEMMs (X@A, t@B and their backward) stay f32: A and B are
+  // trainable arena parameters, not frozen rodata.
+  EXPECT_EQ(CountOpcode(instrs, OpCode::kGemmNN),
+            CountOpcode(TrainProgramOf(a), OpCode::kGemmNN) - b.adapters.size());
+  EXPECT_EQ(CountOpcode(instrs, OpCode::kGemmNNQ8), 0u);
+  for (const auto& ad : b.adapters) {
+    EXPECT_TRUE(ad.bf16);
+    EXPECT_EQ(ad.quant_scale, 0.0f);
+  }
+  for (const auto& ad : a.adapters) EXPECT_FALSE(ad.bf16);
+  // Weights halve; the biases stay f32 (they are AddBias operands, not
+  // matmul weights), so rodata shrinks by exactly the weight bytes / 2.
+  uint64_t weight_bytes = 0;
+  for (const auto& ad : b.adapters)
+    weight_bytes += static_cast<uint64_t>(ad.k * ad.m) * sizeof(float);
+  EXPECT_LT(b.rodata_size, a.rodata_size);
+  EXPECT_GE(a.rodata_size - b.rodata_size, weight_bytes / 2 - 64 * b.adapters.size());
+  // One storage precision per weight.
+  UpdateConfig both = BaseConfig(kBatch);
+  both.bf16_base = true;
+  both.quantize_base = true;
+  EXPECT_ERROR_CONTAINS(UpdateCompiler(both).Compile(model),
+                        "mutually exclusive");
 }
 
 TEST(UpdateCompiler, RejectsTeacherShapeMismatch) {

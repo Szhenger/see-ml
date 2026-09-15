@@ -58,7 +58,15 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // optimizer step. One new opcode, kAccumulate, gated like the v6 family.
 // Additive: a v9 plan with G = 1 has an empty step section and the very
 // same monolithic train program a v8 compiler emitted.
-inline constexpr uint32_t kSeeuVersion = 9;
+// v10: bf16 frozen weights (roadmap 2c). Two opcodes, kGemmNNBF16 and
+// kGemmNTBF16, whose B operand is bfloat16 rodata widened exactly to f32
+// inside the kernel — half the bytes of f32 with f32's exponent range and
+// 8 bits of mantissa (the q8 path stays for 4x). Compute is unchanged f32.
+// Additive: no field changes; the opcodes are gated like the v6 family.
+inline constexpr uint32_t kSeeuVersion = 10;
+
+// The version that introduced the bf16 GEMM opcodes.
+inline constexpr uint32_t kSeeuBf16Version = 10;
 
 // The version that introduced gradient accumulation and kAccumulate.
 inline constexpr uint32_t kSeeuGradAccumVersion = 9;

@@ -45,6 +45,42 @@ TEST(PlanValidator, AcceptsInBoundsOperands) {
                                 kArena, kRodata, up::kSeeuVersion));
 }
 
+TEST(PlanValidator, Bf16GemmsAreVersionGatedAndRodataPinned) {
+  // M=4, N=8, K=16: A 64 floats (arena), B 128 bf16 = 256 bytes (rodata),
+  // C 32 floats (arena), bias 8 floats (rodata) under the fused flag.
+  up::UpdateInstruction g;
+  g.opcode = static_cast<uint16_t>(up::OpCode::kGemmNNBF16);
+  g.in[0] = up::MakeArenaRef(0);
+  g.in[1] = up::MakeRodataRef(0);
+  g.in[2] = up::MakeArenaRef(512);
+  g.out[0] = 4;
+  g.out[1] = 8;
+  g.out[2] = 16;
+  EXPECT_OK(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
+  EXPECT_ERROR(ValidateInstruction(g, kArena, kRodata,
+                                   up::kSeeuBf16Version - 1));
+  // bf16 B is two bytes per element: 128 elements fit in 256 rodata bytes
+  // and would not as f32 — an f32 extent check would over-reject.
+  g.out[1] = 8;
+  g.out[2] = 16;  // 128 elements x 2 B = 256 B == kRodata, exactly in bounds
+  EXPECT_OK(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
+  g.out[2] = 17;  // 136 elements x 2 B > kRodata
+  EXPECT_ERROR(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
+  g.out[2] = 16;
+  g.in[1] = up::MakeArenaRef(768);  // bf16 B must be rodata
+  EXPECT_ERROR(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
+  g.in[1] = up::MakeRodataRef(0);
+  // The fused bias epilogue is allowed on the bf16 NN GEMM, like kGemmNN.
+  g.flags = up::MakeEpilogueFlags(true, up::EpilogueAct::kRelu);
+  g.in[3] = up::MakeArenaRef(768);
+  EXPECT_OK(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
+  // ...and not on the NT variant.
+  g.opcode = static_cast<uint16_t>(up::OpCode::kGemmNTBF16);
+  EXPECT_ERROR(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
+  g.flags = 0;
+  EXPECT_OK(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
+}
+
 TEST(PlanValidator, AccumulateIsVersionGatedAndInPlace) {
   up::UpdateInstruction acc;
   acc.opcode = static_cast<uint16_t>(up::OpCode::kAccumulate);

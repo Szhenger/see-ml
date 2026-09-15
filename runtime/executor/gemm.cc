@@ -264,4 +264,28 @@ void GemmNTQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
                   });
 }
 
+// bf16 B: the same blocked cores over up::Bf16 elements, whose
+// static_cast<float> is the exact widening — bit-identical to GemmNN /
+// GemmNT over the widened f32 matrix.
+void GemmNNBF16(const float* A, const uint16_t* B, float* C, size_t M,
+                size_t N, size_t K, const float* bias, up::EpilogueAct act) {
+  const auto* Bh = reinterpret_cast<const up::Bf16*>(B);
+  up::ParallelFor(M, RowGrain(N * K, kGrainCheap),
+                  [&](size_t m0, size_t m1, size_t) {
+                    std::memset(C + m0 * N, 0, (m1 - m0) * N * sizeof(float));
+                    BlockedNN(A, Bh, C, m0, m1, N, K, 1.0f, K,
+                              /*a_transposed=*/false);
+                    EpilogueRows(C, bias, m0, m1, N, act);
+                  });
+}
+
+void GemmNTBF16(const float* A, const uint16_t* B, float* C, size_t M,
+                size_t N, size_t K) {
+  const auto* Bh = reinterpret_cast<const up::Bf16*>(B);
+  up::ParallelFor(M, RowGrain(N * K, kGrainCheap),
+                  [&](size_t m0, size_t m1, size_t) {
+                    BlockedNT(A, Bh, C, m0, m1, N, K, 1.0f);
+                  });
+}
+
 }  // namespace seeml::update_rt::kernels
