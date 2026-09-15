@@ -1,6 +1,7 @@
 #include "compiler/backend/architecture/host_arch.h"
 
 #include <algorithm>
+#include <cctype>
 #include <string>
 #include <thread>
 
@@ -21,6 +22,24 @@ namespace seeml::update {
 
 namespace {
 
+/// Whitespace-trimmed with internal runs collapsed to one space: the brand
+/// string is a table key, so two probes of one machine must agree byte for
+/// byte, and a padded "Intel(R) Xeon(R)  CPU" must not fork the table.
+std::string CanonicalModel(std::string_view raw) {
+  std::string out;
+  bool pending_space = false;
+  for (const char c : raw) {
+    if (std::isspace(static_cast<unsigned char>(c))) {
+      pending_space = !out.empty();
+      continue;
+    }
+    if (pending_space) out += ' ';
+    pending_space = false;
+    out += c;
+  }
+  return out.empty() ? std::string("unknown") : out;
+}
+
 #if defined(__APPLE__)
 uint64_t SysctlU64(const char* name) {
   uint64_t v = 0;
@@ -28,7 +47,28 @@ uint64_t SysctlU64(const char* name) {
   if (sysctlbyname(name, &v, &len, nullptr, 0) != 0) return 0;
   return v;
 }
+
+std::string SysctlString(const char* name) {
+  char buf[256] = {};
+  size_t len = sizeof(buf) - 1;
+  if (sysctlbyname(name, buf, &len, nullptr, 0) != 0) return "";
+  return std::string(buf, len > 0 && buf[len - 1] == '\0' ? len - 1 : len);
+}
 #else
+/// The first "model name" line of /proc/cpuinfo (x86); arm64 kernels
+/// print no such line, and the key then says "unknown" — cores and caches
+/// still distinguish the host class.
+std::string ProcCpuinfoModel() {
+  std::ifstream f("/proc/cpuinfo");
+  std::string line;
+  while (std::getline(f, line)) {
+    if (line.rfind("model name", 0) != 0) continue;
+    const size_t colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    return line.substr(colon + 1);
+  }
+  return "";
+}
 /// _SC_NPROCESSORS_ONLN counts *logical* processors (hardware threads); the
 /// physical_cores field means physical cores, as the macOS path's
 /// hw.physicalcpu query reports. Count unique (package, core) pairs from the
@@ -106,6 +146,7 @@ HostArchInfo DetectHostArch() {
 #endif
 
 #if defined(__APPLE__)
+  info.cpu_model = CanonicalModel(SysctlString("machdep.cpu.brand_string"));
   info.l1d_bytes = SysctlU64("hw.l1dcachesize");
   info.l2_bytes = SysctlU64("hw.l2cachesize");
   if (uint64_t cores = SysctlU64("hw.physicalcpu"); cores > 0)
@@ -113,6 +154,7 @@ HostArchInfo DetectHostArch() {
   if (uint64_t line = SysctlU64("hw.cachelinesize"); line > 0)
     info.cache_line_bytes = static_cast<size_t>(line);
 #else
+  info.cpu_model = CanonicalModel(ProcCpuinfoModel());
 #if defined(_SC_LEVEL1_DCACHE_SIZE)
   if (long l1 = sysconf(_SC_LEVEL1_DCACHE_SIZE); l1 > 0)
     info.l1d_bytes = static_cast<uint64_t>(l1);
@@ -136,6 +178,20 @@ HostArchInfo DetectHostArch() {
     info.physical_cores = hc > 0 ? hc : 1;
   }
   return info;
+}
+
+std::string HostKey(const HostArchInfo& arch) {
+  std::string key;
+  key.append(arch.isa).append(";");
+  // The model may carry anything the firmware wrote; ';' is this key's
+  // field separator and a newline would break a one-line record.
+  for (const char c : CanonicalModel(arch.cpu_model))
+    key += (c == ';' || c == '\n' || c == '\r') ? '_' : c;
+  key.append(";cores=").append(std::to_string(arch.physical_cores));
+  key.append(";l1d=").append(std::to_string(arch.l1d_bytes));
+  key.append(";l2=").append(std::to_string(arch.l2_bytes));
+  key.append(";simd=").append(std::to_string(arch.simd_width_f32));
+  return key;
 }
 
 GemmTiling SuggestGemmTiling(const HostArchInfo& arch) {

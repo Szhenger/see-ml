@@ -105,6 +105,20 @@ executor is the oracle certification needs); E4 last, per the roadmap's own
 profiling gate. The GPU track (#59–#65) proceeds independently as
 sequenced in `docs/roadmap.md`.
 
+## Status
+
+- **P1 shipped** (2026-09-11, #88): `tool/pack_update.py`, `--no-embed`.
+- **P2 shipped** (2026-09-15, #76): `tool/autotune.py` and the host-keyed
+  kernel-policy table; the compiler's `--kernel-policy` / `--gemm-tiles` /
+  `--target-host`; the CPU GEMM tiles became a plan-header property (v11)
+  the runtime proves and the CPU backend runs, so the bench sweeps arms
+  in-process and measures what ships; the in-tree UCB1 bandit is retired
+  (git keeps it); `seeml-bench` schema 3 records policy, host key and
+  host; `bench_compare.py` refuses cross-policy comparisons. E7 (#90)
+  steps 1 and 2 landed with it — packages no longer bake the analytic
+  tiling, and the bench runs the geometry a package ships with — leaving
+  E7's contract rewrite and E1's re-premising.
+
 ## Materializing the board
 
 ```sh

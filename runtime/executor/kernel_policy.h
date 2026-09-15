@@ -44,6 +44,48 @@ inline size_t RowGrain(size_t per_row, size_t budget) {
 
 inline size_t MinZ(size_t a, size_t b) { return a < b ? a : b; }
 
+// --- GEMM cache tiles --------------------------------------------------------
+// The blocked CPU GEMM cores walk K in tiles of `k` and N in tiles of `n`
+// (gemm.cc). The geometry is a throughput knob only, never a bit: the N
+// tile picks traversal order, not reduction grouping, and the K tile keeps
+// the 4-wide unroll groups aligned as long as it stays a multiple of the
+// unroll width — which the validator proves on the plan header before any
+// kernel runs, and the compiled-in default asserts below. The compiler
+// decides the geometry (a measured, host-keyed kernel-policy table via
+// tool/autotune.py, or the defaults here) and writes it into the plan
+// header (schema.h, v11); zero there selects these defaults, which a
+// package's build.sh may still override with -DSEEML_GEMM_TILE_K/N.
+#ifndef SEEML_GEMM_TILE_K
+#define SEEML_GEMM_TILE_K 64
+#endif
+#ifndef SEEML_GEMM_TILE_N
+#define SEEML_GEMM_TILE_N 256
+#endif
+static_assert(SEEML_GEMM_TILE_K > 0 && SEEML_GEMM_TILE_K % 4 == 0,
+              "the K tile must be a positive multiple of the 4-wide unroll "
+              "so reduction grouping — and therefore every bit of every "
+              "result — is independent of the tiling");
+static_assert(SEEML_GEMM_TILE_N > 0, "the N tile must be positive");
+
+struct GemmTiles {
+  size_t k = SEEML_GEMM_TILE_K;
+  size_t n = SEEML_GEMM_TILE_N;
+  bool operator==(const GemmTiles&) const = default;
+};
+inline constexpr GemmTiles kDefaultGemmTiles{};
+
+/// Whether a tile pair is one the kernels accept (the header contract).
+inline bool GemmTilesValid(const GemmTiles& t) {
+  return t.k > 0 && t.k % 4 == 0 && t.n > 0;
+}
+
+/// Everything a backend may be told about how to run a plan's kernels
+/// beyond the instruction stream itself. Set by the engine from the plan
+/// header after Bind (ExecutorBackend::Configure).
+struct KernelPolicy {
+  GemmTiles gemm_tiles = kDefaultGemmTiles;
+};
+
 // --- Activation expressions --------------------------------------------------
 // One definition each, shared by the standalone activation kernels and the
 // fused GEMM epilogues. Sharing the expression (not just the formula) is

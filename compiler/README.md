@@ -31,7 +31,7 @@ compiler/
   backend/                training program -> .seeu plan + native package
     trainer/              arena binding, instruction lowering, package emit
     architecture/         host cache/ISA detection, GEMM tiling
-    tuner/                UCB1 bandit tiling autotuner
+    tuner/                kernel-policy table reader (the offline tuner's decisions)
   driver/                 orchestrates the process, verifies every boundary
   diagnostics/            errors, partitioned by process
     tokenizing/ parsing/ passing/ updating/ architecting/ generating/
@@ -65,7 +65,7 @@ This is the orientation; the teaching is in
 **[docs/compiler.md](../docs/compiler.md)**, which walks every stage from
 first principles — what an IR is, the linear algebra of LoRA, how autodiff
 works, memory planning as register allocation, cache-aware tiling, and the
-bandit that tunes it. The binary formats it reads and writes are in
+offline tuner whose table decides it. The binary formats it reads and writes are in
 [docs/formats.md](../docs/formats.md); the runtime that executes its output
 is in [docs/runtime.md](../docs/runtime.md). The suites that verify each
 subsystem live under [test/compiler/](../test/README.md), one folder per

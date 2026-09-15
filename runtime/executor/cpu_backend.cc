@@ -49,6 +49,8 @@ class CpuBackend final : public ExecutorBackend {
     return {};
   }
 
+  void Configure(const k::KernelPolicy& policy) override { policy_ = policy; }
+
   std::expected<void, std::string> Execute(const up::UpdateInstruction& ins,
                                            const StepParams& params) override;
 
@@ -76,6 +78,7 @@ class CpuBackend final : public ExecutorBackend {
 
   uint8_t* arena_ = nullptr;
   const uint8_t* rodata_ = nullptr;
+  k::KernelPolicy policy_;  // the plan header's tiles; defaults until told
 };
 
 std::expected<void, std::string> CpuBackend::Execute(
@@ -90,30 +93,31 @@ std::expected<void, std::string> CpuBackend::Execute(
                 ins.out[0], ins.out[1], ins.out[2],
                 ins.flags & up::kFlagEpilogueBias ? ReadPtr(ins.in[3])
                                                   : nullptr,
-                up::EpilogueActOf(ins.flags));
+                up::EpilogueActOf(ins.flags), policy_.gemm_tiles);
       break;
     case up::OpCode::kGemmNT:
       k::GemmNT(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                ins.out[0], ins.out[1], ins.out[2]);
+                ins.out[0], ins.out[1], ins.out[2], policy_.gemm_tiles);
       break;
     case up::OpCode::kGemmTN:
       k::GemmTN(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                ins.out[0], ins.out[1], ins.out[2]);
+                ins.out[0], ins.out[1], ins.out[2], policy_.gemm_tiles);
       break;
     case up::OpCode::kGemmAccNN:
       k::GemmAccNN(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
                    WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2],
-                   BitsToF32(ins.in[3]));
+                   BitsToF32(ins.in[3]), policy_.gemm_tiles);
       break;
     case up::OpCode::kGemmNNQ8:
       k::GemmNNQ8(ReadPtr(ins.in[0]), ReadPtrQ8(ins.in[1]),
                   WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2],
-                  BitsToF32(ins.in[3]), up::EpilogueActOf(ins.flags));
+                  BitsToF32(ins.in[3]), up::EpilogueActOf(ins.flags),
+                  policy_.gemm_tiles);
       break;
     case up::OpCode::kGemmNTQ8:
       k::GemmNTQ8(ReadPtr(ins.in[0]), ReadPtrQ8(ins.in[1]),
                   WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2],
-                  BitsToF32(ins.in[3]));
+                  BitsToF32(ins.in[3]), policy_.gemm_tiles);
       break;
     case up::OpCode::kAddEW:
       k::AddEW(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
@@ -229,11 +233,12 @@ std::expected<void, std::string> CpuBackend::Execute(
                     WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2],
                     ins.flags & up::kFlagEpilogueBias ? ReadPtr(ins.in[3])
                                                       : nullptr,
-                    up::EpilogueActOf(ins.flags));
+                    up::EpilogueActOf(ins.flags), policy_.gemm_tiles);
       break;
     case up::OpCode::kGemmNTBF16:
       k::GemmNTBF16(ReadPtr(ins.in[0]), ReadPtrBF16(ins.in[1]),
-                    WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2]);
+                    WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2],
+                    policy_.gemm_tiles);
       break;
     case up::OpCode::kRmsNormFwd:
       k::RmsNormFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),

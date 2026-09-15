@@ -29,6 +29,11 @@ against a fixed reference. A missing epoch file is a note, not a failure
 
 Everything is medians-of-medians upstream, so a >10% delta is signal, not
 noise.
+
+Schema-3 reports name the kernel policy they ran under (the CPU GEMM
+tiles the compiler wrote into every plan); two reports with different
+policies are never compared — that delta is what tool/autotune.py
+measures, not a regression — and the gate exits 1 telling you to re-seed.
 """
 import argparse
 import json
@@ -49,9 +54,23 @@ def tier_a(report):
     return out
 
 
+def kernel_policy(report):
+    """The kernel policy a run measured under: None for the runtime's
+    compiled-in defaults (every report that predates schema 3, and every
+    schema-3 report whose policy source is "default"), else the explicit
+    (gemm_tile_k, gemm_tile_n). A tuned run (tool/autotune.py's table, or
+    --gemm-tiles) is never gated against a default baseline, and vice
+    versa: the delta would be the tiling, not the commit."""
+    kp = report.get("kernel_policy")
+    if not kp or kp.get("source", "default") == "default":
+        return None
+    return (int(kp["gemm_tile_k"]), int(kp["gemm_tile_n"]))
+
+
 def load(path):
     with open(path) as f:
-        return tier_a(json.load(f))
+        report = json.load(f)
+    return tier_a(report), kernel_policy(report)
 
 
 def compare(label, base, cur, max_regression):
@@ -95,18 +114,33 @@ def main():
                         "fails the gate (0.15)")
     args = p.parse_args()
 
-    cur = load(args.current)
+    cur, cur_policy = load(args.current)
     if not cur:
         print(f"bench_compare: ERROR current report {args.current} carries "
               "no Tier A metrics")
         return 1
+
+    def same_policy(label, policy):
+        if policy == cur_policy:
+            return True
+        # Fail closed: a delta between two tilings is a tuning result, not a
+        # regression signal — re-seed the baseline with the policy in use.
+        def name(p):
+            return "the runtime defaults" if p is None else f"GEMM tiles {p}"
+        print(f"bench_compare: ERROR the {label} was measured with "
+              f"{name(policy)} but the current report with "
+              f"{name(cur_policy)}; the gate compares like with like — "
+              "re-seed the baseline deliberately")
+        return False
 
     status = 0
     if not os.path.exists(args.baseline):
         print(f"bench_compare: no baseline at {args.baseline} — "
               "this run seeds it")
     else:
-        base = load(args.baseline)
+        base, base_policy = load(args.baseline)
+        if not same_policy("baseline", base_policy):
+            return 1
         failures, compared = compare("baseline", base, cur,
                                      args.max_regression)
         if compared == 0:
@@ -127,7 +161,9 @@ def main():
             print(f"bench_compare: no epoch baseline at "
                   f"{args.epoch_baseline} — this run seeds it")
         else:
-            epoch = load(args.epoch_baseline)
+            epoch, epoch_policy = load(args.epoch_baseline)
+            if not same_policy("epoch baseline", epoch_policy):
+                return 1
             failures, compared = compare("epoch", epoch, cur,
                                          args.max_epoch_regression)
             if compared == 0:

@@ -23,7 +23,24 @@ namespace seeml::update_rt {
 
 namespace up = seeml::update;
 
+namespace {
+
+/// The header's kernel policy: the v11 GEMM tiles, zero meaning the
+/// runtime's compiled-in default for that dimension.
+kernels::KernelPolicy KernelPolicyOf(const up::PlanHeader& header) {
+  kernels::KernelPolicy policy;
+  if (header.gemm_tile_k) policy.gemm_tiles.k = header.gemm_tile_k;
+  if (header.gemm_tile_n) policy.gemm_tiles.n = header.gemm_tile_n;
+  return policy;
+}
+
+}  // namespace
+
 UpdateEngine::UpdateEngine() : backend_(CreateCpuBackend()) {}
+
+kernels::GemmTiles UpdateEngine::gemm_tiles() const {
+  return KernelPolicyOf(header_).gemm_tiles;
+}
 
 UpdateEngine::~UpdateEngine() {
   // The backend may hold a zero-copy view of the arena (a GPU buffer
@@ -49,6 +66,7 @@ std::expected<void, std::string> UpdateEngine::SelectBackend(
       return diag::executing::Error(
           "backend '" + std::string(sel->backend->name()) +
           "' cannot bind the loaded plan: " + r.error());
+    sel->backend->Configure(KernelPolicyOf(header_));
   }
   backend_ = std::move(sel->backend);
   backend_kind_ = sel->resolved;
@@ -304,6 +322,10 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
                                   std::string(backend_->name()) +
                                   "' cannot bind the plan: " + r.error());
   }
+
+  // The header's kernel policy (the GEMM tiles, v11) reaches the backend
+  // once the binding is accepted; the contract above proved it valid.
+  backend_->Configure(KernelPolicyOf(header));
 
   // Commit — nothing below can fail.
   std::free(arena_);

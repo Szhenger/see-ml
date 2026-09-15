@@ -27,7 +27,18 @@ struct HostArchInfo {
   uint64_t l2_bytes = 0;             // 0 = undetectable
   size_t physical_cores = 1;
   size_t cache_line_bytes = 64;
+  std::string cpu_model = "unknown";  // the OS's CPU brand string, trimmed
 };
+
+/// The host identity a measured kernel-policy table is keyed on
+/// (tool/autotune.py writes it, the compiler looks it up): ISA, CPU model,
+/// physical cores, L1d and L2 bytes, SIMD width — every quantity that
+/// changes which GEMM tiling runs fastest, and nothing that does not (no
+/// OS version, no hostname). A pure function of the description, so the
+/// bench that measured and the compiler that consumes compute the same
+/// string on the same machine. Format, one line, no newline:
+///   "<isa>;<cpu_model>;cores=<n>;l1d=<bytes>;l2=<bytes>;simd=<lanes>"
+std::string HostKey(const HostArchInfo& arch);
 
 /// ISA and SIMD width come from the compilation target (this compiler runs
 /// on the device it compiles for — the AOT plan is host=target); cache and
@@ -51,6 +62,16 @@ struct GemmTiling {
 /// sizes fall back to 32 KiB L1 / 512 KiB L2. All dimensions are rounded
 /// to the SIMD width and clamped to sane minima, so the result is always
 /// usable geometry.
+///
+/// This is a HYPOTHESIS, not a decision: the model assumes a packed BLIS
+/// microkernel the CPU runtime does not have (its cores are unpacked loop
+/// nests whose fast configuration is a 64 KiB B panel — the kernel
+/// defaults), and measured 1.3–3.3x slower than those defaults when it was
+/// emitted as the package tiling (#90). Nothing emits it any more; it is
+/// one arm of the offline tuner's sweep (tool/autotune.py reads it out of
+/// bench.json as `analytic_gemm_tiles`) and the GPU kernel emitter's
+/// clamp source, so that when a packed microkernel lands (E1, #80) the
+/// arm is already measured against the table.
 GemmTiling SuggestGemmTiling(const HostArchInfo& arch);
 
 /// Checks a tiling against the contract SuggestGemmTiling documents for
@@ -60,8 +81,6 @@ GemmTiling SuggestGemmTiling(const HostArchInfo& arch);
 /// Errors are formed by diagnostics/architecting — a hint that lies about
 /// fitting the cache hierarchy silently costs every training step, so
 /// consumers should gate handwritten or deserialized tilings through this.
-/// The autotuner's exploratory candidates intentionally probe beyond the
-/// cache-fit half of the contract and are not gated.
 [[nodiscard]] std::expected<void, std::string> ValidateGemmTiling(
     const GemmTiling& tiling, const HostArchInfo& arch);
 

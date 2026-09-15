@@ -161,6 +161,10 @@ class UpdateEngine {
   const char* backend_name() const;
   std::string backend_device() const;
   const std::string& backend_note() const { return backend_note_; }
+  /// The CPU GEMM tile geometry the loaded plan's header selects (v11;
+  /// the runtime defaults for zero fields or a pre-v11 plan). A
+  /// throughput knob the compiler decided; no result bit depends on it.
+  kernels::GemmTiles gemm_tiles() const;
 
   /// Loads a plan the caller keeps alive (embedded object-file byte arrays).
   [[nodiscard]] std::expected<void, std::string> LoadFromMemory(

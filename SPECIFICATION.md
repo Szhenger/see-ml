@@ -74,7 +74,8 @@ which uses POSIX `${VAR-default}` expansion for the tile-flag override).
 
 Build host only, in two dependency tiers. `tool/export_model.py` (model
 export) imports `torch`/`numpy` function-locally so it byte-compiles
-without them; `tool/pack_update.py` (the package assembler) and
+without them; `tool/pack_update.py` (the package assembler),
+`tool/autotune.py` (the offline kernel-policy tuner) and
 `tool/bench_compare.py` (the bench gate) are standard-library only and run
 under a bare interpreter. The Python plane is developed and gated on the
 pinned stack in `tool/requirements-pinned.txt` — **CPython 3.14.7, torch
@@ -194,9 +195,14 @@ Layout is subsystems-by-role: `frontend/` → `analysis/` → `backend/` →
   `autodiff` (reverse-mode differentiation over SIR), `optimizer` synthesis
   (SGD/AdamW as instructions), and a `quantization` reviewer (int8 frozen
   base).
-- **Backend.** `architecture/host_arch` detects cache sizes and core counts
-  (§2) and derives GEMM tilings; `tuner/` is a multi-armed-bandit autotuner
-  over candidate tilings; `trainer/` binds every tensor to a compile-time
+- **Backend.** `architecture/host_arch` detects cache sizes, core counts
+  and the CPU model (§2), forms the host key a kernel-policy table is keyed
+  on, and derives the analytic GEMM tiling (a measured arm, not a
+  decision); `tuner/kernel_policy_table` reads the host-keyed table the
+  offline tuner (`tool/autotune.py`) wrote — a strict purpose-built JSON
+  reader — and resolves the CPU GEMM tiles the driver writes into the plan
+  header (v11): `--gemm-tiles`, then the table, then the runtime defaults;
+  `trainer/` binds every tensor to a compile-time
   arena layout (`arena_binder`), lowers SIR to the fixed ~35-opcode
   instruction ISA (`instruction_lowering`), emits MSL kernel source
   (`kernel_emitter`), and emits the self-contained package
@@ -223,7 +229,10 @@ A zero-dependency virtual machine executing the compiled plan. Subsystems:
   `normalization`, `loss`, `optimizer`, `attention`), each parallelized over
   the shared `ParallelFor` substrate with shape-derived chunking; grain
   policy in `kernel_policy.h` (`kGrainCheap=32768`, `kGrainMath=4096`,
-  `RowGrain`). GEMM tile sizes come from the baked `-DSEEML_GEMM_TILE_K/N`.
+  `RowGrain`). The CPU GEMM tile geometry (`GemmTiles`) arrives per plan
+  from the header (v11) through `ExecutorBackend::Configure`; zero fields
+  select the compiled-in defaults (`-DSEEML_GEMM_TILE_K/N`, 64 and 256).
+  Tiles change throughput only, never bits.
 - **feeder/** — `dataset` (SDS validation, seeded per-epoch permutation) and
   `batch_pipeline` (one producer thread staging batch *s+1* during step *s*
   over a mutex + condvar; provably identical batch sequence to serial, no
@@ -390,6 +399,14 @@ no release automation; versioning is a manual edit of
   with `--build` drives the package's `build.sh`, which assembles the stub
   when present. Stdlib only; strict CLI (exit 2); atomic temp-and-rename
   writes; exit 1 on any packaging or build failure.
+- **`tool/autotune.py`** — the offline autotuner (Two-Plane Overhaul P2):
+  sweeps CPU GEMM tile arms through `seeml-bench --gemm-tiles`, round-robin
+  over rounds, scores each arm by the geometric mean of its rows/s relative
+  to the kernel defaults (medians of medians), and persists the winner —
+  or the defaults, when nothing beats them by `--min-gain` — in a JSON
+  table keyed on the bench-reported host key; `show` prints a table.
+  Stdlib only; exit 2 on usage, 1 on a failed bench run or an unreadable
+  table; atomic writes.
 - **`tool/export_model.py`** — PyTorch/NumPy → SMF/SDS exporters
   (`export_smf`, `export_decoder_smf`, `export_token_decoder_smf`,
   `export_sds`, `export_token_sds`) plus `--demo` / `--demo-decoder`

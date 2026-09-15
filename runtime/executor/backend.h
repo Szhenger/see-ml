@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 
+#include "runtime/executor/kernel_policy.h"
 #include "source/plan/instruction.h"
 
 // =============================================================================
@@ -80,6 +81,14 @@ class ExecutorBackend {
   [[nodiscard]] virtual std::expected<void, std::string> Bind(
       uint8_t* arena, uint64_t arena_bytes, const uint8_t* rodata,
       uint64_t rodata_bytes, uint64_t rodata_mapped_bytes) = 0;
+
+  /// Tells the backend how the loaded plan wants its kernels run beyond
+  /// what the instruction stream says — today the CPU GEMM tile geometry
+  /// the compiler wrote into the header (v11). Called after every
+  /// successful Bind, before any Execute. A backend whose kernels do not
+  /// take the policy (the GPU: its own tiles) ignores it; results never
+  /// depend on it on any backend.
+  virtual void Configure(const kernels::KernelPolicy& /*policy*/) {}
 
   /// Executes (or enqueues) one validated instruction. The engine's
   /// validator proved every operand before dispatch; the backend trusts the

@@ -99,8 +99,7 @@ add_library(seeml_update STATIC
     compiler/analysis/calculus/optimizer.cc
     compiler/analysis/reviewer/quantization.cc
     compiler/backend/architecture/host_arch.cc
-    compiler/backend/tuner/bandit.cc
-    compiler/backend/tuner/autotuner.cc
+    compiler/backend/tuner/kernel_policy_table.cc
     compiler/backend/trainer/arena_binder.cc
     compiler/backend/trainer/instruction_lowering.cc
     compiler/backend/trainer/kernel_emitter.cc

@@ -338,6 +338,9 @@ int main(int argc, char** argv) {
               h.lr_schedule == 1 ? "cosine+warmup" : "constant",
               h.warmup_steps, h.min_lr_factor);
   std::printf("  default steps      %" PRIu64 "\n", h.default_steps);
+  if (h.gemm_tile_k || h.gemm_tile_n)
+    std::printf("  gemm tiles         K %u  N %u  (v11; 0 = runtime default)\n",
+                h.gemm_tile_k, h.gemm_tile_n);
   if (h.grad_accum_steps > 1)
     std::printf("  grad accumulation  %u micro-batches per optimizer step "
                 "(effective batch %" PRIu64 ")\n",

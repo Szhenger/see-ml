@@ -34,8 +34,9 @@
 //                 algebra/calculus) plus quantization review (reviewer) —
 //                 gated by VerifyAnalysisContract
 //   backend/      arena binding, instruction lowering, plan assembly, and
-//                 native packaging (trainer, informed by architecture and
-//                 tuner) — gated by VerifyGeneratedPlan
+//                 native packaging (trainer; the kernel policy the tuner's
+//                 table resolved rides in the config) — gated by
+//                 VerifyGeneratedPlan
 //   diagnostics/  every error crossing the driver's boundary must be
 //                 attributable to a registered unit (WellFormedDiagnostic)
 // =============================================================================
@@ -80,6 +81,8 @@ struct CompiledUpdate {
   uint64_t step_instruction_count = 0;  // 0 unless grad_accum_steps > 1
   uint32_t grad_accum_steps = 1;
   uint64_t rodata_size = 0;
+  uint32_t gemm_tile_k = 0;  // the header's CPU GEMM tiles (0 = default)
+  uint32_t gemm_tile_n = 0;
 };
 
 class UpdateCompiler {

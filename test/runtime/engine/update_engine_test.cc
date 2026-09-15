@@ -81,6 +81,55 @@ TEST(UpdateEngineLoad, AcceptsCompiledPlan) {
   EXPECT_EQ(engine.header().batch, static_cast<uint64_t>(kBatch));
 }
 
+TEST(UpdateEngineLoad, HeaderGemmTilesReachTheBackendAndNeverChangeBits) {
+  // The compiler's kernel policy (v11) rides in the header; the engine
+  // hands it to the backend after Bind, and a trained arena is bit for bit
+  // the arena the defaults produce — the property that lets a measured
+  // table (tool/autotune.py) pick any geometry the kernels accept.
+  UpdateConfig tuned = BaseConfig(kBatch);
+  tuned.gemm_tile_k = 8;
+  tuned.gemm_tile_n = 4;  // tiny tiles: every boundary the 10-wide MLP has
+  const std::vector<uint8_t> plan_default = CompilePlan(BaseConfig(kBatch));
+  const std::vector<uint8_t> plan_tuned = CompilePlan(tuned);
+  ASSERT_FALSE(plan_default.empty());
+  ASSERT_FALSE(plan_tuned.empty());
+  EXPECT_EQ(HeaderOf(plan_default).gemm_tile_k, 0u);
+  EXPECT_EQ(HeaderOf(plan_tuned).gemm_tile_k, 8u);
+  EXPECT_EQ(HeaderOf(plan_tuned).gemm_tile_n, 4u);
+  EXPECT_EQ(HeaderOf(plan_tuned).version, kSeeuVersion);
+
+  // Two datasets: a Dataset carries its shuffle position across Train
+  // calls, so sharing one would feed the second engine different batches.
+  auto data_default = MakeClassificationData(64, kInDim, 5);
+  auto data_tuned = MakeClassificationData(64, kInDim, 5);
+  ASSERT_TRUE(data_default.has_value() && data_tuned.has_value());
+  UpdateEngine by_default, by_tuned;
+  EXPECT_OK(by_default.LoadFromMemory(plan_default.data(), plan_default.size()));
+  EXPECT_OK(by_tuned.LoadFromMemory(plan_tuned.data(), plan_tuned.size()));
+  EXPECT_EQ(by_default.gemm_tiles().k, seeml::update_rt::kernels::kDefaultGemmTiles.k);
+  EXPECT_EQ(by_tuned.gemm_tiles().k, 8u);
+  EXPECT_EQ(by_tuned.gemm_tiles().n, 4u);
+  EXPECT_OK(by_default.Train(*data_default, 12, Quiet()));
+  EXPECT_OK(by_tuned.Train(*data_tuned, 12, Quiet()));
+  ASSERT_EQ(by_default.header().arena_size, by_tuned.header().arena_size);
+  EXPECT_EQ(std::memcmp(by_default.arena(), by_tuned.arena(),
+                        by_default.header().arena_size),
+            0);
+
+  // The compiler refuses a K tile off the unroll before any plan exists.
+  UpdateConfig bad = BaseConfig(kBatch);
+  bad.gemm_tile_k = 6;
+  EXPECT_TRUE(CompilePlan(bad).empty());
+  // And the runtime refuses one smuggled into a sealed plan.
+  std::vector<uint8_t> forged = plan_tuned;
+  PlanHeader h = HeaderOf(forged);
+  h.gemm_tile_k = 6;
+  PutHeader(forged, h);
+  UpdateEngine engine;
+  EXPECT_ERROR_CONTAINS(engine.LoadFromMemory(forged.data(), forged.size()),
+                        "4-wide unroll");
+}
+
 TEST(UpdateEngineLoad, RejectsTruncatedHeader) {
   const std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
   ASSERT_FALSE(plan.empty());

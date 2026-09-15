@@ -82,6 +82,14 @@ struct UpdateConfig {
   // exposed so a fused and an unfused compilation of the same model can be
   // compared bit-for-bit.
   bool fuse_epilogues = true;
+  // The CPU blocked-GEMM cache tiles written into the plan header (v11).
+  // 0 = the runtime's compiled-in default for that dimension. A throughput
+  // knob only — no result bit depends on it — decided on the build host
+  // from a measured, host-keyed kernel-policy table (tool/autotune.py) or
+  // an explicit --gemm-tiles; the K tile must be a multiple of 4 (the
+  // kernel's unroll width), which the driver checks before assembly.
+  uint32_t gemm_tile_k = 0;
+  uint32_t gemm_tile_n = 0;
   // Test hook: when false, the plan contains forward+backward only (no
   // parameter mutation), enabling finite-difference gradient verification.
   bool emit_optimizer = true;
