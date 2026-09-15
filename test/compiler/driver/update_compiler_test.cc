@@ -317,7 +317,10 @@ TEST(UpdateCompiler, Bf16BaseHalvesRodataAndLowersTheWideningGemms) {
   bf16.bf16_base = true;
   ASSERT_OK_AND_ASSIGN(CompiledUpdate a, UpdateCompiler(f32).Compile(model));
   ASSERT_OK_AND_ASSIGN(CompiledUpdate b, UpdateCompiler(bf16).Compile(model));
-  EXPECT_EQ(HeaderOf(b).version, kSeeuBf16Version);
+  // Declared at the current version, which is at least the one that
+  // introduced the widening opcodes (the validator gates them on it).
+  EXPECT_EQ(HeaderOf(b).version, kSeeuVersion);
+  EXPECT_GE(kSeeuVersion, kSeeuBf16Version);
   // Both matmul weights are adapted: a forward NN per weight, and a
   // backward NT (dX through the frozen weight) for every weight but the
   // first — nothing trainable sits before layer 1's input, so autodiff

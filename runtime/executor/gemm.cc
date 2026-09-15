@@ -18,32 +18,10 @@ namespace up = seeml::update;
 
 namespace {
 
-// Cache-blocking tile sizes. The K/N tiles keep the working set (one A panel
-// + one B panel + one C panel) inside L1/L2 for typical embedded cache
-// geometries; the row-major inner loops vectorize under -O2 without
-// intrinsics, keeping the reference kernels portable.
-//
-// The defaults suit a generic embedded target; a package emitted by
-// seeml-update-compile overrides them on the build line with the geometry
-// the compiler's architecture analysis derived for the machine at hand
-// (see the generated build.sh). Tile choice affects throughput only, never
-// bits: the N tile picks traversal order, not reduction grouping, and the
-// K tile keeps the 4-wide unroll groups aligned as long as it stays a
-// multiple of the unroll width — enforced below, so a mistuned override
-// is a build error rather than a silent reproducibility break.
-#ifndef SEEML_GEMM_TILE_K
-#define SEEML_GEMM_TILE_K 64
-#endif
-#ifndef SEEML_GEMM_TILE_N
-#define SEEML_GEMM_TILE_N 256
-#endif
-constexpr size_t kTileK = SEEML_GEMM_TILE_K;
-constexpr size_t kTileN = SEEML_GEMM_TILE_N;
-static_assert(kTileK > 0 && kTileK % 4 == 0,
-              "the K tile must be a positive multiple of the 4-wide unroll "
-              "so reduction grouping — and therefore every bit of every "
-              "result — is independent of the tiling");
-static_assert(kTileN > 0, "the N tile must be positive");
+// Tile geometry (kernel_policy.h): the K tile bounds the k0 panel a pass
+// over C folds in, the N tile the column sweep; both arrive per call from
+// the plan header through the CPU backend (the compiled-in defaults when
+// the header says zero). Throughput only, never bits — see GemmTiles.
 
 // Shared blocked core over the C-row range [m_begin, m_end):
 // C[m,N] (+)= alpha * A[m,K] @ B[K,N] with B row-major. GemmNN/GemmAccNN/
@@ -56,14 +34,15 @@ static_assert(kTileN > 0, "the N tile must be positive");
 template <typename BType>
 void BlockedNN(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
                float* SEEML_RESTRICT C, size_t m_begin, size_t m_end, size_t N,
-               size_t K, float alpha, size_t a_stride, bool a_transposed) {
+               size_t K, float alpha, size_t a_stride, bool a_transposed,
+               const GemmTiles& tiles) {
   auto a_at = [&](size_t k, size_t m) {
     return a_transposed ? A[k * a_stride + m] : A[m * a_stride + k];
   };
-  for (size_t k0 = 0; k0 < K; k0 += kTileK) {
-    const size_t k1 = MinZ(k0 + kTileK, K);
-    for (size_t n0 = 0; n0 < N; n0 += kTileN) {
-      const size_t n1 = MinZ(n0 + kTileN, N);
+  for (size_t k0 = 0; k0 < K; k0 += tiles.k) {
+    const size_t k1 = MinZ(k0 + tiles.k, K);
+    for (size_t n0 = 0; n0 < N; n0 += tiles.n) {
+      const size_t n1 = MinZ(n0 + tiles.n, N);
       for (size_t m = m_begin; m < m_end; ++m) {
         float* SEEML_RESTRICT c_row = C + m * N;
         size_t k = k0;
@@ -127,9 +106,9 @@ inline constexpr size_t kNtLanes = 8;
 template <typename BType>
 void BlockedNT(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
                float* SEEML_RESTRICT C, size_t m_begin, size_t m_end, size_t N,
-               size_t K, float alpha) {
-  for (size_t n0 = 0; n0 < N; n0 += kTileN) {
-    const size_t n1 = MinZ(n0 + kTileN, N);
+               size_t K, float alpha, size_t tile_n) {
+  for (size_t n0 = 0; n0 < N; n0 += tile_n) {
+    const size_t n1 = MinZ(n0 + tile_n, N);
     for (size_t m = m_begin; m < m_end; ++m) {
       const float* SEEML_RESTRICT a_row = A + m * K;
       size_t n = n0;
@@ -249,59 +228,61 @@ void EpilogueRows(float* SEEML_RESTRICT C, const float* SEEML_RESTRICT bias,
 }  // namespace
 
 void GemmNN(const float* A, const float* B, float* C, size_t M, size_t N,
-            size_t K, const float* bias, up::EpilogueAct act) {
+            size_t K, const float* bias, up::EpilogueAct act,
+            const GemmTiles& tiles) {
   up::ParallelFor(M, RowGrain(N * K, kGrainCheap),
                   [&](size_t m0, size_t m1, size_t) {
                     std::memset(C + m0 * N, 0, (m1 - m0) * N * sizeof(float));
                     BlockedNN(A, B, C, m0, m1, N, K, 1.0f, K,
-                              /*a_transposed=*/false);
+                              /*a_transposed=*/false, tiles);
                     EpilogueRows(C, bias, m0, m1, N, act);
                   });
 }
 
 void GemmNT(const float* A, const float* B, float* C, size_t M, size_t N,
-            size_t K) {
+            size_t K, const GemmTiles& tiles) {
   up::ParallelFor(M, RowGrain(N * K, kGrainCheap),
                   [&](size_t m0, size_t m1, size_t) {
-                    BlockedNT(A, B, C, m0, m1, N, K, 1.0f);
+                    BlockedNT(A, B, C, m0, m1, N, K, 1.0f, tiles.n);
                   });
 }
 
 void GemmTN(const float* A, const float* B, float* C, size_t M, size_t N,
-            size_t K) {
+            size_t K, const GemmTiles& tiles) {
   up::ParallelFor(M, RowGrain(N * K, kGrainCheap),
                   [&](size_t m0, size_t m1, size_t) {
                     std::memset(C + m0 * N, 0, (m1 - m0) * N * sizeof(float));
                     BlockedNN(A, B, C, m0, m1, N, K, 1.0f, M,
-                              /*a_transposed=*/true);
+                              /*a_transposed=*/true, tiles);
                   });
 }
 
 void GemmAccNN(const float* A, const float* B, float* C, size_t M, size_t N,
-               size_t K, float alpha) {
+               size_t K, float alpha, const GemmTiles& tiles) {
   up::ParallelFor(M, RowGrain(N * K, kGrainCheap),
                   [&](size_t m0, size_t m1, size_t) {
                     BlockedNN(A, B, C, m0, m1, N, K, alpha, K,
-                              /*a_transposed=*/false);
+                              /*a_transposed=*/false, tiles);
                   });
 }
 
 void GemmNNQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
-              size_t K, float scale, up::EpilogueAct act) {
+              size_t K, float scale, up::EpilogueAct act,
+              const GemmTiles& tiles) {
   up::ParallelFor(M, RowGrain(N * K, kGrainCheap),
                   [&](size_t m0, size_t m1, size_t) {
                     std::memset(C + m0 * N, 0, (m1 - m0) * N * sizeof(float));
                     BlockedNN(A, B, C, m0, m1, N, K, scale, K,
-                              /*a_transposed=*/false);
+                              /*a_transposed=*/false, tiles);
                     EpilogueRows(C, /*bias=*/nullptr, m0, m1, N, act);
                   });
 }
 
 void GemmNTQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
-              size_t K, float scale) {
+              size_t K, float scale, const GemmTiles& tiles) {
   up::ParallelFor(M, RowGrain(N * K, kGrainCheap),
                   [&](size_t m0, size_t m1, size_t) {
-                    BlockedNT(A, B, C, m0, m1, N, K, scale);
+                    BlockedNT(A, B, C, m0, m1, N, K, scale, tiles.n);
                   });
 }
 
@@ -309,23 +290,24 @@ void GemmNTQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
 // static_cast<float> is the exact widening — bit-identical to GemmNN /
 // GemmNT over the widened f32 matrix.
 void GemmNNBF16(const float* A, const uint16_t* B, float* C, size_t M,
-                size_t N, size_t K, const float* bias, up::EpilogueAct act) {
+                size_t N, size_t K, const float* bias, up::EpilogueAct act,
+                const GemmTiles& tiles) {
   const auto* Bh = reinterpret_cast<const up::Bf16*>(B);
   up::ParallelFor(M, RowGrain(N * K, kGrainCheap),
                   [&](size_t m0, size_t m1, size_t) {
                     std::memset(C + m0 * N, 0, (m1 - m0) * N * sizeof(float));
                     BlockedNN(A, Bh, C, m0, m1, N, K, 1.0f, K,
-                              /*a_transposed=*/false);
+                              /*a_transposed=*/false, tiles);
                     EpilogueRows(C, bias, m0, m1, N, act);
                   });
 }
 
 void GemmNTBF16(const float* A, const uint16_t* B, float* C, size_t M,
-                size_t N, size_t K) {
+                size_t N, size_t K, const GemmTiles& tiles) {
   const auto* Bh = reinterpret_cast<const up::Bf16*>(B);
   up::ParallelFor(M, RowGrain(N * K, kGrainCheap),
                   [&](size_t m0, size_t m1, size_t) {
-                    BlockedNT(A, Bh, C, m0, m1, N, K, 1.0f);
+                    BlockedNT(A, Bh, C, m0, m1, N, K, 1.0f, tiles.n);
                   });
 }
 

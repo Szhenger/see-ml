@@ -24,6 +24,14 @@
 //       [--grad-accum 1]               micro-batches accumulated per optimizer step
 //                                      (activations scale with --data-batch, the
 //                                      effective batch is data-batch x grad-accum)
+//       [--kernel-policy table.json]   the host-keyed kernel-policy table
+//                                      tool/autotune.py measured; the entry
+//                                      for this host (or --target-host KEY)
+//                                      sets the plan's CPU GEMM tiles
+//       [--target-host KEY]            look the table up by this host key
+//                                      instead of the compile host's
+//       [--gemm-tiles K,N]             set the CPU GEMM tiles explicitly
+//                                      (throughput only, never bits)
 //       [--report report.json]         machine-readable compile report
 //       [--no-embed]                   skip the decimal byte-array TU; embed
 //                                      the plan with tool/pack_update.py
@@ -53,6 +61,7 @@
 #include <vector>
 
 #include "compiler/backend/trainer/native_emitter.h"
+#include "compiler/backend/tuner/kernel_policy_table.h"
 #include "compiler/driver/update_compiler.h"
 #include "compiler/frontend/ingressor/model_reader.h"
 #include "source/identity/version.h"
@@ -79,6 +88,8 @@ void PrintUsage() {
                "  [--steps N]\n"
                "  [--grad-accum G]\n"
                "  [--no-fuse-epilogue] [--report out.json]\n"
+               "  [--kernel-policy table.json] [--target-host KEY]\n"
+               "  [--gemm-tiles K,N]\n"
                "  [--no-embed] [--build] [--version]\n");
 }
 
@@ -325,6 +336,16 @@ int main(int argc, char** argv) {
                 "(one storage precision per weight)");
   config.fuse_epilogues = !args.Take("--no-fuse-epilogue");
 
+  // --- Kernel policy: explicit tiles, the tuner's table, or the defaults.
+  KernelPolicyRequest policy_request;
+  if (auto v = args.TakeValue("--gemm-tiles")) {
+    auto tiles = ParseGemmTilesFlag(*v);
+    if (!tiles) return Fail(tiles.error());
+    policy_request.explicit_tiles = *tiles;
+  }
+  policy_request.table_path = args.TakeValue("--kernel-policy");
+  policy_request.target_host = args.TakeValue("--target-host");
+
   const auto teacher_path = args.TakeValue("--teacher");
   const auto report_path = args.TakeValue("--report");
   const bool no_embed = args.Take("--no-embed");
@@ -340,6 +361,25 @@ int main(int argc, char** argv) {
   if (no_embed && want_build)
     return Fail("--build needs the embedded plan TU that --no-embed skips; "
                 "run `python3 tool/pack_update.py <out> --build` instead");
+
+  // Resolved after the argument check so a malformed table is reported
+  // against a well-formed command line. A table without this host is a
+  // note (the defaults apply); a table that does not parse is an error.
+  auto policy = ResolveKernelPolicy(policy_request);
+  if (!policy) return Fail(policy.error());
+  config.gemm_tile_k = policy->tiles.gemm_tile_k;
+  config.gemm_tile_n = policy->tiles.gemm_tile_n;
+  if (policy->source == "default")
+    std::fprintf(stderr,
+                 "seeml-update-compile: kernel policy default (the runtime's "
+                 "GEMM tiles; host \"%s\")\n",
+                 policy->host_key.c_str());
+  else
+    std::fprintf(stderr,
+                 "seeml-update-compile: kernel policy from %s: GEMM tiles K %u "
+                 "N %u (host \"%s\")\n",
+                 policy->source.c_str(), policy->tiles.gemm_tile_k,
+                 policy->tiles.gemm_tile_n, policy->host_key.c_str());
 
   // --- Ingest ---------------------------------------------------------------
   // Student and teacher load concurrently: one file's read overlaps the
@@ -417,6 +457,8 @@ int main(int argc, char** argv) {
                  "  \"quantized_base\": %s,\n"
                  "  \"bf16_base\": %s,\n"
                  "  \"embedded_tu\": %s,\n"
+                 "  \"kernel_policy\": {\"source\": \"%s\", \"host_key\": "
+                 "\"%s\", \"gemm_tile_k\": %u, \"gemm_tile_n\": %u},\n"
                  "  \"adapters\": [",
                  JsonEscape(paths->plan_file).c_str(), compiled->arena_size,
                  compiled->persistent_size, compiled->rodata_size,
@@ -427,7 +469,9 @@ int main(int argc, char** argv) {
                  static_cast<uint64_t>(config.batch) * compiled->grad_accum_steps,
                  config.quantize_base ? "true" : "false",
                  config.bf16_base ? "true" : "false",
-                 embedded_tu_json.c_str());
+                 embedded_tu_json.c_str(), policy->source.c_str(),
+                 JsonEscape(policy->host_key).c_str(),
+                 compiled->gemm_tile_k, compiled->gemm_tile_n);
     for (size_t i = 0; i < compiled->adapters.size(); ++i) {
       const auto& a = compiled->adapters[i];
       std::fprintf(f,

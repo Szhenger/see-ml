@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "runtime/executor/kernel_policy.h"  // GemmTiles: the cache-tile geometry
 #include "source/plan/bf16.h"         // Bf16: the widening B element type
 #include "source/plan/instruction.h"  // EpilogueAct: the fused-epilogue ABI
 
@@ -33,16 +34,24 @@ namespace seeml::update_rt::kernels {
 // the write-back, per-element identical to the standalone kAddBias and
 // k<Act>Fwd kernels — one pass over hot C instead of three arena
 // round-trips. bias == nullptr skips the bias; act == kNone the activation.
+// Every GEMM takes its cache-tile geometry last (GemmTiles, kernel_policy.h;
+// the compiled-in defaults when omitted): the CPU backend passes the plan
+// header's tiles, tests and tools pass what they measure. Bits never depend
+// on it.
 void GemmNN(const float* A, const float* B, float* C, size_t M, size_t N,
             size_t K, const float* bias = nullptr,
             seeml::update::EpilogueAct act =
-                seeml::update::EpilogueAct::kNone);  // C = A[M,K] @ B[K,N]
+                seeml::update::EpilogueAct::kNone,
+            const GemmTiles& tiles = kDefaultGemmTiles);  // C = A[M,K] @ B[K,N]
 void GemmNT(const float* A, const float* B, float* C, size_t M, size_t N,
-            size_t K);                       // C = A[M,K] @ B[N,K]^T
+            size_t K, const GemmTiles& tiles = kDefaultGemmTiles);
+                                            // C = A[M,K] @ B[N,K]^T
 void GemmTN(const float* A, const float* B, float* C, size_t M, size_t N,
-            size_t K);                       // C = A[K,M]^T @ B[K,N]
+            size_t K, const GemmTiles& tiles = kDefaultGemmTiles);
+                                            // C = A[K,M]^T @ B[K,N]
 void GemmAccNN(const float* A, const float* B, float* C, size_t M, size_t N,
-               size_t K, float alpha);       // C += alpha * A @ B
+               size_t K, float alpha,
+               const GemmTiles& tiles = kDefaultGemmTiles);  // C += alpha * A @ B
 
 // --- Quantized GEMM: B is per-tensor symmetric int8, dequantized on the fly.
 // GemmNNQ8 takes an activation epilogue only: the instruction's in[3] slot
@@ -51,10 +60,13 @@ void GemmAccNN(const float* A, const float* B, float* C, size_t M, size_t N,
 void GemmNNQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
               size_t K, float scale,
               seeml::update::EpilogueAct act =
-                  seeml::update::EpilogueAct::kNone);
+                  seeml::update::EpilogueAct::kNone,
+              const GemmTiles& tiles = kDefaultGemmTiles);
                                             // C = A[M,K] @ (scale*B)[K,N]
 void GemmNTQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
-              size_t K, float scale);       // C = A[M,K] @ (scale*B)[N,K]^T
+              size_t K, float scale,
+              const GemmTiles& tiles = kDefaultGemmTiles);
+                                            // C = A[M,K] @ (scale*B)[N,K]^T
 
 // --- bf16 GEMM (plan v10): B is bfloat16 rodata, widened exactly to f32 on
 // the way into the tile; compute is f32. GemmNNBF16 takes the full fused
@@ -62,10 +74,13 @@ void GemmNTQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
 void GemmNNBF16(const float* A, const uint16_t* B, float* C, size_t M,
                 size_t N, size_t K, const float* bias = nullptr,
                 seeml::update::EpilogueAct act =
-                    seeml::update::EpilogueAct::kNone);
+                    seeml::update::EpilogueAct::kNone,
+                const GemmTiles& tiles = kDefaultGemmTiles);
                                             // C = A[M,K] @ widen(B)[K,N]
 void GemmNTBF16(const float* A, const uint16_t* B, float* C, size_t M,
-                size_t N, size_t K);        // C = A[M,K] @ widen(B)[N,K]^T
+                size_t N, size_t K,
+                const GemmTiles& tiles = kDefaultGemmTiles);
+                                            // C = A[M,K] @ widen(B)[N,K]^T
 
 // --- Elementwise / broadcast -------------------------------------------------
 void AddEW(const float* x, const float* y, float* out, size_t n);

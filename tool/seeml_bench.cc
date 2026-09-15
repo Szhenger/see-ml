@@ -3,7 +3,18 @@
 //
 //   seeml-bench --out bench.json [--threads 1,8] [--steps-lo 20]
 //               [--steps-hi 80] [--repeats 3] [--fixtures name,name,...]
-//               [--peak-gflops F] [--version]
+//               [--peak-gflops F] [--backend cpu|metal|auto]
+//               [--gemm-tiles K,N | --kernel-policy table.json
+//                [--target-host KEY]] [--version]
+//
+// The kernel policy (the CPU GEMM tiles the compiler writes into every
+// plan, v11) is resolved once, exactly as seeml-update-compile resolves
+// it, and applied to every fixture: the harness measures the geometry a
+// package would ship with. --gemm-tiles is the offline tuner's arm switch
+// (tool/autotune.py sweeps it); the report records the resolved policy,
+// the host key the table is keyed on, the host description, and the
+// analytic tiling (SuggestGemmTiling) so the tuner can measure it as an
+// arm.
 //
 // Compiles the standard fixture set in-process (the seeded builders the
 // test suites share), trains each plan at every requested thread width, and
@@ -54,6 +65,8 @@
 #include <sys/resource.h>
 #include <sys/utsname.h>
 
+#include "compiler/backend/architecture/host_arch.h"
+#include "compiler/backend/tuner/kernel_policy_table.h"
 #include "compiler/diagnostics/logger.h"
 #include "compiler/driver/update_compiler.h"
 #include "runtime/engine/update_engine.h"
@@ -90,6 +103,24 @@ std::string HostString() {
   utsname u{};
   if (uname(&u) != 0) return "unknown";
   return std::string(u.sysname) + " " + u.machine;
+}
+
+/// Minimal JSON string escaping for the host strings the report carries.
+std::string JsonEscape(const std::string& s) {
+  std::string out;
+  for (const char c : s) {
+    if (c == '"' || c == '\\') {
+      out += '\\';
+      out += c;
+    } else if (static_cast<unsigned char>(c) < 0x20) {
+      char buf[8];
+      std::snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned>(c));
+      out += buf;
+    } else {
+      out += c;
+    }
+  }
+  return out;
 }
 
 double Median(std::vector<double> v) {
@@ -279,8 +310,12 @@ int main(int argc, char** argv) {
   auto fixtures_csv = args.TakeValue("--fixtures", "");
   auto peak_s = args.TakeValue("--peak-gflops", "");
   auto backend_s = args.TakeValue("--backend", "cpu");
+  auto tiles_s = args.TakeValue("--gemm-tiles", "");
+  auto policy_s = args.TakeValue("--kernel-policy", "");
+  auto target_host_s = args.TakeValue("--target-host", "");
   for (auto* v : {&out_path, &threads_csv, &lo_s, &hi_s, &repeats_s,
-                  &fixtures_csv, &peak_s})
+                  &fixtures_csv, &peak_s, &tiles_s, &policy_s,
+                  &target_host_s})
     if (!*v) return Fail(v->error());
   if (!args.rest.empty()) return Fail("unknown argument '" + args.rest[0] +
                                       "'");
@@ -289,7 +324,8 @@ int main(int argc, char** argv) {
                 "[--threads 1,8] [--steps-lo 20] [--steps-hi 80] "
                 "[--backend cpu|metal|auto] "
                 "[--repeats 3] [--fixtures name,...] [--peak-gflops F] "
-                "[--version]");
+                "[--gemm-tiles K,N | --kernel-policy table.json "
+                "[--target-host KEY]] [--version]");
 
   auto lo = ParseU64("--steps-lo", *lo_s);
   auto hi = ParseU64("--steps-hi", *hi_s);
@@ -322,6 +358,28 @@ int main(int argc, char** argv) {
     if (!probe.backend_note().empty())
       std::fprintf(stderr, "seeml-bench: %s\n", probe.backend_note().c_str());
   }
+  // The kernel policy, resolved the way the compiler resolves it, so the
+  // harness measures what a package ships; every fixture compiles with it.
+  up::KernelPolicyRequest policy_request;
+  if (!tiles_s->empty()) {
+    auto tiles = up::ParseGemmTilesFlag(*tiles_s);
+    if (!tiles) return Fail(tiles.error());
+    policy_request.explicit_tiles = *tiles;
+  }
+  if (!policy_s->empty()) policy_request.table_path = *policy_s;
+  if (!target_host_s->empty()) policy_request.target_host = *target_host_s;
+  auto policy = up::ResolveKernelPolicy(policy_request);
+  if (!policy) return Fail(policy.error());
+  if (!policy->note.empty())
+    std::fprintf(stderr, "seeml-bench: %s\n", policy->note.c_str());
+  // The tiles that actually run: a zero header field is the runtime's
+  // compiled-in default, which this binary knows.
+  rt::kernels::GemmTiles effective_tiles;
+  if (policy->tiles.gemm_tile_k) effective_tiles.k = policy->tiles.gemm_tile_k;
+  if (policy->tiles.gemm_tile_n) effective_tiles.n = policy->tiles.gemm_tile_n;
+  const up::HostArchInfo host_arch = up::DetectHostArch();
+  const up::GemmTiling analytic = up::SuggestGemmTiling(host_arch);
+
   auto thread_names = SplitCsv("--threads", *threads_csv);
   if (!thread_names) return Fail(thread_names.error());
   std::vector<uint64_t> threads;
@@ -368,15 +426,31 @@ int main(int argc, char** argv) {
   staging.file = out;
   // Schema 2 adds the external-standard fields (see the header comment);
   // every schema-1 key is unchanged, so stored baselines remain comparable.
+  // Schema 3 adds the kernel policy and the host identity it is keyed on;
+  // every schema-2 key is unchanged, so stored baselines stay comparable
+  // (bench_compare.py refuses to compare runs whose policies differ).
   std::fprintf(out,
-               "{\n  \"seeml_version\": \"%s\",\n  \"schema\": 2,\n"
+               "{\n  \"seeml_version\": \"%s\",\n  \"schema\": 3,\n"
                "  \"host\": \"%s\",\n  \"backend\": \"%s\",\n"
+               "  \"host_key\": \"%s\",\n"
+               "  \"host_arch\": {\"isa\": \"%s\", \"cpu_model\": \"%s\", "
+               "\"physical_cores\": %zu, \"l1d_bytes\": %" PRIu64
+               ", \"l2_bytes\": %" PRIu64 ", \"simd_width_f32\": %zu},\n"
+               "  \"kernel_policy\": {\"source\": \"%s\", \"gemm_tile_k\": %zu, "
+               "\"gemm_tile_n\": %zu},\n"
+               "  \"analytic_gemm_tiles\": {\"k\": %zu, \"n\": %zu},\n"
                "  \"config\": {\"steps_lo\": %" PRIu64 ", \"steps_hi\": %"
                PRIu64 ", \"repeats\": %" PRIu64 ", \"threads\": \"%s\", "
                "\"peak_gflops\": %.1f},\n"
                "  \"fixtures\": {",
                seeml::update::kSeemlVersion, HostString().c_str(),
-               backend_resolved.c_str(), *lo, *hi,
+               backend_resolved.c_str(), JsonEscape(policy->host_key).c_str(),
+               std::string(host_arch.isa).c_str(),
+               JsonEscape(host_arch.cpu_model).c_str(),
+               host_arch.physical_cores, host_arch.l1d_bytes,
+               host_arch.l2_bytes, host_arch.simd_width_f32,
+               policy->source.c_str(), effective_tiles.k, effective_tiles.n,
+               analytic.kc, analytic.nc, *lo, *hi,
                *repeats, threads_csv->c_str(), peak_gflops);
 
   bool first_fixture = true;
@@ -387,6 +461,8 @@ int main(int argc, char** argv) {
     config.lora.rank = 8;
     config.lora.alpha = 16.0f;
     config.quantize_base = f->quantize_base;
+    config.gemm_tile_k = policy->tiles.gemm_tile_k;
+    config.gemm_tile_n = policy->tiles.gemm_tile_n;
 
     const auto t_compile = Clock::now();
     auto compiled = up::UpdateCompiler(config).Compile(model);

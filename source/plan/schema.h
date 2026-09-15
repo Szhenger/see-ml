@@ -63,7 +63,23 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // inside the kernel — half the bytes of f32 with f32's exponent range and
 // 8 bits of mantissa (the q8 path stays for 4x). Compute is unchanged f32.
 // Additive: no field changes; the opcodes are gated like the v6 family.
-inline constexpr uint32_t kSeeuVersion = 10;
+// v11: the CPU GEMM tile geometry is a plan property. Two u32 fields carved
+// from the header's two pad words: gemm_tile_k (pad2) and gemm_tile_n
+// (pad3). The compiler decides them — from a measured, host-keyed
+// kernel-policy table (tool/autotune.py) or the kernel defaults — and the
+// CPU backend runs its blocked GEMM cores with them; zero selects the
+// runtime's compiled-in default (the pre-v11 behavior, so the floor
+// stays). Bits never depend on the geometry (kernel_policy.h); the
+// validator proves the K tile a multiple of the 4-wide unroll, the only
+// contract the kernels have. A pre-v11 runtime would ignore the fields and
+// run its defaults — a throughput difference, never a misread — but the
+// version gate rejects v11 plans there regardless, as always for a newer
+// format.
+inline constexpr uint32_t kSeeuVersion = 11;
+
+// The version that made the GEMM tile fields meaningful: below it they are
+// pad words and must be zero.
+inline constexpr uint32_t kSeeuGemmTilesVersion = 11;
 
 // The version that introduced the bf16 GEMM opcodes.
 inline constexpr uint32_t kSeeuBf16Version = 10;
@@ -161,7 +177,8 @@ struct PlanHeader {
   float beta2 = 0.999f;
   float eps = 1e-8f;
   float weight_decay = 0.01f;
-  uint32_t pad2 = 0;
+  // --- v11: the K tile of the CPU blocked GEMM (0 = the runtime default).
+  uint32_t gemm_tile_k = 0;
 
   uint64_t batch = 0;
   uint64_t default_steps = 0;
@@ -182,7 +199,8 @@ struct PlanHeader {
 
   // --- v2: LR schedule (applied by the runtime on top of `lr`).
   uint32_t lr_schedule = 0;  // LrSchedule
-  uint32_t pad3 = 0;
+  // --- v11: the N tile of the CPU blocked GEMM (0 = the runtime default).
+  uint32_t gemm_tile_n = 0;
   uint64_t warmup_steps = 0;
   float min_lr_factor = 0.0f;
   // Per-tensor gradient clip threshold baked into the instruction stream;
@@ -218,9 +236,12 @@ struct EmitEntry {
 #pragma pack(pop)
 
 // The header layout is the compiler↔runtime ABI. Additive version bumps
-// carve new fields out of `reserved` and MUST NOT change this size — a v7
-// carve of reserved[4] into input_kind/grad_accum_steps/seq_len/step_instr_offset+count is
-// byte-exact only if this holds. Compiler-enforce it rather than argue it.
+// carve new fields out of `reserved` or pad words and MUST NOT change this
+// size — v7/v9 carved reserved[4] into input_kind / grad_accum_steps /
+// seq_len / step_instr_offset+count and v11 carved the two pad words into
+// the GEMM tiles; each is byte-exact only if this holds. As of v11 no spare
+// word remains: the next additive field needs a v12 with a larger header
+// and a raised readable floor. Compiler-enforce it rather than argue it.
 static_assert(sizeof(PlanHeader) == 280, "PlanHeader layout is part of the ABI.");
 static_assert(sizeof(EmitEntry) == 24, "EmitEntry layout is part of the ABI.");
 

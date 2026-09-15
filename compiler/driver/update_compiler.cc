@@ -48,6 +48,17 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
     return generating::Error(generating::kDriver,
                              "the selected loss requires a teacher model");
 
+  // The kernel policy is written into the header verbatim; the only
+  // contract the kernels have is the K tile's 4-wide unroll alignment
+  // (kernel_policy.h), and a plan that breaks it would be rejected by
+  // every runtime's load-time contract — so it is refused here, where the
+  // author can read it.
+  if (config_.gemm_tile_k % 4 != 0)
+    return generating::Error(
+        generating::kDriver,
+        "gemm_tile_k " + std::to_string(config_.gemm_tile_k) +
+            " is not a multiple of the kernel's 4-wide unroll");
+
   const SmfTensor* in_tensor = source.FindTensor(source.input_name);
   if (!in_tensor || in_tensor->dims.empty())
     return generating::Error(generating::kDriver,
@@ -529,6 +540,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   header.beta2 = config_.optimizer.beta2;
   header.eps = config_.optimizer.eps;
   header.weight_decay = config_.optimizer.weight_decay;
+  header.gemm_tile_k = config_.gemm_tile_k;  // v11; 0 = runtime default
+  header.gemm_tile_n = config_.gemm_tile_n;
   header.batch = static_cast<uint64_t>(batch);
   header.default_steps = config_.default_steps;
   // An optimizer-less plan (the finite-difference hook) has nothing to
@@ -666,6 +679,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   result.merge_instruction_count = header.merge_instr_count;
   result.eval_instruction_count = header.eval_instr_count;
   result.rodata_size = header.rodata_size;
+  result.gemm_tile_k = header.gemm_tile_k;
+  result.gemm_tile_n = header.gemm_tile_n;
 
   seeml::diag::Note(generating::kDriver, "plan compiled — " +
                std::to_string(header.train_instr_count) + " train + " +

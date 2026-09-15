@@ -18,6 +18,13 @@ keeps numbers comparable across commits.
 - **Per-commit trend, not absolutes.** The gate is regression against the
   previous commit's number on the same host (CI can carry the baseline as
   an artifact the way the fuzz corpus is cached).
+- **Measure what ships, and say what ran.** The CPU GEMM tile geometry
+  travels in the plan (v11), so the harness compiles every fixture with the
+  policy a package would carry — the runtime defaults, or `--gemm-tiles` /
+  `--kernel-policy` exactly as `seeml-update-compile` takes them — and the
+  report (schema 3) records the policy, the host key a table is keyed on,
+  and the host description. `bench_compare.py` refuses to compare two runs
+  whose policies differ: that delta is a tuning result, not a regression.
 - **External definitions, not house units.** Every headline number is
   reported under the definition an outside harness already prints for it
   (next section). A metric only this repository defines cannot be set
@@ -141,6 +148,58 @@ steps to 0.7× loss in ~2 s; serial vs 8-thread committed models are
 bitwise identical (the determinism overhead is therefore *measurable as
 pure speedup*, no correctness tax).
 
+## Tuning the kernel policy (`tool/autotune.py`)
+
+The one knob the CPU kernels expose — the blocked GEMM's K and N tiles —
+is measured offline, per host, by the Python plane, never inside the
+compiler (Two-Plane Overhaul P2, #76; the design is in
+[compiler.md](compiler.md)). One command tunes a host:
+
+```bash
+python3 tool/autotune.py tune --bench build/seeml-bench --out kernel_policy.json \
+    --fixtures mlp_128x1024x2,dec_v256_d128_s128,dec_v512_d192_s32 --threads 10
+python3 tool/autotune.py show kernel_policy.json
+seeml-update-compile ... --kernel-policy kernel_policy.json   # consumes it
+```
+
+Every arm is one `seeml-bench --gemm-tiles K,N` run under this document's
+discipline; arms are visited round-robin for `--rounds` (3) rounds and
+each arm's per-key result is the median over rounds — medians of medians.
+The score is the geometric mean over (fixture, threads) keys of rows/s
+relative to the kernel-default arm, which is always swept, as is the
+compiler's analytic tiling (`analytic_gemm_tiles` in the report — the
+hypothesis #90 found 1.3–3.3× slow, now measured instead of emitted). The
+winner is recorded only if it beats the defaults by `--min-gain` (3 %);
+otherwise the table records that the defaults are best. Either way every
+arm's numbers are kept beside the decision (`tuned.arms`), so the table is
+an audit trail, not just an answer. The table is keyed on the host key the
+bench printed; the compiler recomputes the same key and writes the tiles
+into the plan header.
+
+**Measured on the development host (2026-09-15, Apple M5, 10 threads,
+fixtures `mlp_128x1024x2`, `dec_v256_d128_s128`, `dec_v512_d192_s32`, 3
+rounds x 3 repeats, 18 arms, 10 minutes):** the kernel defaults are the
+policy. Scores are geometric-mean rows/s relative to the default arm.
+
+| arm | label | score |
+|---|---|---|
+| 256x512 | grid (best) | 1.005 |
+| 32x256 | grid | 1.004 |
+| 64x512 | grid | 1.004 |
+| **64x256** | **default (recorded)** | **1.000** |
+| 128x128 | grid | 0.989 |
+| 64x64 | grid | 0.976 |
+| 256x64 | grid | 0.960 |
+| 512x16 | analytic (`SuggestGemmTiling`) | 0.903 |
+
+Decision: `default-within-margin` — the best arm's 0.5 % is inside the
+3 % noise line, so the table records 64x256 for this host key
+(`arm64;Apple M5;cores=10;l1d=65536;l2=6291456;simd=4`). The analytic
+tiling that packages used to ship with is 9.7 % slower here, in line with
+#90's finding at larger shapes. A tuned entry is therefore not what this
+host gets from P2; what it gets is the measurement that says so, and a
+gate that cannot be fooled by the tiling again.
+
 ## The harness
 
 All three pieces of this program exist:
@@ -159,6 +218,8 @@ All three pieces of this program exist:
    cmake -B build -DSEEML_BENCH=ON && cmake --build build --target seeml-bench
    # or: SEEML_BENCH=1 sh build/build.sh
    ./build/seeml-bench --out bench.json --threads 1,2,4,8
+   # the geometry a package ships with: --gemm-tiles K,N or
+   # --kernel-policy table.json [--target-host KEY], as the compiler takes them
    ```
 
    Per fixture, per thread width: per-step latency and fixed lifecycle

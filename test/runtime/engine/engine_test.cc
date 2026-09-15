@@ -135,6 +135,35 @@ TEST(EngineContract, PlanContractTiesTheStepSectionToAccumulation) {
                         "gradient-accumulation fields");
 }
 
+TEST(EngineContract, PlanContractProvesTheGemmTileFields) {
+  // v11: the tiles are a throughput knob the kernels accept only with the
+  // K tile on the 4-wide unroll; zero is the runtime default; below v11
+  // the words are padding and must be zero.
+  namespace up = seeml::update;
+  up::PlanHeader header{};
+  header.version = up::kSeeuVersion;
+  header.batch = 4;
+  header.input_floats = 16;
+  header.arena_size = 4096;
+  header.input_ref = up::MakeArenaRef(0);
+  header.loss_ref = up::MakeArenaRef(256);
+  constexpr uint64_t kPlanSize = 65536;
+  EXPECT_OK(VerifyPlanContract(header, kPlanSize));
+  header.gemm_tile_k = 128;
+  header.gemm_tile_n = 512;
+  EXPECT_OK(VerifyPlanContract(header, kPlanSize));
+  header.gemm_tile_k = 6;
+  EXPECT_ERROR_CONTAINS(VerifyPlanContract(header, kPlanSize),
+                        "4-wide unroll");
+  header.gemm_tile_k = 0;  // one default, one set: fine
+  EXPECT_OK(VerifyPlanContract(header, kPlanSize));
+  header.version = up::kSeeuGemmTilesVersion - 1;
+  EXPECT_ERROR_CONTAINS(VerifyPlanContract(header, kPlanSize),
+                        "GEMM tile fields below v11");
+  header.gemm_tile_n = 0;
+  EXPECT_OK(VerifyPlanContract(header, kPlanSize));
+}
+
 TEST(EngineContract, ExecutorContractBindsEmbeddingTokensToTheStagedSlot) {
   // Regression: kEmbedFwd gathers table[tokens[t]] — a data-dependent
   // offset. Its token operand MUST be the staged input slot (like the

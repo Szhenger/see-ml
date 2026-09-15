@@ -56,6 +56,19 @@ std::expected<void, std::string> VerifyPlanContract(
       !RangeOk(header.emit_table_offset, emit_bytes, plan_size))
     return diag::executing::Error("plan section out of bounds");
 
+  // GEMM tiles (v11): a throughput knob the kernels accept only as a
+  // positive multiple of their 4-wide unroll (K) and positive (N); zero is
+  // the runtime default. Below v11 the words are padding and must be zero.
+  if (header.version < up::kSeeuGemmTilesVersion &&
+      (header.gemm_tile_k != 0 || header.gemm_tile_n != 0))
+    return diag::executing::Error(
+        "plan carries GEMM tile fields below v" +
+        std::to_string(up::kSeeuGemmTilesVersion));
+  if (header.gemm_tile_k % 4 != 0)
+    return diag::executing::Error(
+        "plan gemm_tile_k " + std::to_string(header.gemm_tile_k) +
+        " is not a multiple of the kernel's 4-wide unroll");
+
   // Gradient accumulation (v9): a step program exists exactly when the
   // plan accumulates more than one micro-batch — a lone step program would
   // never run, and an accumulating plan without one would never step.

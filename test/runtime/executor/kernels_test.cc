@@ -609,6 +609,69 @@ TEST(ParallelDeterminism, GemmFamilyIsThreadCountInvariant) {
                         RunAtWidth(8, M * N, nnq8));
 }
 
+TEST(ParallelDeterminism, GemmTilesNeverChangeBits) {
+  // The tile geometry (plan v11, tool/autotune.py's knob) picks traversal
+  // order and the K panel a pass folds in; with the K tile a multiple of
+  // the 4-wide unroll the per-element expression is identical under every
+  // geometry — the contract that lets a measured table pick any of them.
+  // Ragged M/N/K cross every tile boundary the candidate set has.
+  const size_t M = 37, N = 517, K = 131;
+  const std::vector<float> a = RandnVector(M * K, 21);
+  const std::vector<float> b = RandnVector(K * N, 22);
+  const std::vector<float> bt = RandnVector(N * K, 23);
+  const std::vector<float> at = RandnVector(K * M, 24);
+  const std::vector<float> bias = RandnVector(N, 25);
+  std::vector<int8_t> q8(K * N), q8t(N * K);
+  std::vector<uint16_t> bh(K * N), bth(N * K);
+  for (size_t i = 0; i < q8.size(); ++i) {
+    q8[i] = static_cast<int8_t>((i * 37 + 11) % 255 - 127);
+    q8t[i] = static_cast<int8_t>((i * 53 + 7) % 255 - 127);
+    bh[i] = seeml::update::Float32ToBf16Bits(b[i]);
+    bth[i] = seeml::update::Float32ToBf16Bits(bt[i]);
+  }
+  using seeml::update::EpilogueAct;
+  const k::GemmTiles candidates[] = {{64, 256}, {4, 1}, {16, 64}, {128, 4},
+                                     {512, 16}, {256, 1024}, {8, 517}};
+  auto run = [&](const k::GemmTiles& t) {
+    std::vector<float> out;
+    auto push = [&](const std::vector<float>& c) {
+      out.insert(out.end(), c.begin(), c.end());
+    };
+    std::vector<float> c(M * N);
+    k::GemmNN(a.data(), b.data(), c.data(), M, N, K, bias.data(),
+              EpilogueAct::kGelu, t);
+    push(c);
+    k::GemmNT(a.data(), bt.data(), c.data(), M, N, K, t);
+    push(c);
+    k::GemmTN(at.data(), b.data(), c.data(), M, N, K, t);
+    push(c);
+    k::Fill(c.data(), 0.25f, M * N);
+    k::GemmAccNN(a.data(), b.data(), c.data(), M, N, K, 0.5f, t);
+    push(c);
+    k::GemmNNQ8(a.data(), q8.data(), c.data(), M, N, K, 0.01f,
+                EpilogueAct::kSilu, t);
+    push(c);
+    k::GemmNTQ8(a.data(), q8t.data(), c.data(), M, N, K, 0.02f, t);
+    push(c);
+    k::GemmNNBF16(a.data(), bh.data(), c.data(), M, N, K, bias.data(),
+                  EpilogueAct::kRelu, t);
+    push(c);
+    k::GemmNTBF16(a.data(), bth.data(), c.data(), M, N, K, t);
+    push(c);
+    return out;
+  };
+  const std::vector<float> reference = run(k::kDefaultGemmTiles);
+  for (const k::GemmTiles& t : candidates) {
+    EXPECT_TRUE(k::GemmTilesValid(t));
+    EXPECT_BITWISE_EQ_F32(run(t), reference);
+    ScopedThreads eight(8);
+    EXPECT_BITWISE_EQ_F32(run(t), reference);
+  }
+  EXPECT_FALSE(k::GemmTilesValid({6, 16}));
+  EXPECT_FALSE(k::GemmTilesValid({0, 16}));
+  EXPECT_FALSE(k::GemmTilesValid({64, 0}));
+}
+
 TEST(ParallelDeterminism, LossReductionsAreThreadCountInvariant) {
   const size_t N = 2048, C = 8;
   const std::vector<float> logits = RandnVector(N * C, 21);

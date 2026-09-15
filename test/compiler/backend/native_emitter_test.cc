@@ -98,14 +98,13 @@ TEST(NativeEmitter, EmitsCompletePackage) {
   EXPECT_STR_CONTAINS(script, "feeder/batch_pipeline");
   EXPECT_STR_CONTAINS(script, "-pthread");
 
-  // The architecture analysis reaches the delivered program: the script
-  // bakes the host-derived GEMM tiling as build-line defines, overridable
-  // (or clearable) through SEEML_TILE_FLAGS for cross-compilation. The
-  // suggested tiling always validates on the suggesting host, so the
-  // fallback no-define form must not appear here.
-  EXPECT_STR_CONTAINS(script, "-DSEEML_GEMM_TILE_K=");
-  EXPECT_STR_CONTAINS(script, "-DSEEML_GEMM_TILE_N=");
-  EXPECT_STR_CONTAINS(script, "SEEML_TILE_FLAGS");
+  // The GEMM tile geometry travels in the plan header (v11), decided by
+  // the driver from the kernel-policy table or the defaults — the script
+  // bakes no host-derived tiling (#90: the analytic one it used to emit
+  // ran 1.3–3.3x slower than the kernel defaults). The SEEML_TILE_FLAGS
+  // hook stays, empty by default, to change the compiled-in default.
+  EXPECT_STR_CONTAINS(script, "TILE_FLAGS=\"${SEEML_TILE_FLAGS-}\"");
+  EXPECT_TRUE(script.find("${SEEML_TILE_FLAGS--D") == std::string::npos);
   EXPECT_STR_CONTAINS(script, "$TILE_FLAGS");
 
   // The script consumes whichever embedded-plan TU the package carries:

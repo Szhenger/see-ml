@@ -55,7 +55,7 @@ Read them in this order:
 | Document | What it teaches |
 |---|---|
 | [docs/usage.md](docs/usage.md) | The three-step workflow, every flag explained, and what actually happens when you run an update. Start here. |
-| [docs/compiler.md](docs/compiler.md) | The compiler, end to end — and most of the ML: what an intermediate representation is, the linear algebra of LoRA, how a program differentiates a program, what optimizers like AdamW actually compute, number formats and quantization, memory planning as register allocation, cache-aware matrix multiplication, and a multi-armed bandit that tunes it. |
+| [docs/compiler.md](docs/compiler.md) | The compiler, end to end — and most of the ML: what an intermediate representation is, the linear algebra of LoRA, how a program differentiates a program, what optimizers like AdamW actually compute, number formats and quantization, memory planning as register allocation, cache-aware matrix multiplication, and how its tile geometry is measured offline and decided at compile time. |
 | [docs/runtime.md](docs/runtime.md) | The on-device virtual machine: load-time validation as a safety proof, numerically stable kernels (and why naive formulas explode), deterministic parallelism, a producer-consumer pipeline, and storage that survives a power cut. |
 | [docs/formats.md](docs/formats.md) | The four binary formats on disk — bytes, offsets, magic numbers, and hashes — and why each field is there. |
 | [test/README.md](test/README.md) | How the test tree mirrors the code, and how you test calculus with arithmetic. |
@@ -108,7 +108,10 @@ What SeeML can train today, stated up front:
   effective batch can exceed what one forward+backward fits in memory.
 - **Target machine.** The compiler derives its cache tilings from the
   machine it runs on (host = target). The emitted package cross-compiles
-  (set `CXX`), but tilings remain build-host-derived hints. Execution is
+  (set `CXX`); the CPU GEMM tile geometry travels in the plan, decided
+  from a host-keyed table the offline tuner measured (`tool/autotune.py`,
+  `--kernel-policy`, `--target-host` for another machine) or left at the
+  runtime's defaults — throughput only, never bits. Execution is
   CPU by default — the bitwise-deterministic reference — and, on Apple
   hosts, an opt-in Metal backend (`model_update --backend metal|auto`):
   zero-copy residency, batched dispatch, every opcode but the losses on the

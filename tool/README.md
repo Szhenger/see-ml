@@ -16,6 +16,7 @@ tool/
   seeml_seeu_dump.cc      the plan disassembler   (inspect any .seeu)
   seeml_bench.cc          the benchmark harness  ->  one JSON per run
   bench_compare.py        the nightly Tier A regression gate over two runs
+  autotune.py             the offline tuner      ->  host-keyed kernel-policy table
 ```
 
 ## What each one is for
@@ -71,6 +72,21 @@ fwd/bwd/optimizer split when built with `-DSEEML_BENCH=ON` or
 `SEEML_BENCH=1 sh build/build.sh`), and emits one JSON per run.
 `bench_compare.py` diffs two such runs and fails on a >10% Tier A
 regression — the nightly `bench` job's gate.
+
+**`autotune.py`** is the offline autotuner, the second Python-plane
+subsystem of the overhaul (P2): it sweeps CPU GEMM tile arms through
+`seeml-bench --gemm-tiles` — round-robin over rounds, medians of medians,
+each arm scored by the geometric mean of its rows/s relative to the
+kernel defaults, which are always in the sweep alongside the compiler's
+analytic tiling — and writes the winner (or "the defaults are best", when
+nothing clears `--min-gain`) into a JSON table keyed on the host key the
+bench printed. `seeml-update-compile --kernel-policy table.json` then
+looks the compile host up and writes the tiles into the plan header (v11),
+where the runtime proves and runs them; every geometry computes the same
+bits, so the table only ever chooses among equivalent schedules. Standard
+library only, strict CLI, atomic table writes, `show` to read a table
+back. The measurement never happens inside the compiler: no table means
+the defaults and an unchanged compile time.
 
 ## Where to go next
 

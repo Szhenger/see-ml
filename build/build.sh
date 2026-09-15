@@ -48,8 +48,7 @@ compile compiler/analysis/calculus/autodiff.cc     autodiff.o
 compile compiler/analysis/calculus/optimizer.cc    optimizer_synth.o
 compile compiler/analysis/reviewer/quantization.cc quantization.o
 compile compiler/backend/architecture/host_arch.cc host_arch.o
-compile compiler/backend/tuner/bandit.cc      bandit.o
-compile compiler/backend/tuner/autotuner.cc   autotuner.o
+compile compiler/backend/tuner/kernel_policy_table.cc kernel_policy_table.o
 compile compiler/backend/trainer/arena_binder.cc arena_binder.o
 compile compiler/backend/trainer/instruction_lowering.cc instruction_lowering.o
 compile compiler/backend/trainer/kernel_emitter.cc kernel_emitter.o
@@ -113,7 +112,7 @@ LIBS="build/model_format.o build/model_reader.o build/model_writer.o \
       build/merge_builder.o build/autodiff.o build/optimizer_synth.o \
       build/quantization.o \
       build/arena_binder.o build/instruction_lowering.o \
-      build/host_arch.o build/bandit.o build/autotuner.o \
+      build/host_arch.o build/kernel_policy_table.o \
       build/kernel_emitter.o \
       build/driver_contract.o build/update_compiler.o build/native_emitter.o \
       build/sir_type.o build/sir_value.o build/sir_operation.o \

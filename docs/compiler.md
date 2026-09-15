@@ -282,23 +282,19 @@ mc = fit(L2/2 ÷ kc)                    the mc×kc panel of A must live in half 
 
 where `fit` rounds down to a SIMD-width multiple (never below it). The intent: while the kernel marches across `mc` rows of A, the B panel stays L1-resident and the A panel L2-resident, and only *half* of each cache is budgeted, leaving room for C and everything else. `ValidateGemmTiling` enforces this contract on any tiling handed in from outside — nonzero, SIMD-multiple, and the two half-cache inequalities (`kc·nc·4 ≤ L1/2`, `mc·kc·4 ≤ L2/2`) whenever the cache sizes are trustworthy.
 
-(A precision worth stating: the *CPU* kernels in the runtime use fixed, conservative tiles baked into the code. The detected tiling feeds the GPU kernel emitter and the autotuner, below.)
+A precision worth stating, and the lesson of the 2026-09 algorithm review: this model is a **hypothesis**, not a decision. It assumes a packed BLIS-style microkernel, and the CPU runtime does not have one — its GEMM cores are unpacked loop nests (`runtime.md`) whose fast configuration is a 64 KiB panel of B, the kernel defaults of 64 deep and 256 wide. When the compiler used to bake the analytic tiling into every package's `build.sh`, the packages ran 1.3–3.3× *slower* than the defaults (#90). Nothing emits it any more. It survives as one arm of the offline tuner's sweep (the bench reports it as `analytic_gemm_tiles`) and as the clamp source for the Metal kernel emitter, so that when a packed microkernel lands (E1) the hypothesis is already being measured against the table rather than trusted.
 
-### The autotuner: a multi-armed bandit, not a random search
+### The kernel policy: measured offline, decided at compile time
 
-Analytical models are good; measurements are better. But measurements cost time, so the question becomes: given a handful of candidate tilings and a limited budget of benchmark runs, how do you spend the budget wisely? This is the **multi-armed bandit** problem — named for slot machines: each "arm" pays out noisily, and you must balance *exploring* (trying arms you know little about) against *exploiting* (replaying the best arm so far).
+Analytical models are good; measurements are better. But a measurement made *inside* the compiler is a measurement the compiler cannot reproduce or explain, and it costs every compile a wall-clock budget the build host may not have. So SeeML draws the line where the Two-Plane Overhaul (`docs/next-project/`) draws it: **the compiler never measures.** Tuning lives on the build host, offline, in Python — `tool/autotune.py` — and the compiler consumes one decided fact per host.
 
-`Ucb1Bandit` (`backend/tuner/`) implements the classic UCB1 answer. After pulling each arm once, always pull the arm maximizing:
+The fact is the CPU GEMM **tile geometry**: the K panel a pass over C folds in and the N sweep width (`runtime/executor/kernel_policy.h`). It is a throughput knob and *only* a throughput knob: the N tile picks traversal order, not reduction grouping, and the K tile keeps the kernel's 4-wide unroll groups aligned as long as it stays a multiple of 4 — so every geometry the kernels accept computes **bit-identical** results (`kernels_test` proves it across a ragged shape at every tile boundary, `update_engine_test` across whole training runs). That is what lets a table pick among them without touching the determinism contract.
 
-```
-score_i = mean_i + c·√(2·ln N / n_i)
-```
+The tuner's method is the benchmark document's discipline made mechanical. Each *arm* is one geometry `KxN`; each measurement is one `seeml-bench` run at that arm (`--gemm-tiles`), medians of repeats by steps-regression per fixture and thread width; arms are visited round-robin for several rounds so thermal drift lands on every arm alike, and each arm's per-key result is the median over rounds — **medians of medians**. An arm's score is the geometric mean over every (fixture, threads) key of its rows/s relative to the default arm's, so no fixture outvotes another by being larger. Two arms are always in the sweep whatever the grid says: the kernel defaults (the arm to beat) and the analytic hypothesis above. The winner becomes the host's policy only when it beats the defaults by a margin (3 % — the benchmarks document's "signal, not noise" line); otherwise the defaults are recorded, with every arm's numbers beside them. Either way the decision is *measured*, and the table says so.
 
-where `mean_i` is arm i's average reward, `n_i` its pull count, `N` the total pulls, and `c` the exploration constant (default 1.0). Look at the two terms: the first says "this arm has paid well," the second — an upper confidence bound that *grows* for neglected arms and *shrinks* as ln N/n_i falls — says "but you haven't looked at this one lately, and your uncertainty about it is still large." Optimism in the face of uncertainty, with a provably small amount of regret.
+The table is keyed on the **host's identity** — `HostKey` in `backend/architecture/host_arch.h`: ISA, CPU model, physical cores, L1d and L2 bytes, SIMD width — every quantity that changes which tiling is fastest and nothing that does not. The bench prints the key, the tuner copies it, and the compiler recomputes it on the machine it runs on: one function, so the two planes cannot disagree about who a host is. The compiler's side of the seam is `backend/tuner/kernel_policy_table.cc`: a strict, purpose-built JSON reader (the compiler has no third-party dependencies, and a reader that guesses is a reader that misreads) and a resolution with three sources, in precedence order — `--gemm-tiles K,N` (explicit), `--kernel-policy table.json` (the entry for this host, or for `--target-host KEY` when cross-compiling), else the defaults. A table with no entry for the host is a note and the defaults; a table that does not parse, or names a geometry the kernels reject, is a hard error, because a bad policy silently costs every training step.
 
-Two implementation choices make it SeeML-flavored. There is **no randomness anywhere** — untried arms are taken lowest-index-first, and score ties break to the lowest index — so a tuning run is exactly reproducible. And the benchmark is **injected** as a function parameter (`double(const GemmTiling&)`, higher is better): tests hand in a synthetic reward function, so the tuner's logic is provable without a GPU or a wall clock.
-
-`TilingCandidates` spans the search space frugally: the analytical hint, plus each dimension independently halved and doubled — at most 7 candidates. `AutotuneGemmTiling` clamps the budget up so every arm is measured at least once, runs the select/measure/update loop, and reports the winner *with full per-arm statistics* — you can audit exactly what it tried and what it saw.
+Where does the decision go? Into the **plan** — two header fields, `gemm_tile_k` and `gemm_tile_n` (v11; zero means the runtime's compiled-in default). This is the "decide early" principle applied to a knob that used to be a build flag: the compiler decides, the plan carries the decision, the runtime's load-time contract proves it (the K tile on the unroll), the CPU backend runs with it, and `seeml-seeu-dump` and the compile report both show it. Compile time is unchanged when no table is given — nothing is read.
 
 ### Emission: the plan, and a package that builds anywhere
 
@@ -318,10 +314,10 @@ Every compiler diagnostic is one line, `"<unit>: <message>"`, and errors travel 
 | `parsing/` | SMF graph → forward SIR | `Parser` |
 | `passing/` | pass orchestration + lowering legality | `PassManager`, `ConvLowering` |
 | `updating/` | the analytic methods | `TrainableAutodiff`, `LoraGrafter`, `MergeBuilder`, `OptimizerSynthesizer`, `GemmEpilogueFuser` |
-| `architecting/` | local device analysis | `HostArch`, `Autotuner` |
+| `architecting/` | local device analysis and the tuner's table | `HostArch`, `KernelPolicy` |
 | `generating/` | code generation + the driver | `UpdateCompiler`, `ArenaBinder`, `InstructionLowering`, `NativeEmitter` |
 
-`architecting/` has a two-tier discipline worth noting: *detection* can never hard-fail (warn, fall back to conservative defaults — a missing sysctl shouldn't stop a compile), while *tiling-contract violations* are hard errors (a broken contract means broken code).
+`architecting/` has a two-tier discipline worth noting: *detection* can never hard-fail (warn, fall back to conservative defaults — a missing sysctl shouldn't stop a compile; a kernel-policy table with no entry for this host means the defaults), while *contract violations* — a tiling that lies about the cache hierarchy, a table that does not parse or names a K tile off the kernel's unroll — are hard errors (a broken contract means broken code, or every training step silently slower).
 
 ## The driver: orchestration under contract
 
@@ -338,7 +334,7 @@ Why bother, when the subsystems have their own tests? Because contracts catch *i
 
 - The **frontend** turns untrusted bytes into a verified SSA graph, with every semantic and shape error caught at the door.
 - The **analysis** phase is compile-time mathematics: LoRA grafts rank-r adapters (`r(K+M)` parameters instead of `K·M`), autodiff synthesizes the backward pass by reverse-mode VJP rewriting pruned to the trainable set, the optimizer becomes instructions, the merge program materializes `Δ = (α/r)·A@B`, and the frozen base is reviewed for symmetric int8 storage.
-- The **backend** binds every value to a byte offset (liveness + first-fit, like register allocation for tensors), lowers to a 31-opcode, 64-byte-instruction ISA with a two-address-space memory model, derives cache-respecting GEMM tilings analytically, refines them with a deterministic UCB1 bandit, and emits a package that builds anywhere.
+- The **backend** binds every value to a byte offset (liveness + first-fit, like register allocation for tensors), lowers to a 31-opcode, 64-byte-instruction ISA with a two-address-space memory model, writes the CPU GEMM tile geometry the offline tuner measured for the host (or the kernel defaults) into the plan, and emits a package that builds anywhere.
 - The **driver** sequences it all and verifies a contract at every seam.
 
 ## tool/ — the command-line surface
