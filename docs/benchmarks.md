@@ -74,7 +74,7 @@ shapes — the gap the C2 SIMD and G1b Metal projects are priced against.
 | **softmax-xent μs at vocab ∈ {1k, 32k, 128k}** | fwd+bwd per row | the chunked-CE project (pillar A3): this curve IS the justification |
 | **q8 dequant overhead** | q8 GEMM / f32 GEMM time ratio | NF4/int4 design: if int8 dequant already costs >15%, block-wise 4-bit needs a fused design, not a naive port |
 | **Metal vs CPU GEMM** | the G1a harness at real shapes | the G1b engine-integration go/no-go: dispatch overhead amortization point (at which M×N×K does GPU win?) |
-| **backend split** | `seeml-bench --backend metal` vs `cpu` on the same fixtures; `bench.json` carries `"backend"` and the gate keys rows by it | where the GPU pays: on this suite's tiny fixtures Metal runs at the dispatch floor (0.64–3.50× the CPU, Apple M5); on the SmolLM-135M-shaped `tok_smollm135m_q8` fixture 27.5× (1,786 vs 65 tok/s) — see "The first GPU baseline row" below |
+| **backend split** | `seeml-bench --backend metal` vs `cpu` on the same fixtures; `bench.json` carries `"backend"` and the gate keys rows by it | where the GPU pays: on this suite's tiny fixtures Metal runs at the dispatch floor (0.64–3.50× the CPU, Apple M5); on the SmolLM-135M-shaped `tok_smollm135m_q8` fixture 7.7× (1,786 vs 233 tok/s; 27.5× before #104 fixed the CPU's q8 NT kernel) — see "The first GPU baseline row" below |
 
 ### The first GPU baseline row (v1.3.0 gate, 2026-09-15)
 
@@ -88,12 +88,18 @@ over the plan's own GEMM instructions.
 | backend | step ms | tok/s | it/s | GEMM GFLOP/s | fwd / bwd / opt ms |
 |---|---|---|---|---|---|
 | metal | 286.6 | 1,786 | 3.49 | 1,084 | 127 / 158 / 1.9 |
-| cpu | 7,841 | 65 | 0.128 | 39.6 | 1253 / 6591 / 14 |
+| cpu | 2,194 | 233 | 0.456 | 141.7 | 1071 / 1134 / 13 |
+| cpu, before #104 | 7,841 | 65 | 0.128 | 39.6 | 1253 / 6591 / 14 |
 
 The same binary on the real SmolLM-135M package (the T2 import, the docs
 corpus, `model_update --backend metal`) measures 1,749 tok/s by the
 same regression; the fixture's seeded weights and corpus reproduce the
-model's per-step cost, not its loss.
+model's per-step cost, not its loss. The CPU row was re-measured on
+2026-09-15 after #104: `GemmNTQ8` — the dX backward through every frozen
+projection, 208 of them per step at this geometry — had run scalar since
+#66 because the int8 cast sat inside the vectorized lane loop; widening
+each block first (bit-identical, see `gemm.cc`) took the backward from
+6.6 s to 1.1 s and the row from 65 to 233 tok/s.
 
 ## Tier C — Memory (the gate that refuses compiles)
 

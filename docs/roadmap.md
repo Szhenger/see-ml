@@ -279,7 +279,10 @@ backend-neutral f32).
 > (293 ms/step) vs CPU ≈ 65 tok/s** (26.8×; the gate asked for
 > 800), 300-step validation loss 4.122996 (metal) vs 4.123013 (cpu), the
 > committed model and loss curve byte-identical across two Metal runs, peak
-> RSS 1.014× arena + plan, package build 13 s. The first GPU baseline row
+> RSS 1.014× arena + plan, package build 13 s. (The CPU figure was a
+> regression, not the CPU's rate: #104, the same day, restored `GemmNTQ8`'s
+> vectorization bit-identically and the CPU row is 233 tok/s — 7.5×.) The
+> first GPU baseline row
 > (`seeml-bench --backend metal --fixtures tok_smollm135m_q8`) is in
 > docs/benchmarks.md. Left on the GPU side, in order: the LoRA residual
 > chain (four dispatches per adapter, E4 #83), the loss families on the

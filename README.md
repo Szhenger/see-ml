@@ -114,7 +114,8 @@ What SeeML can train today, stated up front:
   zero-copy residency, batched dispatch, every opcode but the losses on the
   GPU, compared against the CPU at tolerance (roadmap Project 5). On
   SmolLM-135M (q8 base, LoRA r8, 512-token steps, Apple M5) the Metal
-  backend trains at ≈ 1,749 tok/s, 26.8× the CPU backend, with the
+  backend trains at ≈ 1,749 tok/s, 7.5× the CPU backend (≈ 233 tok/s
+  after #104), with the
   300-step validation loss within 0.0004% of the CPU's and every run
   bitwise-reproducible against itself.
 - **Integrity, not authenticity.** All hashing is FNV-1a — a corruption and
