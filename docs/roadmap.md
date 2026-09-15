@@ -266,6 +266,25 @@ the backend choice must be recorded wherever results are compared (the
 regression gate, checkpoints do not care — the persistent segment is
 backend-neutral f32).
 
+> **Status: v1.3.0 GATE PASSED (2026-09-15, #65).** The 09-14 throughput
+> gap was not the dispatch floor: the Metal GEMM tile's accumulator loops
+> were not unrolled, so the compiler spilled its sixteen
+> `simdgroup_float8x8` registers and the tile ran at 300 GFLOP/s; one
+> unroll pragma recovered 10×. On top of it: register-prefetched 4-vector
+> loads, split-K for shapes with few tiles, three skinny-shape kernels
+> (rank-8 factors, K=8 products), every GEMM kernel strided and batched so
+> the attention family is six batched GEMMs plus a row-softmax pair, and
+> simdgroup-per-row norms. SmolLM-135M (q8, r8, S=128, 512 tok/step, Apple
+> M5, package binary, per-step slope 20→80): **Metal ≈ 1,749 tok/s
+> (293 ms/step) vs CPU ≈ 65 tok/s** (26.8×; the gate asked for
+> 800), 300-step validation loss 4.122996 (metal) vs 4.123013 (cpu), the
+> committed model and loss curve byte-identical across two Metal runs, peak
+> RSS 1.014× arena + plan, package build 13 s. The first GPU baseline row
+> (`seeml-bench --backend metal --fixtures tok_smollm135m_q8`) is in
+> docs/benchmarks.md. Left on the GPU side, in order: the LoRA residual
+> chain (four dispatches per adapter, E4 #83), the loss families on the
+> GPU (the last CPU round-trips), fusing x·A·B per adapter.
+
 > **Status: G1b-1…4 + G1c SHIPPED (2026-09-14)**, with #66 and #67 on
 > the CPU side. `ExecutorBackend` seam + `CpuBackend` (bit-identical,
 > tested); `MetalBackend` with zero-copy arena/rodata residency, one

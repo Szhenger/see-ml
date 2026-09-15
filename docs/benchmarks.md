@@ -74,7 +74,26 @@ shapes — the gap the C2 SIMD and G1b Metal projects are priced against.
 | **softmax-xent μs at vocab ∈ {1k, 32k, 128k}** | fwd+bwd per row | the chunked-CE project (pillar A3): this curve IS the justification |
 | **q8 dequant overhead** | q8 GEMM / f32 GEMM time ratio | NF4/int4 design: if int8 dequant already costs >15%, block-wise 4-bit needs a fused design, not a naive port |
 | **Metal vs CPU GEMM** | the G1a harness at real shapes | the G1b engine-integration go/no-go: dispatch overhead amortization point (at which M×N×K does GPU win?) |
-| **backend split** | `seeml-bench --backend metal` vs `cpu` on the same fixtures; `bench.json` carries `"backend"` and the gate keys rows by it | where the GPU pays: on this suite's tiny fixtures Metal is 0.65–1.23× the CPU (dispatch floor), on a D=512 / 8-head / S=128 4-block decoder 2.1× (2,480 vs 1,180 tok/s, Apple M5); on SmolLM-135M (q8, r8, S=128) 4.5× (300 vs 67 tok/s) against MLX's 1,605 — the frontier row must be measured at frontier shapes |
+| **backend split** | `seeml-bench --backend metal` vs `cpu` on the same fixtures; `bench.json` carries `"backend"` and the gate keys rows by it | where the GPU pays: on this suite's tiny fixtures Metal runs at the dispatch floor (0.64–3.50× the CPU, Apple M5); on the SmolLM-135M-shaped `tok_smollm135m_q8` fixture 27.5× (1,786 vs 65 tok/s) — see "The first GPU baseline row" below |
+
+### The first GPU baseline row (v1.3.0 gate, 2026-09-15)
+
+`tok_smollm135m_q8` on an idle Apple M5 (10 GPU cores), `--threads 10`,
+per-step medians by steps-regression; the Metal row at the harness
+defaults (20→80 steps, 3 repeats), the CPU row at `--steps-lo 5
+--steps-hi 15 --repeats 1` because a default sweep of it takes the better
+part of an hour. The step trains 512 tokens; `gemm_gflops` sums 2·M·N·K
+over the plan's own GEMM instructions.
+
+| backend | step ms | tok/s | it/s | GEMM GFLOP/s | fwd / bwd / opt ms |
+|---|---|---|---|---|---|
+| metal | 286.6 | 1,786 | 3.49 | 1,084 | 127 / 158 / 1.9 |
+| cpu | 7,841 | 65 | 0.128 | 39.6 | 1253 / 6591 / 14 |
+
+The same binary on the real SmolLM-135M package (the T2 import, the docs
+corpus, `model_update --backend metal`) measures 1,749 tok/s by the
+same regression; the fixture's seeded weights and corpus reproduce the
+model's per-step cost, not its loss.
 
 ## Tier C — Memory (the gate that refuses compiles)
 
@@ -122,7 +141,13 @@ All three pieces of this program exist:
 
 1. **`tool/seeml_bench.cc`** compiles the standard fixture set in-process
    (the seeded builders the test suites share — two MLP stacks, three
-   4-block decoders, one token-native decoder) and emits one JSON per run:
+   4-block decoders, one token-native decoder, plus an opt-in
+   SmolLM-135M-shaped token decoder, `tok_smollm135m_q8`, that runs only
+   when `--fixtures` names it: 30 blocks of D=576 / 9 heads / ffn 1536
+   over a 49,152 vocabulary, q8 base, 512 tokens per step — the frontier
+   row below, kept out of the default set and the nightly keys because a
+   CPU sweep of it takes the better part of an hour) and emits one JSON
+   per run:
 
    ```bash
    cmake -B build -DSEEML_BENCH=ON && cmake --build build --target seeml-bench

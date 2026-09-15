@@ -150,6 +150,7 @@ Both halves parallelize: the compiler's byte-heavy passes (int8 quantization, ad
 ```bash
 SEEML_THREADS=1 model_update ...   # fully serial: no thread is ever created
 SEEML_THREADS=4 model_update ...   # pin the pool width; default = all cores
+SEEML_METAL_PROFILE=1 model_update --backend metal ...   # per-kernel GPU time at exit (serializes; diagnostic only)
 ```
 
 Here's the property that makes this knob safe to turn: parallel execution is **bitwise-deterministic**. Work is split into chunks whose boundaries depend only on the problem shape (never the thread count), and reductions combine per-chunk partials in a fixed order — so the same plan, data, and seed produce the *same bits* at any thread count. Thread count is a throughput knob, not a numerics knob. Practically: a loss curve from an 8-core dev board reproduces exactly on a single-core target, and any bug you find is reproducible by construction. ([runtime.md](runtime.md) explains the mechanism.)
