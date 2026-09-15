@@ -96,7 +96,7 @@ records[num_samples]:
 
 A 40-byte header, then fixed-size records — which means sample k lives at a *computable* offset, no index needed. `label_kind` covers the three training modes: `1` (a class index) for cross-entropy, `2` (a dense vector) for regression/MSE — predicting continuous values rather than classes, `0` (no label at all) for distillation, where the teacher model provides the target. The `u32` after `label_kind` was header padding in v1; v2 gives it meaning as `input_kind`, so old files (always zero there) still read correctly. Token corpora (input_kind 1) shuffle, split, and replay at record (sequence) granularity, so no sequence is ever cut or mixed.
 
-## SEEU — Update Plan (`.seeu`, v9)
+## SEEU — Update Plan (`.seeu`, v10)
 
 The star of the show: the fully AOT-compiled update. One file containing three instruction streams (train / eval / merge) — four under gradient accumulation, when the train section is the grad program and a step section holds the optimizer program — the frozen weights, the persistent segment's initial image, and the emit table — every section addressed by a single `PlanHeader` at offset 0 (authoritative definition: `source/plan/schema.h`; every section 64-byte aligned). Versioning is additive: see the version history below (currently v10).
 
@@ -129,7 +129,7 @@ Why do hyperparameters live in the *header* while clip lives in the *stream*? Be
 u16 opcode | u16 flags | u32 pad | u64 in[4] | u64 out[3]
 ```
 
-with 31 opcodes (`kNop` through `kGemmNTQ8` — the full enum with per-opcode operand conventions is in `source/plan/instruction.h`). The `in[]` slots hold tensor refs; scalars (a GEMM's α, a fill value, clip's max-norm) are f32 *bit-cast* into a spare slot; the `out[]` words carry dimensions (a GEMM's M, N, K; LayerNorm packs `(rows << 32) | cols`). Inspect any plan's streams with `seeml-seeu-dump --instrs` ([usage.md](usage.md)).
+with 45 opcodes (`kNop` through `kGemmNTBF16`, contiguous from 0). The `in[]` slots hold tensor refs; scalars (a GEMM's α, a fill value, clip's max-norm) are f32 *bit-cast* into a spare slot; the `out[]` words carry dimensions (a GEMM's M, N, K; LayerNorm packs `(rows << 32) | cols`). Inspect any plan's streams with `seeml-seeu-dump --instrs` ([usage.md](usage.md)).
 
 Frozen weights selected by `--quantize-base` are stored in rodata as per-tensor symmetric int8 (scale = max|w|/127) with the dequant scale carried *in the GEMM instruction itself* (`kGemmNNQ8` / `kGemmNTQ8`) — the kernel folds it into its existing multiply, so dequantization is free.
 

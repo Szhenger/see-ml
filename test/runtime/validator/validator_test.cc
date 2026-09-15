@@ -69,16 +69,24 @@ TEST(PlanValidator, Bf16GemmsAreVersionGatedAndRodataPinned) {
   g.out[2] = 16;
   g.in[1] = up::MakeArenaRef(768);  // bf16 B must be rodata
   EXPECT_ERROR(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
+  g.in[1] = up::MakeRodataRef(1);  // ...and 2-byte aligned
+  g.out[2] = 8;                    // 64 elements, plenty of room
+  EXPECT_ERROR(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
+  g.in[1] = up::MakeRodataRef(2);
+  EXPECT_OK(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
+  g.out[2] = 16;
   g.in[1] = up::MakeRodataRef(0);
   // The fused bias epilogue is allowed on the bf16 NN GEMM, like kGemmNN.
   g.flags = up::MakeEpilogueFlags(true, up::EpilogueAct::kRelu);
   g.in[3] = up::MakeArenaRef(768);
   EXPECT_OK(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
-  // ...and not on the NT variant.
+  // ...and not on the NT variant, whose B must be rodata as well.
   g.opcode = static_cast<uint16_t>(up::OpCode::kGemmNTBF16);
   EXPECT_ERROR(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
   g.flags = 0;
   EXPECT_OK(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
+  g.in[1] = up::MakeArenaRef(768);
+  EXPECT_ERROR(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
 }
 
 TEST(PlanValidator, AccumulateIsVersionGatedAndInPlace) {

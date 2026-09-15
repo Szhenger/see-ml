@@ -262,7 +262,7 @@ The merge program is bound into the *same* arena, with one twist: its deltas are
 u16 opcode | u16 flags | u32 pad | u64 in[4] | u64 out[3]
 ```
 
-The instruction set has 45 opcodes — six GEMM variants (`NN`, `NT`, `TN`, accumulating `NN`, and two int8-dequantizing forms), elementwise ops, the activation forward/backward pairs, LayerNorm, the three loss families, the two optimizer steps, clip, fill, copy. The complete enumeration lives in `source/plan/instruction.h`, and [formats.md](formats.md) walks the encoding.
+The instruction set has 45 opcodes — eight GEMM variants (`NN`, `NT`, `TN`, accumulating `NN`, two int8-dequantizing forms and two bf16-widening forms), elementwise ops, the activation forward/backward pairs, LayerNorm, the three loss families, the two optimizer steps, clip, fill, copy. The complete enumeration lives in `source/plan/instruction.h`, and [formats.md](formats.md) walks the encoding.
 
 The addressing scheme is worth savoring for its economy. A tensor reference is a single 64-bit word: **bit 63 selects the address space** (0 = mutable arena, 1 = read-only rodata), bits 0–62 are a byte offset. That's the entire memory model — two flat spaces and an offset. No pointers, no relocation, and, on the device, one branchless test tells the validator which bounds to check. Scalars ride along bit-cast into spare operand slots (a GEMM's α, clip's max-norm, fill's value), and dimensions pack into the `out[]` words (a GEMM carries M, N, K; LayerNorm packs rows and columns into one word as `(N << 32) | D`).
 

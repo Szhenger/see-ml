@@ -5,6 +5,7 @@
 // =============================================================================
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -161,6 +162,20 @@ TEST(Gemm, Bf16VariantsAreBitwiseTheF32GemmsOverTheWidenedMatrix) {
   EXPECT_EQ(Bf16BitsToFloat32(Float32ToBf16Bits(1.01171875f)), 1.015625f);
   EXPECT_TRUE(std::isnan(Bf16BitsToFloat32(Float32ToBf16Bits(
       std::numeric_limits<float>::quiet_NaN()))));
+  // Infinities stay infinite; the largest finite f32 rounds up to +inf
+  // (the standard overflow of round-to-nearest-even narrowing), never NaN.
+  EXPECT_EQ(Float32ToBf16Bits(std::numeric_limits<float>::infinity()), 0x7F80u);
+  EXPECT_EQ(Float32ToBf16Bits(-std::numeric_limits<float>::infinity()), 0xFF80u);
+  EXPECT_EQ(Float32ToBf16Bits(std::numeric_limits<float>::max()), 0x7F80u);
+  EXPECT_EQ(Float32ToBf16Bits(-0.0f), 0x8000u);
+  // Negative values round by magnitude (sign-magnitude representation).
+  EXPECT_EQ(Bf16BitsToFloat32(Float32ToBf16Bits(-1.01171875f)), -1.015625f);
+  EXPECT_EQ(Bf16BitsToFloat32(Float32ToBf16Bits(-1.00390625f)), -1.0f);
+  // A subnormal whose rounding carries into the exponent: just below the
+  // smallest normal rounds up to it.
+  const float below_min = std::bit_cast<float>(0x007FFFFFu);
+  EXPECT_EQ(Float32ToBf16Bits(below_min), 0x0080u);
+  EXPECT_EQ(Bf16BitsToFloat32(0x0080u), std::numeric_limits<float>::min());
 }
 
 TEST(Gemm, AccNNAccumulatesScaledProduct) {
