@@ -1,4 +1,6 @@
 #include "compiler/backend/trainer/instruction_lowering.h"
+
+#include <unordered_set>
 #include "source/language/model_format.h"
 
 #include <bit>
@@ -23,7 +25,8 @@ uint64_t F32BitsPair(float hi, float lo) {
 
 std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
     const std::vector<sir::Operation*>& ops, const ResolveFn& resolve,
-    const std::unordered_map<const sir::Value*, float>& quant_scales) {
+    const std::unordered_map<const sir::Value*, float>& quant_scales,
+    const std::unordered_set<const sir::Value*>& bf16_weights) {
   std::vector<UpdateInstruction> instrs;
   instrs.reserve(ops.size());  // ~1 instruction per non-storage op
   std::string error;
@@ -70,9 +73,17 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
                          ? quant_scales.find(op->operand(1))
                          : quant_scales.end();
       const bool q8 = q != quant_scales.end();
-      set(m == "sc_high.matmul"     ? (q8 ? OpCode::kGemmNNQ8 : OpCode::kGemmNN)
-          : m == "sc_low.matmul_nt" ? (q8 ? OpCode::kGemmNTQ8 : OpCode::kGemmNT)
-                                    : OpCode::kGemmTN);
+      // bf16 frozen weights (v10) take the widening opcodes; the reviewer
+      // never selects a weight for both storages.
+      const bool bf16 = !q8 && m != "sc_low.matmul_tn" &&
+                        bf16_weights.contains(op->operand(1));
+      set(m == "sc_high.matmul"
+              ? (q8 ? OpCode::kGemmNNQ8
+                    : bf16 ? OpCode::kGemmNNBF16 : OpCode::kGemmNN)
+          : m == "sc_low.matmul_nt"
+              ? (q8 ? OpCode::kGemmNTQ8
+                    : bf16 ? OpCode::kGemmNTBF16 : OpCode::kGemmNT)
+              : OpCode::kGemmTN);
       ins.in[0] = ref(a);
       ins.in[1] = ref(op->operand(1));
       ins.in[2] = ref(c);

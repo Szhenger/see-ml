@@ -73,8 +73,9 @@ static inline float apply_act(float v, uint act) {
 // staged tiles are zero-filled past the ragged edges; the epilogue runs
 // on a threadgroup-staged copy of C so every element's write is guarded.
 // AT/BT: operand stored transposed (TN: A is [K,M]; NT: B is [N,K]);
-// Q8: B is int8, dequantized as scale * q on the way into the tile.
-template <bool AT, bool BT, bool Q8, bool ACC>
+// Q8: B is int8, dequantized as scale * q on the way into the tile;
+// BF16: B is bfloat16, widened exactly (its bits in the high half).
+template <bool AT, bool BT, bool Q8, bool ACC, bool BF16 = false>
 static inline void gemm_tile(device const float* A, device const void* Bv,
                              device float* C, device const float* bias,
                              uint M, uint N, uint K, float alpha, uint act,
@@ -89,6 +90,7 @@ static inline void gemm_tile(device const float* A, device const void* Bv,
   const uint sg_r = (sgid >> 1) * 32u, sg_c = (sgid & 1u) * 32u;
   device const float* Bf = (device const float*)Bv;
   device const char* Bq = (device const char*)Bv;
+  device const ushort* Bh = (device const ushort*)Bv;
   for (uint k0 = 0; k0 < K; k0 += 16u) {
     for (uint e = tid; e < 1024u; e += 128u) {
       float v = 0.0f;
@@ -110,13 +112,17 @@ static inline void gemm_tile(device const float* A, device const void* Bv,
         const uint kk = e >> 6, c = e & 63u;
         const uint gn = n0 + c, gk = k0 + kk;
         if (gn < N && gk < K)
-          v = Q8 ? (float)Bq[gk * N + gn] : Bf[gk * N + gn];
+          v = Q8     ? (float)Bq[gk * N + gn]
+              : BF16 ? as_type<float>((uint)Bh[gk * N + gn] << 16)
+                     : Bf[gk * N + gn];
         b_tile[kk * 64u + c] = v;
       } else {
         const uint c = e >> 4, kk = e & 15u;
         const uint gn = n0 + c, gk = k0 + kk;
         if (gn < N && gk < K)
-          v = Q8 ? (float)Bq[gn * K + gk] : Bf[gn * K + gk];
+          v = Q8     ? (float)Bq[gn * K + gk]
+              : BF16 ? as_type<float>((uint)Bh[gn * K + gk] << 16)
+                     : Bf[gn * K + gk];
         b_tile[c * 16u + kk] = v;
       }
     }
@@ -167,11 +173,13 @@ static inline void gemm_tile(device const float* A, device const void* Bv,
 }
 
 #define GEMM_KERNEL(NAME, AT, BT, Q8, ACC, BIAS_EXPR)                        \
+  GEMM_KERNEL_T(NAME, AT, BT, Q8, ACC, false, BIAS_EXPR)
+#define GEMM_KERNEL_T(NAME, AT, BT, Q8, ACC, BF16, BIAS_EXPR)                \
   kernel void NAME(KSIG, uint2 tg [[threadgroup_position_in_grid]],           \
                    uint tid [[thread_index_in_threadgroup]],                  \
                    uint sgid [[simdgroup_index_in_threadgroup]]) {            \
     threadgroup float smem[4096];                                             \
-    gemm_tile<AT, BT, Q8, ACC>(RF(0), (device const void*)(RBASE(1) + p.off[1]), \
+    gemm_tile<AT, BT, Q8, ACC, BF16>(RF(0), (device const void*)(RBASE(1) + p.off[1]), \
                                WF(2), BIAS_EXPR, p.m, p.n, p.k, p.f[0],       \
                                p.flags & 7u, smem, tg, tid, sgid);            \
   }
@@ -182,6 +190,8 @@ GEMM_KERNEL(k_gemm_tn, true, false, false, false, (device const float*)0)
 GEMM_KERNEL(k_gemm_acc, false, false, false, true, (device const float*)0)
 GEMM_KERNEL(k_gemm_nn_q8, false, false, true, false, (device const float*)0)
 GEMM_KERNEL(k_gemm_nt_q8, false, true, true, false, (device const float*)0)
+GEMM_KERNEL_T(k_gemm_nn_bf16, false, false, false, false, true, ((p.flags & 8u) ? RF(3) : (device const float*)0))
+GEMM_KERNEL_T(k_gemm_nt_bf16, false, true, false, false, true, (device const float*)0)
 
 // --- Elementwise (one thread per element; p.n = count) ---------------------
 kernel void k_add_ew(KSIG, uint g [[thread_position_in_grid]]) {

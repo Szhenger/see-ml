@@ -163,6 +163,8 @@ uint64_t GemmFlopsPerStep(const std::vector<uint8_t>& plan) {
       case up::OpCode::kGemmAccNN:
       case up::OpCode::kGemmNNQ8:
       case up::OpCode::kGemmNTQ8:
+      case up::OpCode::kGemmNNBF16:
+      case up::OpCode::kGemmNTBF16:
         flops += 2 * ins[i].out[0] * ins[i].out[1] * ins[i].out[2];
         break;
       default:

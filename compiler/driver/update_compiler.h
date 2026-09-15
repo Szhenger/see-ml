@@ -61,8 +61,10 @@ struct AdapterDebugInfo {
   int64_t k = 0, m = 0, r = 0;
   float scale = 1.0f;
   // Per-tensor int8 scale when the frozen weight was quantized into rodata;
-  // 0 when the weight is stored as f32.
+  // 0 when the weight is stored as f32 or bf16.
   float quant_scale = 0.0f;
+  // The frozen weight is stored as bfloat16 rodata (roadmap 2c).
+  bool bf16 = false;
 };
 
 struct CompiledUpdate {

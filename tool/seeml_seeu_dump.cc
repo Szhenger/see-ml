@@ -42,6 +42,8 @@ const char* OpName(uint16_t opcode) {
     case OpCode::kMseFwd:         return "mse.fwd";
     case OpCode::kMseBwd:         return "mse.bwd";
     case OpCode::kAccumulate:     return "accumulate";
+    case OpCode::kGemmNNBF16:     return "gemm.nn.bf16";
+    case OpCode::kGemmNTBF16:     return "gemm.nt.bf16";
     case OpCode::kKLDistillFwd:   return "kl_distill.fwd";
     case OpCode::kKLDistillBwd:   return "kl_distill.bwd";
     case OpCode::kSgdStep:        return "sgd.step";

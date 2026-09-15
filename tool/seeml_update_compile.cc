@@ -17,6 +17,9 @@
 //       [--warmup 0]                   warmup steps (cosine schedule)
 //       [--min-lr-factor 0]            cosine floor as a fraction of --lr
 //       [--quantize-base]              int8-quantize frozen weights in rodata
+//       [--bf16-base]                  store frozen weights as bfloat16 rodata
+//                                      (2x smaller, f32 compute; exclusive with
+//                                      --quantize-base)
 //       [--steps 1000]                 default optimizer-step count baked into the plan
 //       [--grad-accum 1]               micro-batches accumulated per optimizer step
 //                                      (activations scale with --data-batch, the
@@ -72,7 +75,8 @@ void PrintUsage() {
                "  [--targets substr,...] [--optimizer adamw|sgd] [--lr LR]\n"
                "  [--weight-decay WD] [--clip-norm C]\n"
                "  [--lr-schedule const|cosine] [--warmup N]\n"
-               "  [--min-lr-factor F] [--quantize-base] [--steps N]\n"
+               "  [--min-lr-factor F] [--quantize-base | --bf16-base]\n"
+               "  [--steps N]\n"
                "  [--grad-accum G]\n"
                "  [--no-fuse-epilogue] [--report out.json]\n"
                "  [--no-embed] [--build] [--version]\n");
@@ -315,6 +319,10 @@ int main(int argc, char** argv) {
       return Fail("--min-lr-factor must be in [0, 1], got '" + *v + "'");
   }
   config.quantize_base = args.Take("--quantize-base");
+  config.bf16_base = args.Take("--bf16-base");
+  if (config.quantize_base && config.bf16_base)
+    return Fail("--quantize-base and --bf16-base are mutually exclusive "
+                "(one storage precision per weight)");
   config.fuse_epilogues = !args.Take("--no-fuse-epilogue");
 
   const auto teacher_path = args.TakeValue("--teacher");
@@ -407,6 +415,7 @@ int main(int argc, char** argv) {
                  "  \"grad_accum_steps\": %u,\n"
                  "  \"effective_batch\": %" PRIu64 ",\n"
                  "  \"quantized_base\": %s,\n"
+                 "  \"bf16_base\": %s,\n"
                  "  \"embedded_tu\": %s,\n"
                  "  \"adapters\": [",
                  JsonEscape(paths->plan_file).c_str(), compiled->arena_size,
@@ -417,15 +426,16 @@ int main(int argc, char** argv) {
                  compiled->step_instruction_count, compiled->grad_accum_steps,
                  static_cast<uint64_t>(config.batch) * compiled->grad_accum_steps,
                  config.quantize_base ? "true" : "false",
+                 config.bf16_base ? "true" : "false",
                  embedded_tu_json.c_str());
     for (size_t i = 0; i < compiled->adapters.size(); ++i) {
       const auto& a = compiled->adapters[i];
       std::fprintf(f,
                    "%s\n    {\"weight\": \"%s\", \"k\": %" PRId64
                    ", \"m\": %" PRId64 ", \"rank\": %" PRId64
-                   ", \"scale\": %g, \"quant_scale\": %g}",
+                   ", \"scale\": %g, \"quant_scale\": %g, \"bf16\": %s}",
                    i ? "," : "", JsonEscape(a.weight_name).c_str(), a.k, a.m,
-                   a.r, a.scale, a.quant_scale);
+                   a.r, a.scale, a.quant_scale, a.bf16 ? "true" : "false");
     }
     std::fprintf(f, "\n  ]\n}\n");
     // ferror catches any failed fprintf above; fclose catches the final

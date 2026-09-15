@@ -145,6 +145,12 @@ std::vector<Family> Families() {
     c.optimizer.clip_norm = 0.5f;
     add("mlp_xent_grad_accum_2", UpdateCompiler(c).Compile(m), ClassData);
   }
+  {  // bf16 frozen weights: the widening GEMM pair with a fused epilogue
+    SmfModel m = MakeMlp(16, 32, 4, 40);
+    UpdateConfig c = BaseConfig(16);
+    c.bf16_base = true;
+    add("mlp_xent_bf16_base", UpdateCompiler(c).Compile(m), ClassData);
+  }
   {  // same model, SGD, quantized base: the q8 GEMM pair
     SmfModel m = MakeMlp(16, 32, 4, 32);
     UpdateConfig c = BaseConfig(16);

@@ -5,6 +5,7 @@
 // =============================================================================
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -124,6 +125,57 @@ TEST(Gemm, Q8ActEpilogueMatchesUnfusedSequence) {
   k::GemmNNQ8(a.data(), bq.data(), got.data(), M, N, K, scale,
               EpilogueAct::kRelu);
   for (size_t i = 0; i < M * N; ++i) EXPECT_EQ(got[i], want[i]);
+}
+
+TEST(Gemm, Bf16VariantsAreBitwiseTheF32GemmsOverTheWidenedMatrix) {
+  using seeml::update::Bf16BitsToFloat32;
+  using seeml::update::EpilogueAct;
+  using seeml::update::Float32ToBf16Bits;
+  const size_t M = 37, N = 259, K = 21;  // ragged, tile-crossing
+  const std::vector<float> a = RandnVector(M * K, 71);
+  const std::vector<float> b = RandnVector(K * N, 72);
+  const std::vector<float> bt = RandnVector(N * K, 73);
+  const std::vector<float> bias = RandnVector(N, 74);
+  std::vector<uint16_t> bh(b.size()), bth(bt.size());
+  std::vector<float> bw(b.size()), btw(bt.size());  // the widened matrices
+  for (size_t i = 0; i < b.size(); ++i) {
+    bh[i] = Float32ToBf16Bits(b[i]);
+    bw[i] = Bf16BitsToFloat32(bh[i]);
+    EXPECT_NEAR(bw[i], b[i], 4e-3 * std::fabs(b[i]) + 1e-38);  // 8-bit mantissa
+  }
+  for (size_t i = 0; i < bt.size(); ++i) {
+    bth[i] = Float32ToBf16Bits(bt[i]);
+    btw[i] = Bf16BitsToFloat32(bth[i]);
+  }
+  std::vector<float> want(M * N), got(M * N);
+  k::GemmNN(a.data(), bw.data(), want.data(), M, N, K, bias.data(),
+            EpilogueAct::kGelu);
+  k::GemmNNBF16(a.data(), bh.data(), got.data(), M, N, K, bias.data(),
+                EpilogueAct::kGelu);
+  for (size_t i = 0; i < M * N; ++i) EXPECT_EQ(got[i], want[i]);
+  k::GemmNT(a.data(), btw.data(), want.data(), M, N, K);
+  k::GemmNTBF16(a.data(), bth.data(), got.data(), M, N, K);
+  for (size_t i = 0; i < M * N; ++i) EXPECT_EQ(got[i], want[i]);
+  // Round-to-nearest-even and NaN quieting, spot-checked.
+  EXPECT_EQ(Float32ToBf16Bits(1.0f), 0x3F80u);
+  EXPECT_EQ(Bf16BitsToFloat32(Float32ToBf16Bits(1.00390625f)), 1.0f);  // tie -> even
+  EXPECT_EQ(Bf16BitsToFloat32(Float32ToBf16Bits(1.01171875f)), 1.015625f);
+  EXPECT_TRUE(std::isnan(Bf16BitsToFloat32(Float32ToBf16Bits(
+      std::numeric_limits<float>::quiet_NaN()))));
+  // Infinities stay infinite; the largest finite f32 rounds up to +inf
+  // (the standard overflow of round-to-nearest-even narrowing), never NaN.
+  EXPECT_EQ(Float32ToBf16Bits(std::numeric_limits<float>::infinity()), 0x7F80u);
+  EXPECT_EQ(Float32ToBf16Bits(-std::numeric_limits<float>::infinity()), 0xFF80u);
+  EXPECT_EQ(Float32ToBf16Bits(std::numeric_limits<float>::max()), 0x7F80u);
+  EXPECT_EQ(Float32ToBf16Bits(-0.0f), 0x8000u);
+  // Negative values round by magnitude (sign-magnitude representation).
+  EXPECT_EQ(Bf16BitsToFloat32(Float32ToBf16Bits(-1.01171875f)), -1.015625f);
+  EXPECT_EQ(Bf16BitsToFloat32(Float32ToBf16Bits(-1.00390625f)), -1.0f);
+  // A subnormal whose rounding carries into the exponent: just below the
+  // smallest normal rounds up to it.
+  const float below_min = std::bit_cast<float>(0x007FFFFFu);
+  EXPECT_EQ(Float32ToBf16Bits(below_min), 0x0080u);
+  EXPECT_EQ(Bf16BitsToFloat32(0x0080u), std::numeric_limits<float>::min());
 }
 
 TEST(Gemm, AccNNAccumulatesScaledProduct) {

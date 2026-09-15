@@ -64,6 +64,26 @@ TEST(Reviewer, SelectsMatmulOnlyWeightsAtMaxAbsScale) {
   EXPECT_NEAR(scales.at(w), 3.0f / 127.0f, 1e-7);
 }
 
+TEST(Reviewer, Bf16SelectsEveryMatmulOnlyWeightWithoutAScale) {
+  sir::Block block;
+  GraphBuild build;
+  sir::Value* x = block.addArgument(sir::DataType::F32, sir::Shape{4, 2});
+  SmfTensor t1, t2;
+  sir::Value* w1 =
+      AddWeight(block, build, t1, "w1", {2, 2}, {1.0f, -3.0f, 2.0f, 0.5f});
+  // A subnormal-range tensor is refused by the int8 review but is fine for
+  // bf16: it keeps f32's exponent.
+  sir::Value* w2 = AddWeight(block, build, t2, "w2", {2, 2},
+                             {1e-40f, -1e-40f, 0.0f, 1e-41f});
+  sir::Value* y = AddMatmul(block, "y", x, w1);
+  AddMatmul(block, "z", y, w2);
+  const auto sel = SelectBf16Weights(block, build);
+  EXPECT_EQ(sel.size(), 2u);
+  EXPECT_TRUE(sel.contains(w1));
+  EXPECT_TRUE(sel.contains(w2));
+  EXPECT_FALSE(SelectQuantizedWeights(block, build).contains(w2));
+}
+
 TEST(Reviewer, SkipsSubnormalRangeTensors) {
   // A subnormal max_abs yields a denormal (or underflowed-to-zero) scale:
   // the pack's rounding and the runtime's dequant multiply both degenerate,

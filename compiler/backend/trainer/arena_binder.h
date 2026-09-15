@@ -70,10 +70,13 @@ uint64_t LinearScanTransients(
 
 /// Binds the training block: persistent params, IO slots, rodata packing
 /// (quantizing weights in `quant_scales`), then the transient scan.
+/// `bf16_weights`: frozen weights packed as bfloat16 rodata (half of f32,
+/// round-to-nearest-even; roadmap 2c), disjoint from `quant_scales`.
 [[nodiscard]] std::expected<ArenaBinding, std::string> BindArena(
     seeml::sir::Block& train_block, const GraphBuild& build,
     const std::unordered_set<const seeml::sir::Value*>& pinned,
-    const std::unordered_map<const seeml::sir::Value*, float>& quant_scales);
+    const std::unordered_map<const seeml::sir::Value*, float>& quant_scales,
+    const std::unordered_set<const seeml::sir::Value*>& bf16_weights = {});
 
 }  // namespace seeml::update
 

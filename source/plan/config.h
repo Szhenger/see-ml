@@ -70,6 +70,12 @@ struct UpdateConfig {
   // symmetric int8 in the plan's rodata (QLoRA-style). Adapters, gradients,
   // and all activations stay f32; the source .smf on disk is untouched.
   bool quantize_base = false;
+  // Store frozen base/teacher weights that feed MatMuls as bfloat16 in the
+  // plan's rodata (roadmap 2c): half of f32, f32's exponent range, 8 bits
+  // of mantissa, widened exactly inside the GEMM — compute stays f32 and
+  // the committed model is patched from the pristine f32 file. Mutually
+  // exclusive with quantize_base (one storage precision per weight).
+  bool bf16_base = false;
   // Fuse GEMM -> AddBias -> activation chains into flagged GEMM epilogues
   // wherever the SIR use-lists prove no other reader of the intermediates
   // (teacher subgraphs, unadapted layers). Bitwise-neutral by construction;

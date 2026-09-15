@@ -109,6 +109,13 @@ enum class OpCode : uint16_t {
   // and steps on the accumulator and zeroes it (kFill). One operand is
   // read and written through one pointer — not an alias.
   kAccumulate = 42,  // in: dst, src; out[0] = count
+  // --- bf16 frozen weights (plan v10, roadmap 2c). ---------------------------
+  // B is bfloat16 in rodata (2 bytes per element, exact widening to f32 on
+  // the way into the tile); compute stays f32. Layouts mirror the f32
+  // GEMMs; kGemmNNBF16 takes the same fused epilogue as kGemmNN (its in[3]
+  // is free for the bias ref), kGemmNTBF16 none.
+  kGemmNNBF16 = 43,  // C = A @ widen(B);    in: A, Bbf16, C[, bias]; out=M,N,K
+  kGemmNTBF16 = 44,  // C = A @ widen(B)^T;  in: A, Bbf16, C;         out=M,N,K
 };
 
 // --- Instruction flags (plan v5): fused GEMM epilogues. ----------------------
@@ -119,10 +126,10 @@ enum class OpCode : uint16_t {
 // identical to the unfused kGemmNN + kAddBias + k<Act>Fwd sequence, so
 // fusion changes memory traffic, never bits.
 //
-// Validity: kGemmNN takes bias and/or activation (a fused bias ref rides the
-// otherwise-free in[3]); kGemmNNQ8 takes activation only — its in[3] already
-// carries the dequant scale, so a bias has nowhere to ride. Every other
-// opcode requires flags == 0.
+// Validity: kGemmNN and kGemmNNBF16 take bias and/or activation (a fused
+// bias ref rides the otherwise-free in[3]); kGemmNNQ8 takes activation only
+// — its in[3] already carries the dequant scale, so a bias has nowhere to
+// ride. Every other opcode requires flags == 0.
 inline constexpr uint16_t kFlagEpilogueBias = 1u << 0;  // in[3] = bias ref [N]
 inline constexpr uint16_t kFlagEpilogueActShift = 1;    // bits 1..2: EpilogueAct
 inline constexpr uint16_t kFlagEpilogueActMask = 3u << kFlagEpilogueActShift;

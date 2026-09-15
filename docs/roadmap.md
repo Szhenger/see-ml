@@ -149,6 +149,19 @@ the instruction stream just gets longer. Verify: gradients bitwise-equal
 with remat on/off (recomputed expressions are identical per element);
 arena high-water strictly smaller on the fixture MLPs.
 
+> **Status: Phase 2c SHIPPED for frozen weights (2026-09-15, #71).**
+> `--bf16-base`: the reviewer selects every matmul-only frozen weight, the
+> packer rounds it to nearest-even bf16 (round-on-store), and two widening
+> GEMM opcodes (plan v10) put the bits back exactly on the way into the
+> tile on both backends; compute is f32, the fused epilogue still applies,
+> and the committed model is patched from the pristine f32 file. Verified:
+> the bf16 GEMMs are bit-for-bit the f32 GEMMs over the widened matrix; the
+> finite-difference suite passes through bf16 weights; a 60-step f32 vs
+> bf16 run tracks within 1 % (the drift budget); the Metal backend runs the
+> pair. Not done, deliberately: bf16 *activations* — the "optionally" of
+> the scope — which would touch type propagation and round-on-store in
+> every kernel for a bandwidth win the kernels cannot yet cash in.
+
 **Phase 2c — bf16 storage precision (L, last).** SIR already declares
 `BF16`; nothing uses it. Scope narrowly: bf16 **storage** for frozen rodata
 and (optionally) activations, f32 **compute** with round-on-store — no loss

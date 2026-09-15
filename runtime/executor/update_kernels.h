@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "source/plan/bf16.h"         // Bf16: the widening B element type
 #include "source/plan/instruction.h"  // EpilogueAct: the fused-epilogue ABI
 
 // =============================================================================
@@ -54,6 +55,17 @@ void GemmNNQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
                                             // C = A[M,K] @ (scale*B)[K,N]
 void GemmNTQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
               size_t K, float scale);       // C = A[M,K] @ (scale*B)[N,K]^T
+
+// --- bf16 GEMM (plan v10): B is bfloat16 rodata, widened exactly to f32 on
+// the way into the tile; compute is f32. GemmNNBF16 takes the full fused
+// epilogue like GemmNN (its in[3] is free for the bias).
+void GemmNNBF16(const float* A, const uint16_t* B, float* C, size_t M,
+                size_t N, size_t K, const float* bias = nullptr,
+                seeml::update::EpilogueAct act =
+                    seeml::update::EpilogueAct::kNone);
+                                            // C = A[M,K] @ widen(B)[K,N]
+void GemmNTBF16(const float* A, const uint16_t* B, float* C, size_t M,
+                size_t N, size_t K);        // C = A[M,K] @ widen(B)[N,K]^T
 
 // --- Elementwise / broadcast -------------------------------------------------
 void AddEW(const float* x, const float* y, float* out, size_t n);

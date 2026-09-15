@@ -220,6 +220,8 @@ Eligibility is strict: *every* user of the tensor must be a matmul, with the ten
 
 The max-abs sweep itself is a parallel chunked reduction, grain 65,536 elements per chunk, per-chunk maxima combined in fixed chunk order — the same determinism discipline as everything else (see [runtime.md](runtime.md)), and the same chunk geometry the backend's packer will use when it actually converts the bytes.
 
+**bf16 storage** (`--bf16-base`, roadmap 2c) is the same review with a gentler rounding: every eligible weight — the same "only ever a matmul weight" rule, with no range condition since bfloat16 keeps float32's exponent — is packed as its f32 bits rounded to nearest-even at 16 bits (8 bits of mantissa, 2× smaller), and two widening GEMM opcodes (`kGemmNNBF16`, `kGemmNTBF16`, plan v10) put the bits back in the high half of an f32 on the way into the tile. Widening is exact, so the bf16 GEMMs are bit-for-bit the f32 GEMMs over the rounded matrix, and the f32 forward GEMM's fused epilogue still applies (its `in[3]` is free). Compute stays f32 throughout; the two storages are mutually exclusive per compile (one precision per weight). Choose int8 for 4× at the cost of outlier sensitivity, bf16 for 2× at a uniform 2⁻⁹ relative rounding.
+
 One more thing, and it's the punchline of the whole quantization story: the emit table maps each **delta** onto the *original file's f32 bytes*. Commit computes `W′ = W + Δ` from the pristine weights — so quantization error affects training dynamics (slightly), but is **never baked into the committed model**. The artifact you ship is the exact model you started with, plus exactly what was learned.
 
 ## The backend: from program to plan
@@ -260,7 +262,7 @@ The merge program is bound into the *same* arena, with one twist: its deltas are
 u16 opcode | u16 flags | u32 pad | u64 in[4] | u64 out[3]
 ```
 
-The instruction set has 43 opcodes — six GEMM variants (`NN`, `NT`, `TN`, accumulating `NN`, and two int8-dequantizing forms), elementwise ops, the activation forward/backward pairs, LayerNorm, the three loss families, the two optimizer steps, clip, fill, copy. The complete enumeration lives in `source/plan/instruction.h`, and [formats.md](formats.md) walks the encoding.
+The instruction set has 45 opcodes — eight GEMM variants (`NN`, `NT`, `TN`, accumulating `NN`, two int8-dequantizing forms and two bf16-widening forms), elementwise ops, the activation forward/backward pairs, LayerNorm, the three loss families, the two optimizer steps, clip, fill, copy. The complete enumeration lives in `source/plan/instruction.h`, and [formats.md](formats.md) walks the encoding.
 
 The addressing scheme is worth savoring for its economy. A tensor reference is a single 64-bit word: **bit 63 selects the address space** (0 = mutable arena, 1 = read-only rodata), bits 0–62 are a byte offset. That's the entire memory model — two flat spaces and an offset. No pointers, no relocation, and, on the device, one branchless test tells the validator which bounds to check. Scalars ride along bit-cast into spare operand slots (a GEMM's α, clip's max-norm, fill's value), and dimensions pack into the `out[]` words (a GEMM carries M, N, K; LayerNorm packs rows and columns into one word as `(N << 32) | D`).
 
