@@ -6,8 +6,12 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 
+#include <algorithm>
 #include <bit>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <map>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -71,34 +75,89 @@ struct KArgs {
   uint32_t step = 0;
   uint32_t pad0 = 0, pad1 = 0;
   float f[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  // GEMM family: leading dimensions, batch geometry, per-operand batch
+  // strides (elements; [2i] per outer batch, [2i+1] per inner) for A, B, C.
+  uint32_t lda = 0, ldb = 0, ldc = 0;
+  uint32_t batch = 1, batch_h = 1;
+  uint32_t pad2 = 0, pad3 = 0, pad4 = 0;
+  uint64_t bs[6] = {0, 0, 0, 0, 0, 0};
 };
-static_assert(sizeof(KArgs) == 136, "KArgs must match the MSL layout");
+static_assert(sizeof(KArgs) == 216, "KArgs must match the MSL layout");
 
 enum Pipe : int {
   kPGemmNN, kPGemmNT, kPGemmTN, kPGemmAcc, kPGemmNNQ8, kPGemmNTQ8,
   kPGemmNNBF16, kPGemmNTBF16,
+  // The skinny-shape variants, each in the same order (pipe + offset):
+  // _small (K <= 16: one thread per output), _rows (N <= 16: one simdgroup
+  // per row), _cols (M <= 16, wide N: one thread per column), _colsg
+  // (M <= 16, narrower N: one simdgroup per column).
+  kPGemmNNSmall, kPGemmNTSmall, kPGemmTNSmall, kPGemmAccSmall,
+  kPGemmNNQ8Small, kPGemmNTQ8Small, kPGemmNNBF16Small, kPGemmNTBF16Small,
+  kPGemmNNRows, kPGemmNTRows, kPGemmTNRows, kPGemmAccRows,
+  kPGemmNNQ8Rows, kPGemmNTQ8Rows, kPGemmNNBF16Rows, kPGemmNTBF16Rows,
+  kPGemmNNCols, kPGemmNTCols, kPGemmTNCols, kPGemmAccCols,
+  kPGemmNNQ8Cols, kPGemmNTQ8Cols, kPGemmNNBF16Cols, kPGemmNTBF16Cols,
+  kPGemmNNColsG, kPGemmNTColsG, kPGemmTNColsG, kPGemmAccColsG,
+  kPGemmNNQ8ColsG, kPGemmNTQ8ColsG, kPGemmNNBF16ColsG, kPGemmNTBF16ColsG,
+  kPGemmSplitKFin,
   kPAddEW, kPMulEW, kPAddBias, kPReluFwd, kPReluBwd, kPGeluFwd, kPGeluBwd,
   kPSiluFwd, kPSiluBwd, kPScale, kPFill, kPCopy, kPAccumulate, kPSgd, kPAdamW,
   kPReduceRows, kPLnFwd, kPLnBwd, kPRmsFwd, kPRmsBwd,
   kPClipPartials, kPClipFinish, kPClipApply,
-  kPRopeFwd, kPRopeBwd, kPAttnFwd, kPAttnDP, kPAttnDV, kPSoftmaxRowsBwd,
-  kPAttnDQ, kPAttnDK,
+  kPRopeFwd, kPRopeBwd, kPAttnSoftmax, kPSoftmaxRowsBwd,
   kPipeCount
 };
 const char* const kPipeNames[kPipeCount] = {
     "k_gemm_nn", "k_gemm_nt", "k_gemm_tn", "k_gemm_acc", "k_gemm_nn_q8",
-    "k_gemm_nt_q8", "k_gemm_nn_bf16", "k_gemm_nt_bf16", "k_add_ew", "k_mul_ew", "k_add_bias", "k_relu_fwd",
+    "k_gemm_nt_q8", "k_gemm_nn_bf16", "k_gemm_nt_bf16",
+    "k_gemm_nn_small", "k_gemm_nt_small", "k_gemm_tn_small",
+    "k_gemm_acc_small", "k_gemm_nn_q8_small", "k_gemm_nt_q8_small",
+    "k_gemm_nn_bf16_small", "k_gemm_nt_bf16_small",
+    "k_gemm_nn_rows", "k_gemm_nt_rows", "k_gemm_tn_rows", "k_gemm_acc_rows",
+    "k_gemm_nn_q8_rows", "k_gemm_nt_q8_rows", "k_gemm_nn_bf16_rows",
+    "k_gemm_nt_bf16_rows",
+    "k_gemm_nn_cols", "k_gemm_nt_cols", "k_gemm_tn_cols", "k_gemm_acc_cols",
+    "k_gemm_nn_q8_cols", "k_gemm_nt_q8_cols", "k_gemm_nn_bf16_cols",
+    "k_gemm_nt_bf16_cols",
+    "k_gemm_nn_colsg", "k_gemm_nt_colsg", "k_gemm_tn_colsg",
+    "k_gemm_acc_colsg", "k_gemm_nn_q8_colsg", "k_gemm_nt_q8_colsg",
+    "k_gemm_nn_bf16_colsg", "k_gemm_nt_bf16_colsg",
+    "k_gemm_splitk_fin", "k_add_ew", "k_mul_ew", "k_add_bias", "k_relu_fwd",
     "k_relu_bwd", "k_gelu_fwd", "k_gelu_bwd", "k_silu_fwd", "k_silu_bwd",
     "k_scale", "k_fill", "k_copy", "k_accumulate", "k_sgd", "k_adamw",
     "k_reduce_rows",
     "k_layernorm_fwd", "k_layernorm_bwd", "k_rmsnorm_fwd", "k_rmsnorm_bwd",
     "k_clip_partials", "k_clip_finish", "k_clip_apply", "k_rope_fwd",
-    "k_rope_bwd", "k_attn_fwd", "k_attn_dp", "k_attn_dv",
-    "k_softmax_rows_bwd", "k_attn_dq", "k_attn_dk"};
+    "k_rope_bwd", "k_attn_softmax", "k_softmax_rows_bwd"};
 
 constexpr uint32_t kElementwiseGroup = 256;
 constexpr uint32_t kGemmTile = 64;
 constexpr uint32_t kGemmThreads = 128;  // 4 simdgroups of 32
+constexpr int kGemmSmall = kPGemmNNSmall - kPGemmNN;
+constexpr int kGemmRows = kPGemmNNRows - kPGemmNN;
+constexpr int kGemmCols = kPGemmNNCols - kPGemmNN;
+constexpr int kGemmColsG = kPGemmNNColsG - kPGemmNN;
+// M <= 16: below this N a simdgroup per column (lanes striding K) beats a
+// thread per column; above it the per-thread form's coalesced B reads win.
+constexpr uint32_t kGemmColsPerThreadN = 4096;
+// A GEMM with any dimension at or below this takes a skinny kernel rather
+// than 64x64 tiles: an adapter's rank-8 factors, a K=8 product.
+constexpr uint32_t kGemmSkinnyDim = 16;
+// Split-K: a tiled GEMM with fewer output tiles than this splits K across
+// threadgroup z (partials summed in a fixed order) so ten GPU cores stay
+// fed; splits never exceed kGemmMaxSplits nor leave a split below
+// kGemmMinSplitK.
+constexpr uint32_t kGemmTargetTiles = 256;
+constexpr uint32_t kGemmMaxSplits = 16;
+constexpr uint32_t kGemmMinSplitK = 512;
+
+uint32_t SplitsFor(uint32_t tiles, uint32_t k) {
+  uint32_t splits = (kGemmTargetTiles + tiles - 1) / tiles;
+  splits = std::max(splits, k / 4096);  // a very long K splits regardless
+  splits = std::min(splits, kGemmMaxSplits);
+  splits = std::min(splits, std::max(1u, k / kGemmMinSplitK));
+  return std::max(splits, 1u);
+}
 constexpr size_t kScratchFloats = up::kMaxParallelChunks + 1;
 
 std::string NsError(NSError* err, const char* what) {
@@ -149,7 +208,10 @@ class MetalBackend final : public ExecutorBackend {
  public:
   static std::expected<std::unique_ptr<ExecutorBackend>, std::string> Create();
 
-  ~MetalBackend() override { (void)Flush(); }
+  ~MetalBackend() override {
+    (void)Flush();
+    if (profile_) PrintProfile();
+  }
 
   const char* name() const override { return "metal"; }
   std::string device() const override {
@@ -174,14 +236,22 @@ class MetalBackend final : public ExecutorBackend {
   std::expected<void, std::string> EnsureEncoder();
   void Dispatch(Pipe pipe, const KArgs& a, uint32_t threads_x, uint32_t group,
                 bool scratch = false);
-  void DispatchGemm(Pipe pipe, const KArgs& a);
+  void DispatchGemm(Pipe pipe, KArgs a, bool at, bool bt, uint32_t b_elem);
+  void EncodeAttentionGemm(Pipe pipe, bool at, bool bt, uint64_t a_ref,
+                           uint64_t b_ref, uint64_t c_ref, uint32_t B,
+                           uint32_t S, uint32_t H, uint32_t d,
+                           uint32_t a_kind, uint32_t b_kind, uint32_t c_kind,
+                           uint32_t m, uint32_t n, uint32_t k, float alpha);
   std::expected<void, std::string> Encode(const up::UpdateInstruction& ins,
                                           const StepParams& params);
+  void PrintProfile() const;
 
   id<MTLDevice> device_ = nil;
   id<MTLCommandQueue> queue_ = nil;
   id<MTLComputePipelineState> pipes_[kPipeCount];
   id<MTLBuffer> scratch_ = nil;
+  id<MTLBuffer> splitk_ws_ = nil;  // split-K partials, grown on demand
+  uint64_t splitk_ws_bytes_ = 0;
   id<MTLBuffer> arena_buf_ = nil;
   id<MTLBuffer> rodata_buf_ = nil;
   bool rodata_zero_copy_ = false;
@@ -197,6 +267,22 @@ class MetalBackend final : public ExecutorBackend {
   // reuses one UpdateInstruction object with different operands (the
   // hand-built test pattern) must never see stale extents.
   std::unordered_map<std::string, InstructionExtents> extents_;
+  // SEEML_METAL_PROFILE=1: one command buffer per GPU instruction, its
+  // GPU time (GPUStartTime..GPUEndTime) accumulated per kernel and shape,
+  // CPU-resident instructions by wall clock; a table on stderr at
+  // destruction. Diagnostic only — it serializes the stream.
+  const bool profile_ = std::getenv("SEEML_METAL_PROFILE") != nullptr &&
+                        *std::getenv("SEEML_METAL_PROFILE") != '\0' &&
+                        *std::getenv("SEEML_METAL_PROFILE") != '0';
+  struct ProfRow { double seconds = 0; uint64_t count = 0; };
+  std::map<std::string, ProfRow> prof_;
+  std::string prof_pipes_;  // every kernel the current instruction dispatched
+  double last_gpu_seconds_ = 0;
+  void NoteDispatch(Pipe pipe) {
+    if (!profile_) return;
+    if (!prof_pipes_.empty()) prof_pipes_ += '+';
+    prof_pipes_ += kPipeNames[pipe];
+  }
 };
 
 // Dimensions AND the element indices built from them ride 32-bit in the
@@ -461,25 +547,93 @@ std::expected<void, std::string> MetalBackend::EnsureEncoder() {
   [enc_ setBuffer:arena_buf_ offset:0 atIndex:0];
   [enc_ setBuffer:(rodata_buf_ ? rodata_buf_ : arena_buf_) offset:0 atIndex:1];
   [enc_ setBuffer:scratch_ offset:0 atIndex:3];
+  // Every tiled GEMM kernel declares the split-K workspace at index 4 and
+  // reads it only when it splits; the binding must still exist (an unbound
+  // argument is a contract violation the debug layer aborts on), so the
+  // scratch buffer stands in until a workspace is allocated.
+  [enc_ setBuffer:(splitk_ws_ ? splitk_ws_ : scratch_) offset:0 atIndex:4];
   return {};
 }
 
 void MetalBackend::Dispatch(Pipe pipe, const KArgs& a, uint32_t threads_x,
                             uint32_t group, bool) {
+  NoteDispatch(pipe);
   [enc_ setComputePipelineState:pipes_[pipe]];
   [enc_ setBytes:&a length:sizeof(a) atIndex:2];
-  const uint32_t groups = (threads_x + group - 1) / group;
+  // 64-bit: DimsFit32 admits counts up to 2^32 - 1, and the round-up must
+  // not wrap to a near-empty grid.
+  const uint64_t groups = (uint64_t{threads_x} + group - 1) / group;
   [enc_ dispatchThreadgroups:MTLSizeMake(groups, 1, 1)
        threadsPerThreadgroup:MTLSizeMake(group, 1, 1)];
 }
 
-void MetalBackend::DispatchGemm(Pipe pipe, const KArgs& a) {
-  [enc_ setComputePipelineState:pipes_[pipe]];
-  [enc_ setBytes:&a length:sizeof(a) atIndex:2];
+// `at`/`bt`: operand stored transposed; `b_elem`: B's element size. A
+// caller that leaves lda/ldb/ldc zero gets the dense strides. Sets the
+// vector-load flag bits (16: A, 32: B) when the operand's byte offset and
+// leading dimension keep every 4-element vector 4*elem-aligned, picks a
+// skinny kernel for skinny shapes, and splits K for an unbatched GEMM
+// with too few tiles.
+void MetalBackend::DispatchGemm(Pipe pipe, KArgs a, bool at, bool bt,
+                                uint32_t b_elem) {
+  if (a.lda == 0) a.lda = at ? a.m : a.k;
+  if (a.ldb == 0) a.ldb = bt ? a.k : a.n;
+  if (a.ldc == 0) a.ldc = a.n;
+  if (a.off[0] % 16 == 0 && a.lda % 4 == 0 && a.bs[0] % 4 == 0 &&
+      a.bs[1] % 4 == 0)
+    a.flags |= 16u;
+  if (a.off[1] % (4 * b_elem) == 0 && a.ldb % 4 == 0 && a.bs[2] % 4 == 0 &&
+      a.bs[3] % 4 == 0)
+    a.flags |= 32u;
+  if (a.k <= kGemmSkinnyDim) {
+    Dispatch(static_cast<Pipe>(pipe + kGemmSmall), a, a.batch * a.m * a.n,
+             kElementwiseGroup);
+    return;
+  }
+  if (a.n <= kGemmSkinnyDim) {
+    Dispatch(static_cast<Pipe>(pipe + kGemmRows), a, a.batch * a.m * 32u,
+             kElementwiseGroup);
+    return;
+  }
+  if (a.m <= kGemmSkinnyDim) {
+    if (a.n >= kGemmColsPerThreadN)
+      Dispatch(static_cast<Pipe>(pipe + kGemmCols), a, a.batch * a.n,
+               kElementwiseGroup);
+    else
+      Dispatch(static_cast<Pipe>(pipe + kGemmColsG), a, a.batch * a.n * 32u,
+               kElementwiseGroup);
+    return;
+  }
   const uint32_t gx = (a.n + kGemmTile - 1) / kGemmTile;
   const uint32_t gy = (a.m + kGemmTile - 1) / kGemmTile;
-  [enc_ dispatchThreadgroups:MTLSizeMake(gx, gy, 1)
+  const uint32_t splits = a.batch > 1 ? 1 : SplitsFor(gx * gy, a.k);
+  a.pad0 = splits;
+  if (splits > 1) {
+    const uint64_t need = uint64_t{splits} * a.m * a.n * sizeof(float);
+    if (need > splitk_ws_bytes_) {
+      // Grow geometrically; an encoder that still references the old
+      // buffer keeps it alive until its command buffer completes.
+      const uint64_t bytes = std::max(need, std::max<uint64_t>(
+                                                splitk_ws_bytes_ * 2, 1 << 20));
+      splitk_ws_ = [device_ newBufferWithLength:bytes
+                                        options:MTLResourceStorageModePrivate];
+      splitk_ws_bytes_ = splitk_ws_ ? bytes : 0;
+      if (!splitk_ws_) {
+        // No workspace: run unsplit (slower, never wrong).
+        a.pad0 = 1;
+      }
+    }
+    if (a.pad0 > 1) [enc_ setBuffer:splitk_ws_ offset:0 atIndex:4];
+  }
+  NoteDispatch(pipe);
+  [enc_ setComputePipelineState:pipes_[pipe]];
+  [enc_ setBytes:&a length:sizeof(a) atIndex:2];
+  [enc_ dispatchThreadgroups:MTLSizeMake(gx, gy, a.pad0 > 1 ? a.pad0 : a.batch)
        threadsPerThreadgroup:MTLSizeMake(kGemmThreads, 1, 1)];
+  if (a.pad0 > 1) {
+    // The finish kernel: flags bit 6 selects the accumulate form.
+    if (pipe == kPGemmAcc) a.flags |= 64u;
+    Dispatch(kPGemmSplitKFin, a, a.m * a.n, kElementwiseGroup);
+  }
 }
 
 std::expected<void, std::string> MetalBackend::Encode(
@@ -502,20 +656,23 @@ std::expected<void, std::string> MetalBackend::Encode(
       // flags: bit 3 = bias present, low bits = EpilogueAct (1..3)
       a.flags = static_cast<uint32_t>(up::EpilogueActOf(ins.flags)) |
                 ((ins.flags & up::kFlagEpilogueBias) ? 8u : 0u);
-      DispatchGemm(kPGemmNN, a);
+      DispatchGemm(kPGemmNN, a, false, false, 4);
       return {};
     case up::OpCode::kGemmNT:
     case up::OpCode::kGemmTN:
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]);
       a.m = u32(ins.out[0]); a.n = u32(ins.out[1]); a.k = u32(ins.out[2]);
       a.f[0] = 1.0f;
-      DispatchGemm(op == up::OpCode::kGemmNT ? kPGemmNT : kPGemmTN, a);
+      if (op == up::OpCode::kGemmNT)
+        DispatchGemm(kPGemmNT, a, false, true, 4);
+      else
+        DispatchGemm(kPGemmTN, a, true, false, 4);
       return {};
     case up::OpCode::kGemmAccNN:
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]);
       a.m = u32(ins.out[0]); a.n = u32(ins.out[1]); a.k = u32(ins.out[2]);
       a.f[0] = BitsToF32(ins.in[3]);
-      DispatchGemm(kPGemmAcc, a);
+      DispatchGemm(kPGemmAcc, a, false, false, 4);
       return {};
     case up::OpCode::kGemmNNBF16:
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]);
@@ -524,13 +681,13 @@ std::expected<void, std::string> MetalBackend::Encode(
       a.f[0] = 1.0f;
       a.flags = static_cast<uint32_t>(up::EpilogueActOf(ins.flags)) |
                 ((ins.flags & up::kFlagEpilogueBias) ? 8u : 0u);
-      DispatchGemm(kPGemmNNBF16, a);
+      DispatchGemm(kPGemmNNBF16, a, false, false, 2);
       return {};
     case up::OpCode::kGemmNTBF16:
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]);
       a.m = u32(ins.out[0]); a.n = u32(ins.out[1]); a.k = u32(ins.out[2]);
       a.f[0] = 1.0f;
-      DispatchGemm(kPGemmNTBF16, a);
+      DispatchGemm(kPGemmNTBF16, a, false, true, 2);
       return {};
     case up::OpCode::kGemmNNQ8:
     case up::OpCode::kGemmNTQ8:
@@ -538,7 +695,10 @@ std::expected<void, std::string> MetalBackend::Encode(
       a.m = u32(ins.out[0]); a.n = u32(ins.out[1]); a.k = u32(ins.out[2]);
       a.f[0] = BitsToF32(ins.in[3]);  // dequant scale
       a.flags = static_cast<uint32_t>(up::EpilogueActOf(ins.flags));
-      DispatchGemm(op == up::OpCode::kGemmNNQ8 ? kPGemmNNQ8 : kPGemmNTQ8, a);
+      if (op == up::OpCode::kGemmNNQ8)
+        DispatchGemm(kPGemmNNQ8, a, false, false, 1);
+      else
+        DispatchGemm(kPGemmNTQ8, a, false, true, 1);
       return {};
     case up::OpCode::kAddEW:
     case up::OpCode::kMulEW:
@@ -621,24 +781,24 @@ std::expected<void, std::string> MetalBackend::Encode(
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]); ref(3, ins.in[3]);
       ref(4, ins.out[1]); ref(5, ins.out[2]);
       a.rows = hi(ins.out[0]); a.cols = lo(ins.out[0]);
-      Dispatch(kPLnFwd, a, a.rows, kElementwiseGroup);
+      Dispatch(kPLnFwd, a, a.rows * 32u, kElementwiseGroup);
       return {};
     case up::OpCode::kLayerNormBwd:
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]); ref(3, ins.in[3]);
       ref(4, ins.out[0]); ref(5, ins.out[1]);
       a.rows = hi(ins.out[2]); a.cols = lo(ins.out[2]);
-      Dispatch(kPLnBwd, a, a.rows, kElementwiseGroup);
+      Dispatch(kPLnBwd, a, a.rows * 32u, kElementwiseGroup);
       return {};
     case up::OpCode::kRmsNormFwd:
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]); ref(3, ins.in[3]);
       a.rows = hi(ins.out[0]); a.cols = lo(ins.out[0]);
-      Dispatch(kPRmsFwd, a, a.rows, kElementwiseGroup);
+      Dispatch(kPRmsFwd, a, a.rows * 32u, kElementwiseGroup);
       return {};
     case up::OpCode::kRmsNormBwd:
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]); ref(3, ins.in[3]);
       ref(4, ins.out[0]);
       a.rows = hi(ins.out[1]); a.cols = lo(ins.out[1]);
-      Dispatch(kPRmsBwd, a, a.rows, kElementwiseGroup);
+      Dispatch(kPRmsBwd, a, a.rows * 32u, kElementwiseGroup);
       return {};
     case up::OpCode::kClipNorm: {
       ref(0, ins.in[0]);
@@ -666,35 +826,96 @@ std::expected<void, std::string> MetalBackend::Encode(
                a.B * a.S * a.H, kElementwiseGroup);
       return {};
     }
-    case up::OpCode::kAttnFwd:
-      ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]); ref(3, ins.in[3]);
-      ref(4, ins.out[0]);
-      a.B = hi(ins.out[1]); a.S = lo(ins.out[1]);
-      a.H = hi(ins.out[2]); a.D = lo(ins.out[2]);
-      Dispatch(kPAttnFwd, a, a.B * a.H * a.S, kElementwiseGroup);
+    // The attention family (docs/runtime.md): each primitive is one or
+    // more batched GEMMs over the [B*S, H*d] activations plus a row
+    // softmax kernel — the same tile machinery as the projections.
+    // Operand kinds: 0 = activation [B*S, H*d] (per-batch S*D, per-head
+    // d), 1 = probability matrix [B*H*S, S] (per-batch H*S*S, per-head
+    // S*S).
+    case up::OpCode::kAttnFwd: {
+      const uint32_t B = hi(ins.out[1]), S = lo(ins.out[1]);
+      const uint32_t H = hi(ins.out[2]), d = lo(ins.out[2]);
+      const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
+      // scores = (Q K^T) / sqrt(d) into the P cache, then a causal softmax
+      // in place, then O = P V.
+      EncodeAttentionGemm(kPGemmNT, false, true, ins.in[0], ins.in[1],
+                          ins.out[0], B, S, H, d, 0, 0, 1, S, S, d,
+                          inv_sqrt_d);
+      ref(0, ins.out[0]);
+      a.rows = B * H * S; a.cols = S;
+      Dispatch(kPAttnSoftmax, a, a.rows * 32u, kElementwiseGroup);
+      EncodeAttentionGemm(kPGemmNN, false, false, ins.out[0], ins.in[2],
+                          ins.in[3], B, S, H, d, 1, 0, 0, S, d, S, 1.0f);
       return {};
-    case up::OpCode::kAttnDP:
-    case up::OpCode::kAttnDV:
-    case up::OpCode::kAttnDQ:
-    case up::OpCode::kAttnDK:
-      ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]);
-      a.B = hi(ins.out[0]); a.S = lo(ins.out[0]);
-      a.H = hi(ins.out[1]); a.D = lo(ins.out[1]);
-      Dispatch(op == up::OpCode::kAttnDP   ? kPAttnDP
-               : op == up::OpCode::kAttnDV ? kPAttnDV
-               : op == up::OpCode::kAttnDQ ? kPAttnDQ
-                                           : kPAttnDK,
-               a, a.B * a.H * a.S, kElementwiseGroup);
+    }
+    case up::OpCode::kAttnDP: {  // dP = dO V^T
+      const uint32_t B = hi(ins.out[0]), S = lo(ins.out[0]);
+      const uint32_t H = hi(ins.out[1]), d = lo(ins.out[1]);
+      EncodeAttentionGemm(kPGemmNT, false, true, ins.in[0], ins.in[1],
+                          ins.in[2], B, S, H, d, 0, 0, 1, S, S, d, 1.0f);
       return {};
+    }
+    case up::OpCode::kAttnDV: {  // dV = P^T dO
+      const uint32_t B = hi(ins.out[0]), S = lo(ins.out[0]);
+      const uint32_t H = hi(ins.out[1]), d = lo(ins.out[1]);
+      EncodeAttentionGemm(kPGemmTN, true, false, ins.in[0], ins.in[1],
+                          ins.in[2], B, S, H, d, 1, 0, 0, S, d, S, 1.0f);
+      return {};
+    }
+    case up::OpCode::kAttnDQ: {  // dQ = (dS K) / sqrt(d)
+      const uint32_t B = hi(ins.out[0]), S = lo(ins.out[0]);
+      const uint32_t H = hi(ins.out[1]), d = lo(ins.out[1]);
+      EncodeAttentionGemm(kPGemmNN, false, false, ins.in[0], ins.in[1],
+                          ins.in[2], B, S, H, d, 1, 0, 0, S, d, S,
+                          1.0f / std::sqrt(static_cast<float>(d)));
+      return {};
+    }
+    case up::OpCode::kAttnDK: {  // dK = (dS^T Q) / sqrt(d)
+      const uint32_t B = hi(ins.out[0]), S = lo(ins.out[0]);
+      const uint32_t H = hi(ins.out[1]), d = lo(ins.out[1]);
+      EncodeAttentionGemm(kPGemmTN, true, false, ins.in[0], ins.in[1],
+                          ins.in[2], B, S, H, d, 1, 0, 0, S, d, S,
+                          1.0f / std::sqrt(static_cast<float>(d)));
+      return {};
+    }
     case up::OpCode::kSoftmaxRowsBwd:
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]);
       a.rows = hi(ins.out[0]); a.cols = lo(ins.out[0]);
-      Dispatch(kPSoftmaxRowsBwd, a, a.rows, kElementwiseGroup);
+      Dispatch(kPSoftmaxRowsBwd, a, a.rows * 32u, kElementwiseGroup);
       return {};
     default:
       return std::unexpected("opcode " + std::to_string(ins.opcode) +
                              " has no GPU kernel");
   }
+}
+
+void MetalBackend::EncodeAttentionGemm(
+    Pipe pipe, bool at, bool bt, uint64_t a_ref, uint64_t b_ref,
+    uint64_t c_ref, uint32_t B, uint32_t S, uint32_t H, uint32_t d,
+    uint32_t a_kind, uint32_t b_kind, uint32_t c_kind, uint32_t m,
+    uint32_t n, uint32_t k, float alpha) {
+  KArgs a;
+  const uint64_t D = uint64_t{H} * d;
+  auto set = [&](int slot, uint64_t r, uint32_t kind, uint32_t& ld) {
+    a.off[slot] = up::RefOffset(r);
+    if (up::IsRodataRef(r)) a.space |= 1u << slot;
+    if (kind == 0) {
+      a.bs[2 * slot] = uint64_t{S} * D;
+      a.bs[2 * slot + 1] = d;
+      ld = static_cast<uint32_t>(D);
+    } else {
+      a.bs[2 * slot] = uint64_t{H} * S * S;
+      a.bs[2 * slot + 1] = uint64_t{S} * S;
+      ld = S;
+    }
+  };
+  set(0, a_ref, a_kind, a.lda);
+  set(1, b_ref, b_kind, a.ldb);
+  set(2, c_ref, c_kind, a.ldc);
+  a.m = m; a.n = n; a.k = k;
+  a.batch = B * H; a.batch_h = H;
+  a.f[0] = alpha;
+  DispatchGemm(pipe, a, at, bt, 4);
 }
 
 std::expected<void, std::string> MetalBackend::Execute(
@@ -710,11 +931,32 @@ std::expected<void, std::string> MetalBackend::Execute(
       // CPU-resident: wait for any pending GPU work it depends on.
       if (ex && HazardWithPending(*ex))
         if (auto r = Flush(); !r) return r;
-      return cpu_->Execute(ins, params);
+      if (!profile_) return cpu_->Execute(ins, params);
+      const auto t0 = std::chrono::steady_clock::now();
+      auto r = cpu_->Execute(ins, params);
+      ProfRow& row = prof_["cpu opcode " + std::to_string(ins.opcode)];
+      row.seconds += std::chrono::duration<double>(
+                         std::chrono::steady_clock::now() - t0)
+                         .count();
+      row.count++;
+      return r;
     }
     if (auto r = EnsureEncoder(); !r) return r;
+    prof_pipes_.clear();
     if (auto r = Encode(ins, params); !r) return r;
     RecordPending(*ex);
+    if (profile_) {
+      if (auto r = Flush(); !r) return r;
+      auto dim = [](uint64_t v) {
+        return v >> 32 ? std::to_string(v >> 32) + "/" +
+                             std::to_string(v & 0xFFFFFFFFu)
+                       : std::to_string(v);
+      };
+      ProfRow& row = prof_[prof_pipes_ + " " + dim(ins.out[0]) + "x" +
+                           dim(ins.out[1]) + "x" + dim(ins.out[2])];
+      row.seconds += last_gpu_seconds_;
+      row.count++;
+    }
     return {};
   }
 }
@@ -727,6 +969,7 @@ std::expected<void, std::string> MetalBackend::Flush() {
     [cmd_ waitUntilCompleted];
     const MTLCommandBufferStatus status = cmd_.status;
     NSError* err = cmd_.error;
+    if (profile_) last_gpu_seconds_ = cmd_.GPUEndTime - cmd_.GPUStartTime;
     enc_ = nil;
     cmd_ = nil;
     pending_reads_.clear();
@@ -737,6 +980,24 @@ std::expected<void, std::string> MetalBackend::Flush() {
       return std::unexpected(NsError(err, "GPU command buffer did not complete"));
     return {};
   }
+}
+
+void MetalBackend::PrintProfile() const {
+  std::vector<std::pair<std::string, ProfRow>> rows(prof_.begin(), prof_.end());
+  std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+    return a.second.seconds > b.second.seconds;
+  });
+  double total = 0;
+  for (const auto& r : rows) total += r.second.seconds;
+  std::fprintf(stderr, "metal profile: %.3f s over %zu keys\n", total,
+               rows.size());
+  for (const auto& r : rows)
+    std::fprintf(stderr, "  %8.3f s  %5.1f%%  %7llu x %8.1f us  %s\n",
+                 r.second.seconds,
+                 total > 0 ? 100.0 * r.second.seconds / total : 0.0,
+                 (unsigned long long)r.second.count,
+                 1e6 * r.second.seconds / (double)r.second.count,
+                 r.first.c_str());
 }
 
 }  // namespace

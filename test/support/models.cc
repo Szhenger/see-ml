@@ -318,11 +318,12 @@ SmfModel MakeDecoderStack(int64_t dim, int64_t heads, int64_t seq,
   return m;
 }
 
-SmfModel MakeTinyTokenDecoder(int64_t vocab, int64_t dim, int64_t heads,
-                              int64_t seq, int64_t ffn, uint64_t seed) {
-  // The decoder block of MakeTinyDecoder, fed by an embedding gather over
-  // a rank-1 dynamic i32 input instead of pre-embedded rows.
-  SmfModel m = MakeTinyDecoder(dim, heads, seq, ffn, vocab, seed);
+namespace {
+
+// Turns a feature-input decoder into a token-native one: x becomes a
+// rank-1 i32 id vector, an Embedding[vocab, dim] gather feeds every op
+// that read x as features.
+SmfModel Tokenize(SmfModel m, int64_t vocab, int64_t dim, uint64_t seed) {
   m.tensors[0].dims = {-1};  // x: token ids, one per row
   std::mt19937_64 rng(seed ^ 0x9E3779B97F4A7C15ULL);
   std::normal_distribution<float> dist(0.0f, 0.5f);
@@ -341,6 +342,23 @@ SmfModel MakeTinyTokenDecoder(int64_t vocab, int64_t dim, int64_t heads,
     for (auto& in : m.ops[i].inputs)
       if (in == "x") in = "e";
   return m;
+}
+
+}  // namespace
+
+SmfModel MakeTinyTokenDecoder(int64_t vocab, int64_t dim, int64_t heads,
+                              int64_t seq, int64_t ffn, uint64_t seed) {
+  // The decoder block of MakeTinyDecoder, fed by an embedding gather over
+  // a rank-1 dynamic i32 input instead of pre-embedded rows.
+  return Tokenize(MakeTinyDecoder(dim, heads, seq, ffn, vocab, seed), vocab,
+                  dim, seed);
+}
+
+SmfModel MakeTokenDecoderStack(int64_t vocab, int64_t dim, int64_t heads,
+                               int64_t seq, int64_t ffn, int64_t blocks,
+                               uint64_t seed) {
+  return Tokenize(MakeDecoderStack(dim, heads, seq, ffn, vocab, blocks, seed),
+                  vocab, dim, seed);
 }
 
 UpdateConfig BaseConfig(int64_t batch) {

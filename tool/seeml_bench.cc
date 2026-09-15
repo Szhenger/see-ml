@@ -114,6 +114,11 @@ struct Fixture {
   int64_t seq;  // rows per sequence (1 for feature plans)
   up::SmfModel (*model)();
   std::expected<rt::Dataset, std::string> (*data)();
+  bool quantize_base = false;  // int8 frozen weights (the field-run config)
+  // Frontier-shaped fixtures run only when named by --fixtures: at model
+  // scale a CPU sweep takes the better part of an hour, so the default set
+  // (and the nightly gate's keys) stay the small shapes.
+  bool frontier = false;
 };
 
 const Fixture kFixtures[] = {
@@ -135,6 +140,14 @@ const Fixture kFixtures[] = {
     {"tok_v64_d64_s16", "token", 128, 16,
      [] { return tf::MakeTinyTokenDecoder(64, 64, 4, 16, 256, 111); },
      [] { return tf::MakeTokenCorpus(1024, 16, 64, 112); }},
+    // SmolLM-135M's geometry (vocab 49152, D=576, 9 heads, ffn 1536, 30
+    // blocks), q8 base, 512 tokens per step: the frontier row of
+    // docs/benchmarks.md. Seeded synthetic weights and corpus, so the
+    // per-step cost is the model's; the loss is not a quality number.
+    {"tok_smollm135m_q8", "token", 512, 128,
+     [] { return tf::MakeTokenDecoderStack(49152, 576, 9, 128, 1536, 30, 113); },
+     [] { return tf::MakeTokenCorpus(64, 128, 49152, 114); },
+     /*quantize_base=*/true, /*frontier=*/true},
 };
 
 /// Sums 2·M·N·K over every GEMM-family instruction in the plan's training
@@ -320,7 +333,8 @@ int main(int argc, char** argv) {
 
   std::vector<const Fixture*> selected;
   if (fixtures_csv->empty()) {
-    for (const Fixture& f : kFixtures) selected.push_back(&f);
+    for (const Fixture& f : kFixtures)
+      if (!f.frontier) selected.push_back(&f);
   } else {
     auto names = SplitCsv("--fixtures", *fixtures_csv);
     if (!names) return Fail(names.error());
@@ -372,6 +386,7 @@ int main(int argc, char** argv) {
     up::UpdateConfig config = tf::BaseConfig(f->batch_rows);
     config.lora.rank = 8;
     config.lora.alpha = 16.0f;
+    config.quantize_base = f->quantize_base;
 
     const auto t_compile = Clock::now();
     auto compiled = up::UpdateCompiler(config).Compile(model);

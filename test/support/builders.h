@@ -71,6 +71,14 @@ update::SmfModel MakeDecoderStack(int64_t dim, int64_t heads, int64_t seq,
                                   int64_t ffn, int64_t vocab, int64_t blocks,
                                   uint64_t seed);
 
+/// MakeDecoderStack fed by an embedding gather over a rank-1 dynamic i32
+/// input (SMF v4): the frontier-shaped token fixtures (SmolLM-135M's
+/// geometry is vocab 49152, dim 576, 9 heads, ffn 1536, 30 blocks).
+update::SmfModel MakeTokenDecoderStack(int64_t vocab, int64_t dim,
+                                       int64_t heads, int64_t seq,
+                                       int64_t ffn, int64_t blocks,
+                                       uint64_t seed);
+
 /// A one-block token-native decoder (SMF v4): rank-1 dynamic i32 input →
 /// Embedding[vocab, dim] → the pre-norm attention/SwiGLU block of
 /// MakeTinyDecoder → logits over `vocab`. m.seq_len = seq.

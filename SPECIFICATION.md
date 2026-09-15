@@ -303,10 +303,19 @@ decodes, validates and sequences the plan; the backend executes it.
   (`DescribeInstruction`) — dependency tracking is never looser than the
   bounds proof. A command buffer that ends in any state but Completed is an
   executor diagnostic, never a silent fallback.
-- **Coverage.** `simdgroup_matrix` 64×64 GEMM tiles (NN/NT/TN/accumulate)
-  with fused bias+activation epilogues and the int8 variants; the transformer
-  family; elementwise, LayerNorm/RMSNorm, ReduceRows, ClipNorm (the CPU's
-  chunk geometry, partials combined in chunk order), SGD and AdamW.
+- **Coverage.** The GEMM family (NN/NT/TN/accumulate, the int8 and bf16
+  variants, fused bias+activation epilogues) runs as `simdgroup_matrix`
+  64×64 tiles — register-prefetched 4-vector loads, K split across
+  threadgroups when a shape has too few tiles (partials summed in a fixed
+  order) — or, for skinny shapes (an adapter's rank-8 factors, a K=8
+  product), as one of three register-blocked forms with fixed shuffle-tree
+  reductions. Every GEMM kernel is strided and batched, and the attention
+  family is expressed through it: `Q Kᵀ`, `P V`, `dO Vᵀ`, `Pᵀ dO`, `dS K`,
+  `dSᵀ Q` are batched GEMMs over the `[B·S, H·d]` activations plus a causal
+  row-softmax pair. Elementwise, RoPE, LayerNorm/RMSNorm (one simdgroup
+  per row), ReduceRows, ClipNorm (the CPU's chunk geometry, partials
+  combined in chunk order), SGD and AdamW complete the library; the loss
+  families and the embedding gather stay on the CPU.
 - **Determinism is per-backend.** A backend is bitwise-reproducible against
   itself (tested run-to-run); CPU and GPU compare at tolerance (tested on
   every program family the compiler emits), and the backend is recorded in

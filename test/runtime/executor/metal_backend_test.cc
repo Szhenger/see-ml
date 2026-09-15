@@ -10,10 +10,12 @@
 // passes vacuously with a note.
 // =============================================================================
 
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -323,6 +325,219 @@ TEST(MetalBackend, CpuInstructionsWaitForThePendingGpuWorkTheyTouch) {
   EXPECT_NEAR(*reinterpret_cast<const float*>(arena + 3072), want_loss / 32.0,
               1e-5);
   std::free(arena);
+}
+
+// --- Kernel-level twins: one instruction stream on both backends --------------
+// The GEMM family and the attention family have shape-dependent kernel
+// selection on the GPU (64x64 simdgroup tiles with split-K, the three
+// skinny forms, the batched strided form the attention primitives use),
+// so each selection path is driven against the CPU reference on the
+// SAME arena bytes and compared at tolerance.
+
+struct Twin {
+  std::vector<float> cpu, gpu;
+};
+
+// Runs `program` on the CPU and on Metal over identical arena/rodata
+// contents (arena floats, rodata bytes); returns both final arenas.
+std::expected<Twin, std::string> RunTwin(
+    const std::vector<UpdateInstruction>& program,
+    const std::vector<float>& arena_init, const std::vector<uint8_t>& rodata) {
+  Twin twin;
+  for (int which = 0; which < 2; ++which) {
+    auto backend = which == 0 ? std::expected<std::unique_ptr<ExecutorBackend>,
+                                              std::string>(CreateCpuBackend())
+                              : CreateMetalBackend();
+    if (!backend) return std::unexpected(backend.error());
+    const size_t bytes = (arena_init.size() * sizeof(float) + 16383) & ~size_t{16383};
+    uint8_t* arena = static_cast<uint8_t*>(std::aligned_alloc(16384, bytes));
+    if (!arena) return std::unexpected("aligned_alloc failed");
+    std::memset(arena, 0, bytes);
+    std::memcpy(arena, arena_init.data(), arena_init.size() * sizeof(float));
+    if (auto r = (*backend)->Bind(arena, bytes, rodata.data(), rodata.size(),
+                                  rodata.size());
+        !r) {
+      std::free(arena);
+      return std::unexpected(r.error());
+    }
+    StepParams params;
+    for (const auto& ins : program)
+      if (auto r = (*backend)->Execute(ins, params); !r) {
+        std::free(arena);
+        return std::unexpected(r.error());
+      }
+    if (auto r = (*backend)->Flush(); !r) {
+      std::free(arena);
+      return std::unexpected(r.error());
+    }
+    std::vector<float>& out = which == 0 ? twin.cpu : twin.gpu;
+    out.resize(arena_init.size());
+    std::memcpy(out.data(), arena, arena_init.size() * sizeof(float));
+    backend->reset();  // unbind before the arena goes away
+    std::free(arena);
+  }
+  return twin;
+}
+
+void ExpectRangeClose(const char* what, const Twin& t, size_t first,
+                      size_t count, double rel, double abs_floor) {
+  std::vector<float> g(t.gpu.begin() + first, t.gpu.begin() + first + count);
+  std::vector<float> c(t.cpu.begin() + first, t.cpu.begin() + first + count);
+  ExpectClose(what, g, c, rel, abs_floor);
+}
+
+uint64_t F32Bits(float v) { return uint64_t{std::bit_cast<uint32_t>(v)}; }
+
+TEST(MetalBackend, GemmShapesMatchCpuOnEveryKernelPath) {
+  if (Skip()) return;
+  struct Shape {
+    uint32_t m, n, k;
+    const char* path;
+  };
+  // Each shape selects a different GPU kernel: the tiled kernel on a
+  // ragged edge, its split-K form (few tiles, long K), the K<=16 per-
+  // element form, the N<=16 simdgroup-per-row form, the M<=16 simdgroup-
+  // per-column form and its wide-N per-thread form.
+  const Shape shapes[] = {
+      {64, 64, 64, "tiled, exact tiles"},
+      {100, 70, 50, "tiled, ragged"},
+      {129, 65, 33, "tiled, ragged + odd K"},
+      {200, 300, 4100, "tiled, split-K"},
+      {512, 576, 8, "K<=16 per element"},
+      {512, 8, 576, "N<=16 simdgroup rows"},
+      {8, 576, 512, "M<=16 simdgroup columns"},
+      {8, 4200, 64, "M<=16 per-thread columns"},
+      {33, 17, 20, "tiled, tiny ragged"},
+  };
+  enum Kind { kF32, kQ8, kBF16 };
+  struct Variant {
+    OpCode op;
+    Kind kind;
+    bool at, bt, acc;
+    uint16_t flags;
+    const char* name;
+  };
+  const Variant variants[] = {
+      {OpCode::kGemmNN, kF32, false, false, false, 0, "nn"},
+      {OpCode::kGemmNN, kF32, false, false, false,
+       static_cast<uint16_t>(kFlagEpilogueBias |
+                             (static_cast<uint16_t>(EpilogueAct::kSilu)
+                              << kFlagEpilogueActShift)),
+       "nn+bias+silu"},
+      {OpCode::kGemmNT, kF32, false, true, false, 0, "nt"},
+      {OpCode::kGemmTN, kF32, true, false, false, 0, "tn"},
+      {OpCode::kGemmAccNN, kF32, false, false, true, 0, "acc"},
+      {OpCode::kGemmNNQ8, kQ8, false, false, false, 0, "nn.q8"},
+      {OpCode::kGemmNTQ8, kQ8, false, true, false, 0, "nt.q8"},
+      {OpCode::kGemmNNBF16, kBF16, false, false, false,
+       static_cast<uint16_t>(kFlagEpilogueBias), "nn.bf16+bias"},
+      {OpCode::kGemmNTBF16, kBF16, false, true, false, 0, "nt.bf16"},
+  };
+  std::mt19937_64 rng(2026);
+  std::uniform_real_distribution<float> unit(-1.0f, 1.0f);
+  for (const Shape& sh : shapes) {
+    for (const Variant& v : variants) {
+      // Twice per case: operands at 16-byte-aligned offsets (the vector
+      // load path) and at 4-byte offsets (the scalar path).
+      for (uint32_t skew : {0u, 4u}) {
+        const size_t a_elems = size_t{sh.m} * sh.k, b_elems = size_t{sh.k} * sh.n;
+        const size_t c_elems = size_t{sh.m} * sh.n;
+        const uint64_t a_off = skew, c_off = 64 * ((a_off + a_elems * 4 + 63) / 64);
+        const uint64_t bias_off = 64 * ((c_off + c_elems * 4 + 63) / 64);
+        const size_t arena_floats = (bias_off + sh.n * 4 + 64) / 4;
+        std::vector<float> arena(arena_floats);
+        for (auto& x : arena) x = unit(rng);  // C starts non-zero (Acc)
+        const size_t elem = v.kind == kQ8 ? 1 : v.kind == kBF16 ? 2 : 4;
+        std::vector<uint8_t> rodata(skew + b_elems * elem);
+        for (size_t i = 0; i < b_elems; ++i) {
+          const float x = unit(rng);
+          uint8_t* dst = rodata.data() + skew + i * elem;
+          if (v.kind == kF32) std::memcpy(dst, &x, 4);
+          else if (v.kind == kQ8) dst[0] = static_cast<uint8_t>(static_cast<int8_t>(x * 100.0f));
+          else { const uint16_t b = static_cast<uint16_t>(std::bit_cast<uint32_t>(x) >> 16); std::memcpy(dst, &b, 2); }
+        }
+        UpdateInstruction ins;
+        ins.opcode = static_cast<uint16_t>(v.op);
+        ins.flags = v.flags;
+        ins.in[0] = MakeArenaRef(a_off);
+        ins.in[1] = MakeRodataRef(skew);
+        ins.in[2] = MakeArenaRef(c_off);
+        if (v.flags & kFlagEpilogueBias) ins.in[3] = MakeArenaRef(bias_off);
+        else if (v.kind == kQ8) ins.in[3] = F32Bits(0.01f);
+        else if (v.acc) ins.in[3] = F32Bits(0.5f);
+        ins.out[0] = sh.m; ins.out[1] = sh.n; ins.out[2] = sh.k;
+        auto twin = RunTwin({ins}, arena, rodata);
+        ASSERT_OK(twin);
+        const std::string what = std::string(v.name) + " " + sh.path + " " +
+                                 std::to_string(sh.m) + "x" + std::to_string(sh.n) +
+                                 "x" + std::to_string(sh.k) +
+                                 (skew ? " (scalar path)" : " (vector path)");
+        // f32 sums of up to 4100 unit products in different orders.
+        ExpectRangeClose(what.c_str(), *twin, c_off / 4, c_elems, 2e-4, 2e-4);
+      }
+    }
+  }
+}
+
+TEST(MetalBackend, AttentionMatchesCpuAtModelShape) {
+  if (Skip()) return;
+  // SmolLM-135M's geometry: 9 heads of 64 over S = 128, two sequences —
+  // the shapes where the GPU runs each primitive as batched strided GEMMs
+  // (Q K^T, P V, dO V^T, P^T dO, dS K, dS^T Q) plus the row softmax pair.
+  const uint32_t B = 2, S = 128, H = 9, d = 64, D = H * d;
+  const size_t act = size_t{B} * S * D, pm = size_t{B} * H * S * S;
+  // Slots (floats): q, k, v, o, dout, dv, dq, dk (act each); probs, dp, ds.
+  size_t off = 0;
+  auto slot = [&](size_t n) { const size_t o = off; off += (n + 15) & ~size_t{15}; return o; };
+  const size_t q = slot(act), k = slot(act), v = slot(act), o = slot(act);
+  const size_t dout = slot(act), dv = slot(act), dq = slot(act), dk = slot(act);
+  const size_t probs = slot(pm), dp = slot(pm), ds = slot(pm);
+  std::vector<float> arena(off);
+  std::mt19937_64 rng(31);
+  std::normal_distribution<float> normal(0.0f, 1.0f);
+  for (size_t i = 0; i < 5 * ((act + 15) & ~size_t{15}); ++i) arena[i] = normal(rng);
+  auto ref = [](size_t floats) { return MakeArenaRef(floats * 4); };
+  const uint64_t bs = (uint64_t{B} << 32) | S, hd = (uint64_t{H} << 32) | d;
+  UpdateInstruction fwd, adp, adv, sbwd, adq, adk;
+  fwd.opcode = static_cast<uint16_t>(OpCode::kAttnFwd);
+  fwd.in[0] = ref(q); fwd.in[1] = ref(k); fwd.in[2] = ref(v); fwd.in[3] = ref(o);
+  fwd.out[0] = ref(probs); fwd.out[1] = bs; fwd.out[2] = hd;
+  adp.opcode = static_cast<uint16_t>(OpCode::kAttnDP);
+  adp.in[0] = ref(dout); adp.in[1] = ref(v); adp.in[2] = ref(dp);
+  adp.out[0] = bs; adp.out[1] = hd;
+  adv.opcode = static_cast<uint16_t>(OpCode::kAttnDV);
+  adv.in[0] = ref(probs); adv.in[1] = ref(dout); adv.in[2] = ref(dv);
+  adv.out[0] = bs; adv.out[1] = hd;
+  sbwd.opcode = static_cast<uint16_t>(OpCode::kSoftmaxRowsBwd);
+  sbwd.in[0] = ref(probs); sbwd.in[1] = ref(dp); sbwd.in[2] = ref(ds);
+  sbwd.out[0] = (uint64_t{B * H * S} << 32) | S;
+  adq.opcode = static_cast<uint16_t>(OpCode::kAttnDQ);
+  adq.in[0] = ref(ds); adq.in[1] = ref(k); adq.in[2] = ref(dq);
+  adq.out[0] = bs; adq.out[1] = hd;
+  adk.opcode = static_cast<uint16_t>(OpCode::kAttnDK);
+  adk.in[0] = ref(ds); adk.in[1] = ref(q); adk.in[2] = ref(dk);
+  adk.out[0] = bs; adk.out[1] = hd;
+  auto twin = RunTwin({fwd, adp, adv, sbwd, adq, adk}, arena, {});
+  ASSERT_OK(twin);
+  ExpectRangeClose("attention O", *twin, o, act, 1e-4, 1e-5);
+  ExpectRangeClose("attention P", *twin, probs, pm, 1e-4, 1e-6);
+  ExpectRangeClose("attention dV", *twin, dv, act, 1e-4, 1e-4);
+  ExpectRangeClose("attention dS", *twin, ds, pm, 1e-4, 1e-5);
+  ExpectRangeClose("attention dQ", *twin, dq, act, 1e-4, 1e-4);
+  ExpectRangeClose("attention dK", *twin, dk, act, 1e-4, 1e-4);
+  // dP: the CPU zeroes the masked half; the GPU's dO V^T GEMM fills it with
+  // finite values that P == 0 annihilates in dS (checked above). Compare
+  // the causal prefix only, and pin the GPU's masked entries finite.
+  for (size_t r = 0; r < size_t{B} * H * S; ++r) {
+    const size_t i = r % S;
+    std::vector<float> g(twin->gpu.begin() + dp + r * S, twin->gpu.begin() + dp + r * S + i + 1);
+    std::vector<float> c(twin->cpu.begin() + dp + r * S, twin->cpu.begin() + dp + r * S + i + 1);
+    ExpectClose("attention dP row", g, c, 1e-4, 1e-5);
+    for (size_t j = i + 1; j < S; ++j) EXPECT_TRUE(std::isfinite(twin->gpu[dp + r * S + j]));
+  }
+  // The causal mask itself: P above the diagonal is exactly zero.
+  for (size_t r = 0; r < size_t{B} * H * S; ++r)
+    for (size_t j = r % S + 1; j < S; ++j) EXPECT_EQ(twin->gpu[probs + r * S + j], 0.0f);
 }
 
 TEST(MetalBackend, ActivationsStayFiniteAtLargeMagnitude) {
