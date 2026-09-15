@@ -4,7 +4,6 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
-#include <utility>
 #include <vector>
 
 #include "compiler/backend/architecture/host_arch.h"
@@ -34,12 +33,16 @@ struct JsonValue {
   bool boolean = false;
   double number = 0.0;
   std::string text;
-  std::vector<JsonValue> items;                            // kArray
-  std::vector<std::pair<std::string, JsonValue>> members;  // kObject
+  std::vector<JsonValue> items;  // kArray
+  // kObject, as two parallel vectors: a std::vector of the enclosing
+  // (still incomplete) type is guaranteed by C++17, a std::pair of it is
+  // not — libstdc++ with clang rejects the pair, libc++ and GCC let it by.
+  std::vector<std::string> keys;
+  std::vector<JsonValue> members;
 
   const JsonValue* Member(std::string_view key) const {
-    for (const auto& [k, v] : members)
-      if (k == key) return &v;
+    for (size_t i = 0; i < keys.size(); ++i)
+      if (keys[i] == key) return &members[i];
     return nullptr;
   }
 };
@@ -126,9 +129,9 @@ class JsonReader {
       ++pos_;
       auto val = ReadValue(depth + 1);
       if (!val) return val;
-      for (const auto& [k, unused] : v.members)
-        if (k == *key) return Error("duplicate key \"" + *key + "\"");
-      v.members.emplace_back(std::move(*key), std::move(*val));
+      if (v.Member(*key)) return Error("duplicate key \"" + *key + "\"");
+      v.keys.push_back(std::move(*key));
+      v.members.push_back(std::move(*val));
       SkipSpace();
       if (pos_ >= text_.size()) return Error("unterminated object");
       if (text_[pos_] == ',') {
@@ -308,7 +311,9 @@ std::expected<KernelPolicyTable, std::string> ParseKernelPolicyTable(
     return PolicyError("table \"hosts\" must be an object keyed by host");
 
   KernelPolicyTable table;
-  for (const auto& [key, host] : hosts->members) {
+  for (size_t i = 0; i < hosts->keys.size(); ++i) {
+    const std::string& key = hosts->keys[i];
+    const JsonValue& host = hosts->members[i];
     if (host.kind != JsonValue::Kind::kObject)
       return PolicyError("host \"" + key + "\" must be an object");
     const JsonValue* cpu = host.Member("cpu");
