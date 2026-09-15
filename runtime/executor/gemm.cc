@@ -1,4 +1,5 @@
 #include <cstring>
+#include <type_traits>
 
 #include "runtime/executor/kernel_policy.h"
 #include "runtime/executor/update_kernels.h"
@@ -106,6 +107,21 @@ void BlockedNN(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
 // the tiling or the thread count, so every width computes identical bits.
 // The reduction order changed exactly once, here, by design — results
 // differ from the pre-#66 serial chain, as any kernel change does.
+//
+// For int8 and bf16 B, each eight-wide block is widened to f32 by its own
+// lane loop before the multiply-accumulate lane loop consumes it (#104).
+// That split is the difference between a vectorized kernel and a scalar
+// one: a static_cast inside the multiply-accumulate makes the vectorizer
+// give up on the whole loop and work the accumulators in memory (the int8
+// form ran 7x below the f32 form on every shape measured). Widening an
+// int8 or a bf16 to f32 is exact, so widening first and multiplying second
+// is the same arithmetic on the same values in the same lane order —
+// bit-identical to the unsplit loop. The widening loop is written inline
+// on purpose (through a helper taking the block by pointer, clang keeps
+// the widened block in memory), and the f32 instantiation keeps the
+// single-loop body it has always compiled: a no-op widening pass through
+// a local array costs it 3x on the same compiler, so the split exists only
+// where the element type needs it.
 inline constexpr size_t kNtLanes = 8;
 
 template <typename BType>
@@ -126,12 +142,29 @@ void BlockedNT(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
               acc3[kNtLanes] = {};
         size_t k = 0;
         for (; k + kNtLanes <= K; k += kNtLanes) {
-          for (size_t l = 0; l < kNtLanes; ++l) {
-            const float a = a_row[k + l];
-            acc0[l] += a * static_cast<float>(b0[k + l]);
-            acc1[l] += a * static_cast<float>(b1[k + l]);
-            acc2[l] += a * static_cast<float>(b2[k + l]);
-            acc3[l] += a * static_cast<float>(b3[k + l]);
+          if constexpr (std::is_same_v<BType, float>) {
+            for (size_t l = 0; l < kNtLanes; ++l) {
+              const float a = a_row[k + l];
+              acc0[l] += a * b0[k + l];
+              acc1[l] += a * b1[k + l];
+              acc2[l] += a * b2[k + l];
+              acc3[l] += a * b3[k + l];
+            }
+          } else {
+            float w0[kNtLanes], w1[kNtLanes], w2[kNtLanes], w3[kNtLanes];
+            for (size_t l = 0; l < kNtLanes; ++l) {
+              w0[l] = static_cast<float>(b0[k + l]);
+              w1[l] = static_cast<float>(b1[k + l]);
+              w2[l] = static_cast<float>(b2[k + l]);
+              w3[l] = static_cast<float>(b3[k + l]);
+            }
+            for (size_t l = 0; l < kNtLanes; ++l) {
+              const float a = a_row[k + l];
+              acc0[l] += a * w0[l];
+              acc1[l] += a * w1[l];
+              acc2[l] += a * w2[l];
+              acc3[l] += a * w3[l];
+            }
           }
         }
         for (; k < K; ++k) {  // tail: the same k -> lane rule
@@ -159,9 +192,17 @@ void BlockedNT(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
         const BType* SEEML_RESTRICT b_row = B + n * K;
         float acc[kNtLanes] = {};
         size_t k = 0;
-        for (; k + kNtLanes <= K; k += kNtLanes)
-          for (size_t l = 0; l < kNtLanes; ++l)
-            acc[l] += a_row[k + l] * static_cast<float>(b_row[k + l]);
+        for (; k + kNtLanes <= K; k += kNtLanes) {
+          if constexpr (std::is_same_v<BType, float>) {
+            for (size_t l = 0; l < kNtLanes; ++l)
+              acc[l] += a_row[k + l] * b_row[k + l];
+          } else {
+            float w[kNtLanes];
+            for (size_t l = 0; l < kNtLanes; ++l)
+              w[l] = static_cast<float>(b_row[k + l]);
+            for (size_t l = 0; l < kNtLanes; ++l) acc[l] += a_row[k + l] * w[l];
+          }
+        }
         for (; k < K; ++k)
           acc[k % kNtLanes] += a_row[k] * static_cast<float>(b_row[k]);
         float sum = acc[0];

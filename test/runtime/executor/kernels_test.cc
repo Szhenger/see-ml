@@ -554,6 +554,33 @@ TEST(ParallelDeterminism, GemmNtTailPathsAreThreadCountInvariant) {
     }
 }
 
+TEST(Gemm, Q8NtIsBitwiseTheF32NtOverTheWidenedMatrixTimesScale) {
+  // #104: GemmNTQ8 widens each eight-wide block of B before the lane loop
+  // (so the int8 form vectorizes like the f32 one). Widening is exact, the
+  // lane rule and combine order are shared, and the scale is one final
+  // multiply — so the q8 kernel must equal scale * GemmNT over the widened
+  // matrix bit for bit, at 1 and 8 threads. K = 21 runs the 8-lane loop and
+  // the tail; N = 259 runs the 4-column and 1-column paths across the
+  // kTileN boundary; M = 37 gives ragged row chunks.
+  const size_t M = 37, N = 259, K = 21;
+  const float scale = 0.0123f;
+  const std::vector<float> a = RandnVector(M * K, 75);
+  std::vector<int8_t> q8(N * K);
+  std::vector<float> widened(N * K);
+  for (size_t i = 0; i < q8.size(); ++i) {
+    q8[i] = static_cast<int8_t>((i * 97 + 13) % 255 - 127);
+    widened[i] = static_cast<float>(q8[i]);
+  }
+  for (const size_t threads : {size_t{1}, size_t{8}}) {
+    ScopedThreads scoped(threads);
+    std::vector<float> want(M * N), got(M * N);
+    k::GemmNT(a.data(), widened.data(), want.data(), M, N, K);
+    for (float& w : want) w = scale * w;
+    k::GemmNTQ8(a.data(), q8.data(), got.data(), M, N, K, scale);
+    EXPECT_EQ(std::memcmp(got.data(), want.data(), M * N * sizeof(float)), 0);
+  }
+}
+
 TEST(ParallelDeterminism, GemmFamilyIsThreadCountInvariant) {
   const size_t M = 64, N = 96, K = 48;
   const std::vector<float> a = RandnVector(M * K, 11);
