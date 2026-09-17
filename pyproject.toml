@@ -1,0 +1,57 @@
+# The Python plane: build-host tools only — nothing here ships on device, and
+# the default compile path (seeml-update-compile -> build.sh) needs no Python.
+#
+# Dependency tiers (P6, #86). A tool may import only what its tier declares;
+# CI runs the suites under a bare interpreter, NumPy alone, and the full
+# stack, so a stray import fails loudly in the tier it broke.
+#
+#   tier 0  standard library   tool/seeml/formats.py, pack_update.py,
+#                              bench_compare.py, autotune.py
+#   tier 1  + NumPy            export_model.py (--demo-decoder, --corpus,
+#                              --hf), frontier_exec.py, certify_numerics.py
+#   tier 2  + PyTorch / MLX    export_model.py (--demo, nn.Module export),
+#                              frontier_exec.py --backend torch|mlx
+[project]
+name = "seeml-tools"
+# Not a distribution: the release version lives in source/identity/version.h
+# and nowhere else. This table exists to declare the tiers and tool settings.
+version = "0"
+description = "Build-host tools for the SeeML on-device update compiler"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+numpy = ["numpy>=1.17"]
+torch = ["numpy>=1.17", "torch>=1.7"]
+mlx = ["numpy>=1.17", "mlx"]
+dev = ["ruff", "mypy"]
+
+[tool.setuptools]
+packages = ["seeml"]
+package-dir = { "" = "tool" }
+
+[tool.setuptools.package-data]
+seeml = ["abi.json"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+extend-exclude = ["build", "out"]
+
+[tool.ruff.lint]
+# Correctness rules over the whole tree: syntax errors, undefined and unused
+# names, import mistakes, comparison and redefinition bugs.
+select = ["E4", "E7", "E9", "F"]
+ignore = ["E731"]  # a named lambda is a style choice, not a defect
+
+[tool.ruff.lint.per-file-ignores]
+# Single-letter tensor extents (D, H, L, V) follow the papers they port.
+"tool/export_model.py" = ["E741"]
+"tool/frontier_exec.py" = ["E741"]
+
+[tool.mypy]
+# Strict over the shared package — the seam every tool imports. The scripts
+# predate annotations; they are linted by ruff and move under this setting
+# as they move into the package.
+files = ["tool/seeml"]
+strict = true

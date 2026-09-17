@@ -10,6 +10,10 @@ Before the individual formats, three conventions that apply everywhere, each wor
 - **Packed layouts.** Every multi-byte integer is packed without padding; where a C struct is shown, it is `#pragma pack(1)` and part of the ABI. Normally compilers insert invisible padding between struct fields for alignment; packing turns the struct into an exact byte-for-byte contract, so `sizeof` is the wire size and a `static_assert` can pin it forever.
 - **Magic numbers.** Each format opens with a four-byte signature — read the little-endian `u32` as ASCII and you get the name back (`"SMF1"`, `"SDS1"`, `"SEEU"`, `"SEKP"`). It's the file introducing itself, and it means a mix-up (feeding a corpus where a model belongs) dies on byte 0 with a clear message, not on byte 40,000 with a weird one.
 
+## One statement per plane, checked by machine
+
+Every layout below is declared twice — once in the C++ headers, once in `tool/seeml/formats.py` for the build-host tools — and never a third time. The two are held together without anyone remembering to: `seeml-abi` prints the C++ side's magics, versions, enums and packed-struct offsets as JSON; that output is committed as `tool/seeml/abi.json`; CI regenerates it and fails on a diff; and `test/tool/formats_test.py` compares every Python declaration with it. Changing a format is therefore a three-step edit that cannot be half done: the header, `formats.py`, and `build/seeml-abi > tool/seeml/abi.json`. `seeml-seeu-dump --json` is the same idea for whole plans: the C++ decode as data, compared field for field with the Python reader on freshly compiled plans.
+
 ## First, a word about hashes
 
 Several formats below carry 64-bit hashes, so let's establish what they are and — just as important — what they are *not*.
@@ -32,18 +36,19 @@ Note that `ContentHash64` of some bytes deliberately does **not** equal plain `F
 
 Now, the caveat, stated as bluntly as possible: **these hashes detect accidents, not adversaries.** FNV is trivially forgeable by anyone who wants to; there are no keys and no signatures here. SeeML's hashes answer "is this the same file, uncorrupted?" — never "do I trust whoever sent this?" Authenticate plans in your update transport (TLS, signed manifests — whatever your deployment already uses for software updates).
 
-## SMF — SeeML Model Format (`.smf`, v2)
+## SMF — SeeML Model Format (`.smf`, v5)
 
 The dependency-free model container consumed by `seeml-update-compile` (source and teacher models), produced by `tool/export_model.py`. It answers exactly two questions: *what are the tensors?* and *what is the computation graph over them?*
 
 ```
 u32 magic  "SMF1" (0x31464D53)
-u32 version         1..5 accepted; writer emits 5
+u32 version         1..5 accepted; the C++ writer emits 5, the exporter the
+                    lowest version that can carry the model (3, 4 or 5)
 u32 num_tensors
 u32 num_ops
 str input_name      (str = u16 length + bytes, no terminator)
 str output_name
-u64 seq_len         (v3 only) rows per sequence; 0 = non-sequential
+u64 seq_len         (v3+) rows per sequence; 0 = non-sequential
 tensors[num_tensors]:
   str  name
   u8   rank

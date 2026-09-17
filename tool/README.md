@@ -13,7 +13,9 @@ tool/
   export_model.py         PyTorch model + data  ->  SMF / SDS files
   seeml_update_compile.cc the compiler CLI       ->  a .seeu update package
   pack_update.py          the package assembler  ->  .incbin-embedded package
-  seeml_seeu_dump.cc      the plan disassembler   (inspect any .seeu)
+  seeml_seeu_dump.cc      the plan disassembler   (inspect any .seeu; --json for tools)
+  seeml_abi.cc            the ABI manifest        ->  tool/seeml/abi.json (every format, from the headers)
+  seeml/formats.py        the Python plane's one statement of those formats, held to abi.json
   seeml_bench.cc          the benchmark harness  ->  one JSON per run
   bench_compare.py        the nightly Tier A regression gate over two runs
   autotune.py             the offline tuner      ->  host-keyed kernel-policy table
@@ -137,6 +139,50 @@ bits, so the table only ever chooses among equivalent schedules. Standard
 library only, strict CLI, atomic table writes, `show` to read a table
 back. The measurement never happens inside the compiler: no table means
 the defaults and an unchanged compile time.
+
+## The seam between the planes
+
+The Python tools read and write files the C++ core owns, so every byte
+layout exists twice. It exists *exactly* twice: `tool/seeml/formats.py` is
+the only Python statement of the SMF, SDS, SEEU, SEKP and probe-trace
+layouts (the scripts import it; none restates a magic, a version or a
+fixed header layout),
+and it is held to the headers by machine rather than by review.
+
+- **`seeml-abi`** takes no arguments and prints, from the headers
+  themselves, every magic and version, the SMF op kinds, the 47 opcode
+  names (`source/plan/opcode_names.h` — the names `seeml-seeu-dump` prints),
+  the instruction flag and fused-stage encodings, and `sizeof`/`offsetof`
+  for `PlanHeader`, `UpdateInstruction`, `EmitEntry` and the checkpoint
+  headers. Its output is committed as `tool/seeml/abi.json`. CI regenerates
+  it and fails on a diff; `test/tool/formats_test.py` compares
+  `formats.py` with it field by field. A format change is three edits —
+  the header, `formats.py`, `build/seeml-abi > tool/seeml/abi.json` — and
+  leaving one out fails a named check.
+- **`seeml-seeu-dump --json`** is the C++ decode of a plan as data: every
+  header field by name (floats also as `<name>_bits`), the four programs as
+  `{opcode, name, flags, in[4], out[3]}`, and the emit table. A plan whose
+  seal does not verify yields no JSON and exit 1. The seam test compiles
+  plans and requires this decode and `frontier_exec.Plan` to agree on
+  every field.
+- **Golden files** in `test/fixtures/golden/` (`make_golden.py` writes
+  them through the exporter): a C++ suite reads them value for value, the
+  Python suite byte-compares them against a fresh export.
+- **`--report`** is `"schema": 1`: besides the pass timings it carries
+  `seeml_version`, `plan_version`, `plan_hash`, `source_model_hash`,
+  `plan_bytes`, `kernel_policy` (the GEMM tiles), `host_arch`, and
+  `vendored_sources` — what
+  a packer needs without re-deriving it.
+- **Dependency tiers** are declared in `pyproject.toml` and enforced in CI:
+  tier 0 (standard library — `seeml/formats.py`, `pack_update.py`,
+  `bench_compare.py`, `autotune.py`) imports under a bare interpreter with
+  an assertion that no NumPy/torch/MLX module was pulled in; tier 1 adds
+  NumPy; tier 2 torch or MLX. `ruff` runs over the whole tree and
+  `mypy --strict` over `tool/seeml`; the scripts move under strict typing
+  as they move into the package.
+- **`bench_compare.py`** refuses a rolling baseline measured on a different
+  `seeml_version` (re-seed, or pass `--across-releases`); against the
+  pinned epoch baseline, which spans releases by design, it prints a NOTE.
 
 ## Where to go next
 

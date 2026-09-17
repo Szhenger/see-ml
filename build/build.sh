@@ -100,6 +100,7 @@ compile runtime/engine/update_engine.cc       update_engine.o
 compile tool/seeml_update_compile.cc          seeml_update_compile.o
 compile tool/seeml_seeu_dump.cc               seeml_seeu_dump.o
 compile tool/seeml_plan_probe.cc              seeml_plan_probe.o
+compile tool/seeml_abi.cc                     seeml_abi.o
 compile test/framework/registry.cc            seetest_registry.o
 compile test/framework/seetest_main.cc        seetest_main.o
 compile test/support/scoped_temp_dir.cc       scoped_temp_dir.o
@@ -140,6 +141,9 @@ eval "$CXX -pthread build/seeml_update_compile.o $LIBS $METAL_LDFLAGS -o build/s
 echo "  LINK seeml-seeu-dump"
 # PlanSelfHash (the v4 integrity seal) runs on the parallel substrate.
 eval "$CXX -pthread build/seeml_seeu_dump.o build/parallel_for.o -o build/seeml-seeu-dump"
+echo "  LINK seeml-abi"
+# The ABI manifest generator (tool/seeml/abi.json, P6): header-only inputs.
+eval "$CXX -pthread build/seeml_abi.o -o build/seeml-abi"
 echo "  LINK seeml-plan-probe"
 # The frontier executor's C++ oracle (tool/frontier_exec.py, P4): one plan
 # section through one executor backend, every write traced.
@@ -155,7 +159,8 @@ fi
 
 for suite in \
     source/identity/hash_test source/parallel/parallel_for_test \
-    compiler/frontend/model_io_test compiler/frontend/resource_analyzer_test \
+    compiler/frontend/model_io_test compiler/frontend/golden_fixture_test \
+    compiler/frontend/resource_analyzer_test \
     compiler/frontend/sir_test compiler/frontend/operator_test \
     compiler/frontend/parser_test \
     compiler/analysis/update_passes_test compiler/analysis/updater_test \

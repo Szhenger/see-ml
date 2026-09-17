@@ -1,13 +1,22 @@
 // =============================================================================
 // seeml-seeu-dump — .seeu Update Plan disassembler.
 //
-//   seeml-seeu-dump plan.seeu [--instrs] [--version]
+//   seeml-seeu-dump plan.seeu [--instrs | --json] [--version]
 //
 // Prints the plan header (memory contract, I/O slots, hyperparameters,
 // integrity hashes, section table) and, with --instrs, disassembles the
 // train / eval / merge instruction streams. This is the field-debugging
 // tool: it depends only on update_types.h + hash.h + version.h so it
 // builds anywhere.
+//
+// --json prints the same decode as one JSON object — every header field by
+// its struct name, the four instruction streams (opcode, its name, flags,
+// in[4], out[3] as integers) and the emit table — and exits 1 on a plan
+// whose seal does not verify. It is the C++ decoder's view of a plan in a
+// form another program can check itself against (P6, #86): the Python
+// plane's plan reader is tested equal to it on every fixture, so the
+// most-validated format in the tree has one decoder and one checked mirror,
+// not two independent ones.
 // =============================================================================
 
 #include <cinttypes>
@@ -16,6 +25,7 @@
 #include <fstream>
 #include <vector>
 
+#include "source/plan/opcode_names.h"
 #include "source/plan/update_types.h"
 #include "source/identity/hash.h"
 #include "source/identity/version.h"
@@ -25,56 +35,8 @@ namespace {
 using namespace seeml::update;
 
 const char* OpName(uint16_t opcode) {
-  switch (static_cast<OpCode>(opcode)) {
-    case OpCode::kNop:            return "nop";
-    case OpCode::kGemmNN:         return "gemm.nn";
-    case OpCode::kGemmNT:         return "gemm.nt";
-    case OpCode::kGemmTN:         return "gemm.tn";
-    case OpCode::kGemmAccNN:      return "gemm.acc_nn";
-    case OpCode::kAddEW:          return "add.ew";
-    case OpCode::kAddBias:        return "add.bias";
-    case OpCode::kReluFwd:        return "relu.fwd";
-    case OpCode::kReluBwd:        return "relu.bwd";
-    case OpCode::kScale:          return "scale";
-    case OpCode::kReduceRows:     return "reduce.rows";
-    case OpCode::kSoftmaxXEntFwd: return "softmax_xent.fwd";
-    case OpCode::kSoftmaxXEntBwd: return "softmax_xent.bwd";
-    case OpCode::kMseFwd:         return "mse.fwd";
-    case OpCode::kMseBwd:         return "mse.bwd";
-    case OpCode::kAccumulate:     return "accumulate";
-    case OpCode::kGemmNNBF16:     return "gemm.nn.bf16";
-    case OpCode::kGemmNTBF16:     return "gemm.nt.bf16";
-    case OpCode::kRopeTable:      return "rope.table";
-    case OpCode::kFusedMap:       return "fused.map";
-    case OpCode::kKLDistillFwd:   return "kl_distill.fwd";
-    case OpCode::kKLDistillBwd:   return "kl_distill.bwd";
-    case OpCode::kSgdStep:        return "sgd.step";
-    case OpCode::kAdamWStep:      return "adamw.step";
-    case OpCode::kFill:           return "fill";
-    case OpCode::kCopy:           return "copy";
-    case OpCode::kMulEW:          return "mul.ew";
-    case OpCode::kGeluFwd:        return "gelu.fwd";
-    case OpCode::kGeluBwd:        return "gelu.bwd";
-    case OpCode::kSiluFwd:        return "silu.fwd";
-    case OpCode::kSiluBwd:        return "silu.bwd";
-    case OpCode::kLayerNormFwd:   return "layer_norm.fwd";
-    case OpCode::kLayerNormBwd:   return "layer_norm.bwd";
-    case OpCode::kClipNorm:       return "clip.norm";
-    case OpCode::kGemmNNQ8:       return "gemm.nn.q8";
-    case OpCode::kGemmNTQ8:       return "gemm.nt.q8";
-    case OpCode::kRmsNormFwd:     return "rms_norm.fwd";
-    case OpCode::kRmsNormBwd:     return "rms_norm.bwd";
-    case OpCode::kRopeFwd:        return "rope.fwd";
-    case OpCode::kRopeBwd:        return "rope.bwd";
-    case OpCode::kAttnFwd:        return "attn.fwd";
-    case OpCode::kAttnDP:         return "attn.dp";
-    case OpCode::kAttnDV:         return "attn.dv";
-    case OpCode::kSoftmaxRowsBwd: return "softmax_rows.bwd";
-    case OpCode::kAttnDQ:         return "attn.dq";
-    case OpCode::kAttnDK:         return "attn.dk";
-    case OpCode::kEmbedFwd:       return "embed.fwd";
-  }
-  return "<unknown>";
+  const char* name = OpCodeName(opcode);  // source/plan/opcode_names.h
+  return name ? name : "<unknown>";
 }
 
 void PrintRef(uint64_t ref) {
@@ -124,6 +86,92 @@ const char* EpilogueName(uint16_t flags) {
       "gelu",  "bias+gelu", "silu", "bias+silu",
   };
   return flags < 8 ? kNames[flags] : "unknown-flags";
+}
+
+bool SectionInBounds(uint64_t off, uint64_t count, uint64_t elem,
+                     uint64_t size);
+
+uint32_t F32BitsOf(float f) {
+  uint32_t u = 0;
+  std::memcpy(&u, &f, sizeof(u));
+  return u;
+}
+
+/// The whole plan as one JSON object (see the banner). u64 words print as
+/// integers: refs and packed dim words are exact, and kNullRef is 2^64 - 1.
+int DumpJson(const std::vector<uint8_t>& plan, const PlanHeader& h,
+             bool sealed) {
+  if (!sealed) {
+    std::fprintf(stderr, "seeml-seeu-dump: plan_hash mismatch — corrupt\n");
+    return 1;
+  }
+  std::printf("{\n  \"header\": {");
+#define U(f) std::printf("%s\"" #f "\": %" PRIu64, first ? "" : ", ", \
+                        static_cast<uint64_t>(h.f)), first = false
+#define F(f) std::printf(", \"" #f "_bits\": %u", \
+                        static_cast<unsigned>(F32BitsOf(h.f)))
+  bool first = true;
+  U(magic); U(version); U(arena_size); U(persistent_size); U(input_ref);
+  U(input_floats); U(label_ref); U(label_bytes); U(label_kind);
+  U(optimizer_kind); U(loss_ref); U(train_instr_offset); U(train_instr_count);
+  U(merge_instr_offset); U(merge_instr_count); U(rodata_offset);
+  U(rodata_size); U(persist_init_offset); U(persist_init_size);
+  U(emit_table_offset); U(emit_count); U(gemm_tile_k); U(batch);
+  U(default_steps); U(eval_instr_offset); U(eval_instr_count);
+  U(source_model_hash); U(plan_hash); U(lr_schedule); U(gemm_tile_n);
+  U(warmup_steps); U(input_kind); U(grad_accum_steps); U(seq_len);
+  U(step_instr_offset); U(step_instr_count);
+  // Floats travel as their f32 bit patterns: exact, and free of any
+  // decimal round trip a reader would have to reproduce.
+  F(lr); F(beta1); F(beta2); F(eps); F(weight_decay); F(min_lr_factor);
+  F(clip_norm);
+#undef U
+#undef F
+  std::printf("},\n  \"sections\": {");
+  const struct {
+    const char* name;
+    uint64_t off, count;
+  } sections[] = {{"train", h.train_instr_offset, h.train_instr_count},
+                  {"step", h.step_instr_offset, h.step_instr_count},
+                  {"eval", h.eval_instr_offset, h.eval_instr_count},
+                  {"merge", h.merge_instr_offset, h.merge_instr_count}};
+  for (size_t s = 0; s < 4; ++s) {
+    if (!SectionInBounds(sections[s].off, sections[s].count,
+                         sizeof(UpdateInstruction), plan.size())) {
+      std::fprintf(stderr, "seeml-seeu-dump: %s section exceeds the file\n",
+                   sections[s].name);
+      return 1;
+    }
+    std::printf("%s\n    \"%s\": [", s ? "," : "", sections[s].name);
+    for (uint64_t i = 0; i < sections[s].count; ++i) {
+      UpdateInstruction ins;  // copied out: the offset may be unaligned
+      std::memcpy(&ins, plan.data() + sections[s].off + i * sizeof(ins),
+                  sizeof(ins));
+      std::printf("%s\n      {\"opcode\": %u, \"name\": \"%s\", \"flags\": %u, "
+                  "\"in\": [%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64
+                  "], \"out\": [%" PRIu64 ", %" PRIu64 ", %" PRIu64 "]}",
+                  i ? "," : "", ins.opcode, OpName(ins.opcode), ins.flags,
+                  ins.in[0], ins.in[1], ins.in[2], ins.in[3], ins.out[0],
+                  ins.out[1], ins.out[2]);
+    }
+    std::printf("%s]", sections[s].count ? "\n    " : "");
+  }
+  std::printf("\n  },\n  \"emit\": [");
+  if (!SectionInBounds(h.emit_table_offset, h.emit_count, sizeof(EmitEntry),
+                       plan.size())) {
+    std::fprintf(stderr, "seeml-seeu-dump: emit table exceeds the file\n");
+    return 1;
+  }
+  for (uint64_t i = 0; i < h.emit_count; ++i) {
+    EmitEntry e;
+    std::memcpy(&e, plan.data() + h.emit_table_offset + i * sizeof(e),
+                sizeof(e));
+    std::printf("%s\n    {\"smf_data_offset\": %" PRIu64 ", \"byte_size\": %"
+                PRIu64 ", \"arena_offset\": %" PRIu64 "}",
+                i ? "," : "", e.smf_data_offset, e.byte_size, e.arena_offset);
+  }
+  std::printf("%s]\n}\n", h.emit_count ? "\n  " : "");
+  return std::ferror(stdout) ? 1 : 0;
 }
 
 void Disassemble(const char* title, const UpdateInstruction* instrs,
@@ -240,7 +288,7 @@ bool SectionInBounds(uint64_t offset, uint64_t count, uint64_t elem_bytes,
 int main(int argc, char** argv) {
   if (argc >= 2 && (std::strcmp(argv[1], "--help") == 0 ||
                     std::strcmp(argv[1], "-h") == 0)) {
-    std::printf("usage: seeml-seeu-dump plan.seeu [--instrs] [--version]\n");
+    std::printf("usage: seeml-seeu-dump plan.seeu [--instrs | --json] [--version]\n");
     return 0;
   }
   if (argc >= 2 && std::strcmp(argv[1], "--version") == 0) {
@@ -248,13 +296,16 @@ int main(int argc, char** argv) {
     return 0;
   }
   if (argc < 2) {
-    std::fprintf(stderr, "usage: seeml-seeu-dump plan.seeu [--instrs]\n");
+    std::fprintf(stderr, "usage: seeml-seeu-dump plan.seeu [--instrs | --json]\n");
     return 2;
   }
   bool want_instrs = false;
+  bool want_json = false;
   for (int i = 2; i < argc; ++i) {
     if (std::strcmp(argv[i], "--instrs") == 0) {
       want_instrs = true;
+    } else if (std::strcmp(argv[i], "--json") == 0) {
+      want_json = true;
     } else {
       // A typo'd flag must not silently print header-only output with
       // exit 0 — the sibling compile CLI treats every unconsumed argv slot
@@ -314,6 +365,7 @@ int main(int argc, char** argv) {
   const uint64_t state = PlanSelfHash(plan.data(), plan.size(),
                                       offsetof(PlanHeader, plan_hash));
   const bool sealed = state == h.plan_hash;
+  if (want_json) return DumpJson(plan, h, sealed);
 
   std::printf("seeu plan: %s\n", argv[1]);
   std::printf("  version            %u\n", h.version);

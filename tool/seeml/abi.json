@@ -1,0 +1,93 @@
+{
+  "schema": 1,
+  "generator": "tool/seeml_abi.cc",
+  "smf": {
+    "magic": 826690899, "version": 5, "min_version": 1, "default_rope_base": 10000,
+    "op_kinds": {"matmul": 0, "add_bias": 1, "relu": 2, "gelu": 3, "silu": 4, "mul": 5, "layer_norm": 6, "add": 7, "rms_norm": 8, "rope": 9, "attention": 10, "embedding": 11}
+  },
+  "sds": {"magic": 827540563, "version": 2, "min_version": 1, "header_bytes": 40, "label_kind_max": 2},
+  "seeu": {
+    "magic": 1430603091, "version": 13, "oldest_readable": 4,
+    "rodata_bit": 63, "rodata_alignment": 16384, "gemm_panel_floats": 8192,
+    "flags": {"epilogue_bias": 1, "epilogue_act_shift": 1, "epilogue_act_mask": 6},
+    "fused_stages": {"end": 0, "add": 1, "mul": 2, "scale": 3, "relu": 4, "gelu": 5, "silu": 6},
+    "fused_stage": {"kind_mask": 15, "arg_shift": 4, "arg_mask": 3, "run_is_right": 128, "max_stages": 4},
+    "opcodes": {"nop": 0, "gemm.nn": 1, "gemm.nt": 2, "gemm.tn": 3, "gemm.acc_nn": 4, "add.ew": 5, "add.bias": 6, "relu.fwd": 7, "relu.bwd": 8, "scale": 9, "reduce.rows": 10, "softmax_xent.fwd": 11, "softmax_xent.bwd": 12, "mse.fwd": 13, "mse.bwd": 14, "kl_distill.fwd": 15, "kl_distill.bwd": 16, "sgd.step": 17, "adamw.step": 18, "fill": 19, "copy": 20, "mul.ew": 21, "gelu.fwd": 22, "gelu.bwd": 23, "silu.fwd": 24, "silu.bwd": 25, "layer_norm.fwd": 26, "layer_norm.bwd": 27, "clip.norm": 28, "gemm.nn.q8": 29, "gemm.nt.q8": 30, "rms_norm.fwd": 31, "rms_norm.bwd": 32, "rope.fwd": 33, "rope.bwd": 34, "attn.fwd": 35, "attn.dp": 36, "attn.dv": 37, "softmax_rows.bwd": 38, "attn.dq": 39, "attn.dk": 40, "embed.fwd": 41, "accumulate": 42, "gemm.nn.bf16": 43, "gemm.nt.bf16": 44, "rope.table": 45, "fused.map": 46},
+    "structs": {
+      "PlanHeader": {"size": 280, "fields": [
+        {"name": "magic", "offset": 0, "size": 4},
+        {"name": "version", "offset": 4, "size": 4},
+        {"name": "arena_size", "offset": 8, "size": 8},
+        {"name": "persistent_size", "offset": 16, "size": 8},
+        {"name": "input_ref", "offset": 24, "size": 8},
+        {"name": "input_floats", "offset": 32, "size": 8},
+        {"name": "label_ref", "offset": 40, "size": 8},
+        {"name": "label_bytes", "offset": 48, "size": 8},
+        {"name": "label_kind", "offset": 56, "size": 4},
+        {"name": "optimizer_kind", "offset": 60, "size": 4},
+        {"name": "loss_ref", "offset": 64, "size": 8},
+        {"name": "train_instr_offset", "offset": 72, "size": 8},
+        {"name": "train_instr_count", "offset": 80, "size": 8},
+        {"name": "merge_instr_offset", "offset": 88, "size": 8},
+        {"name": "merge_instr_count", "offset": 96, "size": 8},
+        {"name": "rodata_offset", "offset": 104, "size": 8},
+        {"name": "rodata_size", "offset": 112, "size": 8},
+        {"name": "persist_init_offset", "offset": 120, "size": 8},
+        {"name": "persist_init_size", "offset": 128, "size": 8},
+        {"name": "emit_table_offset", "offset": 136, "size": 8},
+        {"name": "emit_count", "offset": 144, "size": 8},
+        {"name": "lr", "offset": 152, "size": 4},
+        {"name": "beta1", "offset": 156, "size": 4},
+        {"name": "beta2", "offset": 160, "size": 4},
+        {"name": "eps", "offset": 164, "size": 4},
+        {"name": "weight_decay", "offset": 168, "size": 4},
+        {"name": "gemm_tile_k", "offset": 172, "size": 4},
+        {"name": "batch", "offset": 176, "size": 8},
+        {"name": "default_steps", "offset": 184, "size": 8},
+        {"name": "eval_instr_offset", "offset": 192, "size": 8},
+        {"name": "eval_instr_count", "offset": 200, "size": 8},
+        {"name": "source_model_hash", "offset": 208, "size": 8},
+        {"name": "plan_hash", "offset": 216, "size": 8},
+        {"name": "lr_schedule", "offset": 224, "size": 4},
+        {"name": "gemm_tile_n", "offset": 228, "size": 4},
+        {"name": "warmup_steps", "offset": 232, "size": 8},
+        {"name": "min_lr_factor", "offset": 240, "size": 4},
+        {"name": "clip_norm", "offset": 244, "size": 4},
+        {"name": "input_kind", "offset": 248, "size": 4},
+        {"name": "grad_accum_steps", "offset": 252, "size": 4},
+        {"name": "seq_len", "offset": 256, "size": 8},
+        {"name": "step_instr_offset", "offset": 264, "size": 8},
+        {"name": "step_instr_count", "offset": 272, "size": 8}
+      ]},
+      "UpdateInstruction": {"size": 64, "fields": [
+        {"name": "opcode", "offset": 0, "size": 2},
+        {"name": "flags", "offset": 2, "size": 2},
+        {"name": "pad", "offset": 4, "size": 4},
+        {"name": "in", "offset": 8, "size": 32},
+        {"name": "out", "offset": 40, "size": 24}
+      ]},
+      "EmitEntry": {"size": 24, "fields": [
+        {"name": "smf_data_offset", "offset": 0, "size": 8},
+        {"name": "byte_size", "offset": 8, "size": 8},
+        {"name": "arena_offset", "offset": 16, "size": 8}
+      ]}
+    }
+  },
+  "sekp": {
+    "magic": 1347110227, "version": 4, "oldest_readable": 3,
+    "structs": {
+      "CkptHeader": {"size": 40, "fields": [
+        {"name": "magic", "offset": 0, "size": 4},
+        {"name": "version", "offset": 4, "size": 4},
+        {"name": "plan_hash", "offset": 8, "size": 8},
+        {"name": "step", "offset": 16, "size": 8},
+        {"name": "persistent_size", "offset": 24, "size": 8},
+        {"name": "payload_hash", "offset": 32, "size": 8}
+      ]},
+      "CkptHeaderV4Tail": {"size": 8, "fields": [
+        {"name": "horizon_steps", "offset": 0, "size": 8}
+      ]}
+    }
+  },
+  "probe_trace": {"magic": 1414546771, "version": 1}
+}

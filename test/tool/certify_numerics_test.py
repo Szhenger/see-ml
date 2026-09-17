@@ -167,8 +167,8 @@ class RelaxedModelTest(unittest.TestCase):
         ex = cn.LockstepExecutor(plan, 8)
         ex.mem.stage(0, big.astype("<f4").tobytes())
         ex.execute("train")
-        self.assertEqual(sorted(ex.sites), ["reduce_rows"])  # fill: no site
-        stat = ex.sites["reduce_rows"]
+        self.assertEqual(sorted(ex.sites), ["reduce.rows"])  # fill: no site
+        stat = ex.sites["reduce.rows"]
         self.assertLessEqual(stat["observed_rel"], stat["bound_rel"])
         self.assertGreater(stat["bound_rel"], 1.0)  # vacuous: refuse-worthy
 

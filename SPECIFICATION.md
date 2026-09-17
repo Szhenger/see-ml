@@ -287,9 +287,21 @@ raise the oldest-readable floor; newer-than-reader is always rejected):
 | Format | Magic | Current version | Implemented in |
 |---|---|---|---|
 | SMF (model container) | `"SMF1"` | v5 (readers accept v1–v5; writers emit the lowest version the model needs) | `source/language/model_format.*`, `compiler/frontend/ingressor/model_{reader,writer}.cc`, Python writer in `tool/export_model.py` |
-| SDS (dataset) | `"SDS1"` | v1 (feature rows) / v2 (token records) | `runtime/feeder/dataset.cc`, Python writer |
-| SEEU (update plan) | `"SEEU"` | v7, oldest-readable v4 | written by `compiler/backend/trainer/*` + driver; read/validated by `runtime/validator` + `runtime/engine`; disassembled by `seeml-seeu-dump` |
-| SEKP (checkpoint) | `"SEKP"` | v3 | `runtime/custodian/checkpoint.cc` |
+| SDS (dataset) | `"SDS1"` | v1 (feature rows) / v2 (token records) | `runtime/feeder/dataset.{h,cc}`, Python writer |
+| SEEU (update plan) | `"SEEU"` | v13, oldest-readable v4 | written by `compiler/backend/trainer/*` + driver; read/validated by `runtime/validator` + `runtime/engine`; disassembled by `seeml-seeu-dump` |
+| SEKP (checkpoint) | `"SEKP"` | v4, oldest-readable v3 | `runtime/custodian/checkpoint_format.h`, `runtime/custodian/checkpoint.cc` |
+
+The Python plane restates these layouts exactly once, in
+`tool/seeml/formats.py`, and that restatement is held to the headers by
+machine: `seeml-abi` prints every magic, version, enum and packed-struct
+offset from the C++ side, the output is committed as `tool/seeml/abi.json`,
+CI regenerates it and fails on a diff, and `test/tool/formats_test.py`
+compares the Python declarations — and this table's versions — against it.
+Golden SMF/SDS files under `test/fixtures/golden/` are read value-for-value
+by a C++ suite and byte-compared against a fresh export by the Python one;
+plans, whose persist-init bytes depend on the host's libm, are instead
+compiled on the spot and decoded twice (`seeml-seeu-dump --json` and
+`frontier_exec.Plan`), field for field.
 
 Integrity is 64-bit FNV-1a in three forms (`source/identity/hash.h`): plain
 incremental; `StripedFnv1a64` (8 interleaved lanes to break the serial

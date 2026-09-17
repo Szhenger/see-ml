@@ -34,6 +34,11 @@ high-water baseline and every ordinary runner after it fails (Nightly
 #20-#23, and 09-13/09-14 on the commit that was green on 09-12), while a
 real regression is indistinguishable from the noise. Two defences (P5, #79):
 
+Releases. Reports carry `seeml_version`. A rolling baseline measured on a
+different release is refused (exit 1) unless --across-releases is passed: a
+release is a deliberate re-seed, never a silent comparison. The pinned epoch
+baseline spans releases by design, so there the change is a NOTE.
+
 Calibration. A schema-4 report carries `calibration`: the rate of a frozen
 single-threaded reference kernel that shares no code with the runtime,
 timed before and after the fixtures. Each Tier A delta is taken after
@@ -127,6 +132,7 @@ class Report:
         self.tier_a = tier_a(raw)
         self.policy = kernel_policy(raw)
         self.calibration = calibration(raw, path)
+        self.version = raw.get("seeml_version")
 
 
 def runner_ratio(label, ref, cur):
@@ -262,6 +268,9 @@ def main():
                    help="on a fully green gate (or a missing baseline) "
                         "replace the baseline with the current report and "
                         "seed a missing epoch baseline")
+    p.add_argument("--across-releases", action="store_true",
+                   help="compare against a rolling baseline measured on a "
+                        "different seeml_version (refused by default)")
     args = p.parse_args()
     try:
         return gate(args)
@@ -288,12 +297,31 @@ def gate(args):
                         "the gate compares like with like — re-seed the "
                         "baseline deliberately")
 
+    def check_release(label, ref):
+        """A baseline from another release must not compare silently (#86).
+        The rolling baseline fails closed — a release is a deliberate
+        re-seed, like a policy change. The pinned epoch baseline exists to
+        span releases, so there the change is announced, not refused."""
+        if ref.version == cur.version:
+            return
+        def name(v):
+            return "no seeml_version" if v is None else f"seeml {v}"
+        said = (f"the {label} was measured on {name(ref.version)}, the "
+                f"current report on {name(cur.version)}")
+        if label == "baseline" and not args.across_releases:
+            raise GateError(f"{said}; a delta across releases is not a "
+                            "nightly regression signal — re-seed the "
+                            "baseline deliberately, or pass "
+                            "--across-releases to compare anyway")
+        print(f"bench_compare: NOTE {said}")
+
     previous = load_state(args.state)
     use_state = args.state is not None
     red, fatal, warned = {}, [], []
 
     def against(label, path, max_regression, what):
         ref = Report(path)
+        check_release(label, ref)
         check_policy(label, ref)
         failures, compared = compare(label.split()[0], ref, cur,
                                      max_regression)
