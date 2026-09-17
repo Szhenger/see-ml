@@ -119,6 +119,27 @@ TEST(Dataset, FillBatchToleratesNullLabelSlot) {
   EXPECT_NEAR(inputs[1], 2.0f, 0.0);
 }
 
+TEST(Dataset, LabelVerdictIsCachedAndStaysExact) {
+  // One scan answers every later bound (E5, #84): tighter, looser, and —
+  // after a split hands the offending tail to another dataset — re-proven
+  // rather than remembered.
+  ASSERT_OK_AND_ASSIGN(
+      Dataset data,
+      Dataset::FromMemory({1, 2, 3, 4, 5, 6, 7, 8},
+                          ClassLabels({0, 1, 0, 1, 0, 1, 0, 9}), 8, 1, 1, 0));
+  EXPECT_OK(data.ValidateClassLabels(10));
+  EXPECT_OK(data.ValidateClassLabels(10));  // answered from the cache
+  EXPECT_OK(data.ValidateClassLabels(64));
+  EXPECT_ERROR_CONTAINS(data.ValidateClassLabels(9),
+                        "class label 9 at sample 7 outside [0, 9)");
+  EXPECT_ERROR_CONTAINS(data.ValidateClassLabels(2), "at sample 7");
+
+  ASSERT_OK_AND_ASSIGN(Dataset val, data.SplitValidation(0.125));  // {9}
+  EXPECT_OK(data.ValidateClassLabels(2));  // the 9 left with the tail
+  EXPECT_ERROR_CONTAINS(val.ValidateClassLabels(2), "class label 9");
+  EXPECT_OK(val.ValidateClassLabels(10));
+}
+
 TEST(Dataset, ValidateClassLabels) {
   ASSERT_OK_AND_ASSIGN(Dataset data, TinyClassDataset());  // labels {0, 1, 2}
   EXPECT_OK(data.ValidateClassLabels(3));

@@ -197,11 +197,22 @@ class WorkerPool {
       }
       if (!job) continue;
       DrainJob(*job);
-      job->holders.fetch_sub(1, std::memory_order_acq_rel);
-      {
-        std::lock_guard<std::mutex> lock(mutex_);
+      // Only the LAST holder out wakes the caller (E5, #84). Run()'s wait
+      // needs holders == 0, so a wake-up from any earlier worker is one the
+      // caller must re-check and go back to sleep on — and with every
+      // worker taking the mutex to broadcast, a job cost O(T) lock
+      // acquisitions and up to T spurious wake-ups of one waiter. There is
+      // exactly one waiter (submit_mutex_ admits one job), so notify_one
+      // is the whole audience. The empty critical section still orders
+      // this notify after the caller's predicate check: the caller either
+      // has not tested holders yet (and will see 0) or is already waiting.
+      // Chunk geometry and the claiming protocol are untouched.
+      if (job->holders.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        {
+          std::lock_guard<std::mutex> lock(mutex_);
+        }
+        done_cv_.notify_one();
       }
-      done_cv_.notify_all();
     }
   }
 

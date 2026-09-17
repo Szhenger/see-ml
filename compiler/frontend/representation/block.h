@@ -39,6 +39,18 @@ class Block {
     /// must not be re-inserted; its use registration is gone.
     std::unique_ptr<Operation> removeOp(Operation* op);
 
+    /// Removes a whole set of operations in ONE compaction of the op list
+    /// (E5, #84): removeOp is a linear search plus a vector erase, so a pass
+    /// that dead-codes a real fraction of the graph through it — chain
+    /// fusion does — is O(removed x ops). `dead` lists the ops in an order
+    /// valid for one-at-a-time removal (consumers before the producers they
+    /// read, e.g. reverse program order): each is unlinked from its
+    /// operands' use-lists in that order, under removeOp's contract that no
+    /// result still has a user (asserted), then the list is compacted once.
+    /// Returns ownership, in program order.
+    std::vector<std::unique_ptr<Operation>> removeOps(
+        const std::vector<Operation*>& dead);
+
     /// Inserts a sequence of operations immediately after `anchor`, preserving
     /// their relative order. Required by graph-rewriting passes (e.g. LoRA
     /// grafting) that must splice new computation between a producer and its

@@ -142,6 +142,13 @@ TEST(UpdateCompiler, DebugHooksDescribeAdaptersAndParams) {
   }
 
   // The SIR dump is a human-readable rendering of both programs.
+  EXPECT_TRUE(compiled.sir_dump.empty());  // debug output is opt-in
+  UpdateConfig dumping = BaseConfig(kBatch);
+  dumping.dump_sir = true;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate dumped,
+                       UpdateCompiler(dumping).Compile(model));
+  EXPECT_TRUE(dumped.plan == compiled.plan);  // the dump changes no byte
+  compiled = std::move(dumped);
   EXPECT_STR_CONTAINS(compiled.sir_dump, "sc_high.matmul");
   EXPECT_STR_CONTAINS(compiled.sir_dump, "merge program");
 }
