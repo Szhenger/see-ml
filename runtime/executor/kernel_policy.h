@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstddef>
 
+#include "source/plan/schema.h"  // kDefaultGemmPanelFloats
+
 // =============================================================================
 // Shared execution policy for the kernel family units (gemm / elementwise /
 // activation / normalization / loss / optimizer).
@@ -77,6 +79,31 @@ inline constexpr GemmTiles kDefaultGemmTiles{};
 /// Whether a tile pair is one the kernels accept (the header contract).
 inline bool GemmTilesValid(const GemmTiles& t) {
   return t.k > 0 && t.k % 4 == 0 && t.n > 0;
+}
+
+// The packed B panel of the blocked NN core (gemm.cc): a fixed local
+// buffer the active tile is copied — and, for int8 / bf16 weights, widened
+// — into, once per tile. 32 KiB by default: within any thread stack the
+// runtime targets, and measured flat in throughput against 64 KiB. A
+// smaller-stack target may shrink it (-DSEEML_GEMM_PANEL_FLOATS=...); like
+// the tiles, it is traversal only, never bits.
+#ifndef SEEML_GEMM_PANEL_FLOATS
+#define SEEML_GEMM_PANEL_FLOATS seeml::update::kDefaultGemmPanelFloats
+#endif
+inline constexpr size_t kGemmPanelFloats = SEEML_GEMM_PANEL_FLOATS;
+static_assert(kGemmPanelFloats >= 4,
+              "the packed B panel must hold at least one k-quad column");
+
+/// The tile geometry the NN core actually walks for a header's tiles: K
+/// shrunk to a multiple of the quad that fits the panel (quads stay
+/// aligned to k = 0), then N to what is left. A pure function of the
+/// tiles — what seeml-bench records as the effective geometry and what the
+/// compiler's analytic model (SuggestGemmTiling) is derived against.
+inline GemmTiles FitToPanel(const GemmTiles& tiles) {
+  GemmTiles fit;
+  fit.k = MinZ(tiles.k, kGemmPanelFloats / 4 * 4) / 4 * 4;
+  fit.n = MinZ(tiles.n, kGemmPanelFloats / fit.k);
+  return fit;
 }
 
 /// Everything a backend may be told about how to run a plan's kernels

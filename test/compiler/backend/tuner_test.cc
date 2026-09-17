@@ -16,6 +16,7 @@
 #include "compiler/backend/architecture/host_arch.h"
 #include "compiler/backend/trainer/kernel_emitter.h"
 #include "compiler/backend/tuner/kernel_policy_table.h"
+#include "source/plan/schema.h"
 #include "test/framework/seetest.h"
 
 namespace {
@@ -71,10 +72,27 @@ TEST(HostArch, TilingIsPureAndSimdAligned) {
   EXPECT_TRUE(a == b);  // pure function of the host description
 
   EXPECT_GT(a.mc, 0u);
-  EXPECT_GT(a.kc, 0u);
-  EXPECT_EQ(a.nc, 4u * 8u);
   EXPECT_EQ(a.mc % 8, 0u);
-  EXPECT_EQ(a.kc % 8, 0u);
+  // Derived for the packed four-row kernel (E7, #90): half of a 64 KiB L1
+  // is exactly the runtime panel (kDefaultGemmPanelFloats = 8192 floats),
+  // nc is the long sweep — the largest power of two <= sqrt(2 * panel) —
+  // and kc the rest: 64 x 128, the geometry the runtime's own defaults
+  // (64 x 256) are clamped to. The model and the kernel finally agree.
+  EXPECT_EQ(a.nc, 128u);
+  EXPECT_EQ(a.kc, 64u);
+  EXPECT_EQ(a.kc * a.nc, kDefaultGemmPanelFloats);
+  EXPECT_EQ(a.kc % 4, 0u);  // the header's K-tile contract
+
+  // A smaller L1 shrinks the panel, never the sweep below a vector loop;
+  // a larger one cannot exceed the runtime's panel.
+  HostArchInfo small = arch;
+  small.l1d_bytes = 32u << 10;
+  const GemmTiling s = SuggestGemmTiling(small);
+  EXPECT_EQ(s.nc, 64u);
+  EXPECT_EQ(s.kc, 64u);
+  HostArchInfo big = arch;
+  big.l1d_bytes = 1u << 20;
+  EXPECT_TRUE(SuggestGemmTiling(big) == a);
 
   // kc x nc panel of B must fit in half of L1, mc x kc panel of A in half
   // of L2 — the contract the heuristic documents.
