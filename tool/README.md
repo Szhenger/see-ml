@@ -40,9 +40,14 @@ parameterizable from the command line (`--width`, `--depth`, `--vocab`,
 `--seq-len`, `--blocks`, `--seed`, `--samples`, `--corpus-kind`), and
 `--corpus` converts saved NumPy arrays into an SDS corpus without writing
 Python; a flag that cannot apply to the requested mode is a hard error,
-matching the compiler CLI's discipline. Everything that reaches the device
-is dependency-free C++; the build host may additionally run the Python
-packer below, which leaves no trace in the package.
+matching the compiler CLI's discipline. The doctrine in one sentence, now that the Python plane exists: **the
+emitted package and the runtime are dependency-free C++ under the full
+doctrine; the build host carries a Python frontier plane** — export,
+packaging (`pack_update.py`), measurement (`bench_compare.py`), autotuning
+(`autotune.py`), certification (`certify_numerics.py`) and reference
+execution (`frontier_exec.py`). Nothing Python ships on a device: CI greps
+the emitted package and its binary for an interpreter reference and fails
+on one.
 
 **`seeml_update_compile.cc`** is the compiler itself as a command: source
 model in, `.seeu` plan (and optional self-contained native package) out. Its

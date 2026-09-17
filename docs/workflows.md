@@ -319,8 +319,12 @@ e2e job already exercises the exporter for real.)
 
 The job is a two-interpreter matrix — the pinned 3.14.7 and the 3.9
 floor — so a tool cannot quietly grow a `match` statement or a stdlib API
-the oldest supported build host lacks. It runs `test/tool/pack_update_test.py`
-under the bare interpreter. That placement is the point: the package assembler is on
+the oldest supported build host lacks. It runs every suite under `test/tool/` with a
+bare interpreter — the packer, the tuner, the bench gate, and the
+standard-library tiers of the frontier executor and the numerics certifier
+(their NumPy and C++ tiers skip here and run in the e2e job, which has the
+pinned stack and the built tools). Nothing in this plane ships: the e2e job
+greps the emitted package and its binary for an interpreter reference. That placement is the point: the package assembler is on
 the compile path and declared *tier 0* — standard library only — so a
 stray NumPy or torch import fails here, where nothing is installed. The
 suite also assembles and links the `.incbin` stub for real with the
