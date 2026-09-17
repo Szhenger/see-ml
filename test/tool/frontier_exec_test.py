@@ -529,6 +529,65 @@ class DifferentialSuite(unittest.TestCase):
                     status, _, log = self.diff(name, "--backend", backend)
                     self.assertEqual(status, 0, log)
 
+    def test_the_probe_is_strict_about_arguments_and_paths(self):
+        plan, _ = self.plans["mlp_mse_sgd"]
+        work = os.path.join(self.dir, "probe")
+        os.makedirs(work, exist_ok=True)
+        arena = os.path.join(work, "arena.in")
+        with open(arena, "wb") as f:
+            f.write(fx.Plan.load(plan).initial_arena())
+        out = os.path.join(work, "arena.out")
+
+        def probe(*argv):
+            done = subprocess.run([PROBE, *argv], stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+            return done.returncode, done.stderr
+        base = ["--plan", plan, "--section", "merge", "--arena-in", arena]
+        self.assertEqual(probe(*base, "--arena-out", out)[0], 0)
+        self.assertTrue(os.path.isfile(out))
+        self.assertFalse(os.path.exists(out + ".tmp"))  # staged, then renamed
+
+        for argv, code, message in (
+                ((*base, "--arena-out", out, "--bogus"), 2, "unknown argument"),
+                ((*base, "--arena-out"), 2, "missing its value"),
+                ((*base, "--arena-out", out, "--section", "x"), 2, "--section"),
+                ((*base, "--arena-out", out, "--time", "0"), 2, "--time"),
+                ((*base, "--arena-out", out, "--time", "2", "--trace",
+                  out + ".t"), 2, "mutually exclusive"),
+                (("--plan", work, "--section", "merge", "--arena-in", arena,
+                  "--arena-out", out), 1, "not a regular file"),
+                ((*base, "--arena-out", os.path.join(work, "nowhere", "a")),
+                 1, "does not exist"),
+                ((*base, "--arena-out", work), 1, "not a regular file")):
+            status, err = probe(*argv)
+            self.assertEqual(status, code, err)
+            self.assertIn(message, err)
+
+        # An output that is a symlink is refused, never written through.
+        victim = os.path.join(work, "victim")
+        with open(victim, "w") as f:
+            f.write("untouched")
+        link = os.path.join(work, "link.out")
+        os.symlink(victim, link)
+        for flag in ("--arena-out", "--trace"):
+            argv = list(base) + (["--arena-out", link] if flag == "--arena-out"
+                                 else ["--arena-out", out, "--trace", link])
+            status, err = probe(*argv)
+            self.assertEqual(status, 1, err)
+            self.assertIn("symlink is refused", err)
+        with open(victim) as f:
+            self.assertEqual(f.read(), "untouched")
+
+        # A run that fails leaves no output behind to be mistaken for one.
+        os.remove(out)
+        with open(arena, "ab") as f:
+            f.write(b"\0")  # no longer the plan's arena size
+        status, err = probe(*base, "--arena-out", out, "--trace", out + ".t")
+        self.assertEqual(status, 1)
+        self.assertIn("the plan declares", err)
+        self.assertEqual(sorted(os.listdir(work)),
+                         ["arena.in", "link.out", "victim"])
+
     def test_run_reproduces_the_emitted_package(self):
         """The whole update — tail split, per-epoch shuffle, schedule, G
         micro-batches, evaluation — against the real model_update binary:
