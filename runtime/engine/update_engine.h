@@ -54,6 +54,24 @@ struct TrainOptions {
   uint64_t log_every = 100;      // steps between loss log lines (0 = quiet)
   bool resume = false;           // load checkpoint_path before training
 
+  // The LR schedule's horizon, in optimizer steps (E8, #91). 0 = derive it
+  // from the run, which is what every ordinary caller wants:
+  //   a fresh run of N steps anneals over N;
+  //   a resumed run with no explicit step count trains the REMAINDER to
+  //     the horizon its checkpoint recorded, on that same schedule — so an
+  //     interrupted-and-resumed update is bit-identical to an
+  //     uninterrupted one;
+  //   a resumed run given an explicit step count anneals over
+  //     (resumed step + that count): more steps were asked for, so the
+  //     schedule is stretched to cover them rather than left to idle at
+  //     the floor.
+  // Set it to train the first k steps of a longer schedule deliberately.
+  // Until E8 the horizon was the plan's compile-time default_steps whatever
+  // the run did: a shorter run never annealed, a longer one sat at the
+  // floor (LR 0 by the old default) for the excess, and --resume with no
+  // step count ran a whole extra budget entirely past the horizon.
+  uint64_t horizon_steps = 0;
+
   // Held-out validation set: evaluated with the plan's eval program (forward
   // + loss, no parameter mutation) before and after training. When present,
   // TrainReport::improved() gates on validation loss — the honest regression
@@ -221,6 +239,13 @@ class UpdateEngine {
   uint8_t* arena() { return arena_; }
   uint64_t step() const { return step_; }
   void SetStep(uint64_t s) { step_ = s; }
+  /// The horizon EffectiveLr anneals over: the current run's (set by
+  /// Train, restored by LoadCheckpoint), or the plan's default_steps when
+  /// no run has set one. SetHorizon is the test hook beside SetStep.
+  uint64_t horizon() const {
+    return horizon_ ? horizon_ : header_.default_steps;
+  }
+  void SetHorizon(uint64_t steps) { horizon_ = steps; }
   /// The scheduled learning rate at the current step — a pure function of
   /// (header_, step_). Public so the schedule's boundary behavior (warmup
   /// edges, horizon clamp, floor) is directly testable; it scales every
@@ -297,6 +322,7 @@ class UpdateEngine {
   BackendKind backend_kind_ = BackendKind::kCpu;
   std::string backend_note_;
   uint64_t step_ = 0;                     // 1-indexed AdamW timestep
+  uint64_t horizon_ = 0;                  // run LR horizon; 0 = plan default
   uint64_t num_classes_ = 0;              // softmax width, 0 = no class loss
   uint64_t vocab_bound_ = 0;              // narrowest embedding table, 0 = none
   bool merged_ = false;

@@ -89,6 +89,40 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
         "gemm_tile_k " + std::to_string(config_.gemm_tile_k) +
             " is not a multiple of the kernel's 4-wide unroll");
 
+  // The schedule triple (E8, #91). Each of these used to compile and then
+  // misbehave silently at run time: a zero budget is a plan with nothing to
+  // default to; a warmup that swallows the budget leaves no horizon, so
+  // every later step ran at the floor; warmup under a constant schedule was
+  // ignored; and a zero floor trains the schedule's final step — and any
+  // step past a horizon — at LR 0, moving nothing but AdamW's moments.
+  {
+    const OptimizerSpec& o = config_.optimizer;
+    const bool cosine = o.lr_schedule == LrSchedule::kCosineWithWarmup;
+    if (config_.default_steps == 0)
+      return generating::Error(generating::kDriver,
+                               "the step budget must be positive");
+    if (!cosine && o.warmup_steps != 0)
+      return generating::Error(
+          generating::kDriver,
+          "warmup applies to the cosine schedule only; under the constant "
+          "schedule it would be silently ignored");
+    if (cosine && o.warmup_steps >= config_.default_steps)
+      return generating::Error(
+          generating::kDriver,
+          "warmup (" + std::to_string(o.warmup_steps) +
+              " steps) must be shorter than the step budget (" +
+              std::to_string(config_.default_steps) + ")");
+    if (cosine && !(o.min_lr_factor >= 0.0f && o.min_lr_factor <= 1.0f))
+      return generating::Error(generating::kDriver,
+                               "min_lr_factor must lie in [0, 1]");
+    if (cosine && o.min_lr_factor == 0.0f && !o.allow_zero_lr)
+      return generating::Error(
+          generating::kDriver,
+          "a cosine floor of 0 trains the schedule's last step at a learning "
+          "rate of zero; set min_lr_factor > 0 (the default is 0.1) or "
+          "allow_zero_lr to ask for it deliberately");
+  }
+
   const SmfTensor* in_tensor = source.FindTensor(source.input_name);
   if (!in_tensor || in_tensor->dims.empty())
     return generating::Error(generating::kDriver,
@@ -634,8 +668,14 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   for (const ParamInit& pi : binding->params)
     if (pi.value->id().ends_with(".grad_acc")) accumulator_bytes += pi.bytes;
   header.lr_schedule = static_cast<uint32_t>(config_.optimizer.lr_schedule);
-  header.warmup_steps = config_.optimizer.warmup_steps;
-  header.min_lr_factor = config_.optimizer.min_lr_factor;
+  // The floor and warmup are the cosine schedule's; a constant-schedule
+  // plan records neither (validated above to carry no warmup), so such
+  // plans are byte-identical to the ones compiled before the floor's
+  // default moved from 0 to 0.1.
+  const bool cosine =
+      config_.optimizer.lr_schedule == LrSchedule::kCosineWithWarmup;
+  header.warmup_steps = cosine ? config_.optimizer.warmup_steps : 0;
+  header.min_lr_factor = cosine ? config_.optimizer.min_lr_factor : 0.0f;
   header.clip_norm = config_.optimizer.clip_norm;
   header.source_model_hash = source.content_hash;
 

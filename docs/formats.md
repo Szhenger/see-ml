@@ -136,20 +136,21 @@ Frozen weights selected by `--quantize-base` are stored in rodata as per-tensor 
 
 **The emit table** (`EmitEntry[]`, 24 bytes each: `smf_data_offset`, `byte_size`, `arena_offset`) is the bridge back to the model file: it maps each adapter's **delta** (`Δ = (α/r)·A@B`, materialized by the merge program at `arena_offset`) to the f32 byte range of its weight inside the source `.smf`. Commit applies `W′ = W + Δ` onto the file's pristine weights — which is why a quantized plan never bakes quantization error into the committed model: the int8 copy trains, but the original floats get patched.
 
-## Checkpoint (`SEKP`, v3)
+## Checkpoint (`SEKP`, v4)
 
 Training state you can power-cycle through:
 
 ```
-u32 magic "SEKP"; u32 version = 3
+u32 magic "SEKP"; u32 version = 4      (v3 files are still read)
 u64 plan_hash        must match the plan's PlanHeader::plan_hash
 u64 step             1-indexed AdamW timestep at save
 u64 persistent_size  payload length
 u64 payload_hash     ContentHash64 of the payload (v3; v2 used serial FNV-1a)
+u64 horizon_steps    v4: the LR-schedule horizon of the run that saved it
 payload              the arena's persistent segment (adapters + moments)
 ```
 
-The payload is a raw byte-copy of the arena's persistent segment — possible only because the compiler put everything resumable (LoRA parameters *and* AdamW moments) contiguously at arena offset 0. Three fields guard the restore, each against a different failure: `plan_hash` against the wrong plan (offsets into someone else's arena layout would be garbage), `persistent_size` against a layout drift, `payload_hash` against bit rot. A foreign or bit-flipped checkpoint is rejected before any byte reaches the arena. Saving `step` matters more than it looks: AdamW's bias correction depends on t, so resuming at the wrong step would silently distort the next updates.
+The payload is a raw byte-copy of the arena's persistent segment — possible only because the compiler put everything resumable (LoRA parameters *and* AdamW moments) contiguously at arena offset 0. Three fields guard the restore, each against a different failure: `plan_hash` against the wrong plan (offsets into someone else's arena layout would be garbage), `persistent_size` against a layout drift, `payload_hash` against bit rot. A foreign or bit-flipped checkpoint is rejected before any byte reaches the arena. Saving `step` matters more than it looks: AdamW's bias correction depends on t, so resuming at the wrong step would silently distort the next updates. The **horizon** (v4) is the same kind of fact for the schedule: the step count the interrupted run was annealing over. A resume with no step count trains exactly the remainder to it, so the resumed run's learning rates — and its bits — are the uninterrupted run's; a v3 file has none and resumes on the plan's compiled budget, as it always did.
 
 ## Durability
 
