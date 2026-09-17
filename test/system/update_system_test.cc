@@ -1096,4 +1096,68 @@ TEST(UpdateSystem, ANonFiniteGradientNormAbortsTheStep) {
     ASSERT_TRUE(std::isfinite(state[i]));
 }
 
+// =============================================================================
+// Elementwise chain fusion (E4, #83): kFusedMap
+// =============================================================================
+
+TEST(UpdateSystem, ElementwiseChainFusionChangesNoTrainingBits) {
+  // A fused and an unfused compilation of the same update — an MLP (scale
+  // -> add at every LoRA site) and a token decoder (residual adds, the
+  // composite loss's scale/add) — train to the same losses, the same
+  // validation loss and the same persistent segment, at one thread and at
+  // eight; and the fused plan really is shorter.
+  struct Case {
+    SmfModel model;
+    bool tokens;
+  };
+  const int64_t vocab = 16, seq = 4, batch = 16;
+  std::vector<Case> cases;
+  cases.push_back({MakeMlp(8, 12, 4, 81), false});
+  cases.push_back(
+      {seeml::testing::MakeTinyTokenDecoder(vocab, 8, 2, seq, 16, 82), true});
+  for (const Case& c : cases) {
+    std::vector<float> want_curve;
+    std::vector<uint8_t> want_state;
+    float want_val = 0.0f;
+    uint64_t unfused_instrs = 0;
+    for (int variant = 0; variant < 4; ++variant) {
+      UpdateConfig config = BaseConfig(batch);
+      config.optimizer.lr = 5e-3f;
+      config.fuse_elementwise = (variant & 1) != 0;
+      seeml::update::SetParallelThreadCount((variant & 2) ? 8 : 1);
+      ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                           UpdateCompiler(config).Compile(c.model));
+      const PlanHeader h = HeaderOf(compiled);
+      if (variant == 0) unfused_instrs = h.train_instr_count;
+      if (variant == 1) EXPECT_LT(h.train_instr_count, unfused_instrs);
+      UpdateEngine engine;
+      ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(),
+                                      compiled.plan.size()));
+      ASSERT_OK_AND_ASSIGN(
+          Dataset data,
+          c.tokens ? seeml::testing::MakeTokenCorpus(128, seq, vocab, 43)
+                   : MakeClassificationData(128, 8, 44));
+      data.EnableShuffle(5);
+      TrainOptions options = Quiet();
+      options.record_loss_curve = true;
+      ASSERT_OK_AND_ASSIGN(auto report, engine.Train(data, 25, options));
+      ASSERT_OK_AND_ASSIGN(float val, engine.Evaluate(data));
+      std::vector<uint8_t> state(engine.arena(),
+                                 engine.arena() + h.persistent_size);
+      if (variant == 0) {
+        want_curve = report.loss_curve;
+        want_state = state;
+        want_val = val;
+        continue;
+      }
+      EXPECT_EQ(val, want_val);
+      ASSERT_EQ(report.loss_curve.size(), want_curve.size());
+      for (size_t i = 0; i < want_curve.size(); ++i)
+        EXPECT_EQ(report.loss_curve[i], want_curve[i]);
+      EXPECT_TRUE(state == want_state);
+    }
+  }
+  seeml::update::SetParallelThreadCount(0);
+}
+
 }  // namespace

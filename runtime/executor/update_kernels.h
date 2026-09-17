@@ -94,6 +94,12 @@ void GeluBwd(const float* dy, const float* x, float* dx, size_t n);
 void SiluFwd(const float* x, float* out, size_t n);   // x * sigmoid(x)
 void SiluBwd(const float* dy, const float* x, float* dx, size_t n);
 void Scale(const float* x, float* out, float alpha, size_t n);
+// A fused elementwise chain (plan v13): `stages` is kFusedMap's out[1]
+// word, `others[1..2]` the operand slots binary stages name (others[0] is
+// unused), `imm` the two scale immediates. Bit-identical to running the
+// standalone kernels in sequence.
+void FusedMap(const float* x, const float* const others[3], float* out,
+              size_t n, uint64_t stages, const float imm[2]);
 void ReduceRows(const float* dy, float* db, size_t rows, size_t cols);
 
 // --- LayerNorm over the last dim of x[N,D], affine gamma/beta[D] --------------

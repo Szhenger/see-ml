@@ -75,7 +75,7 @@ import time
 # --- The .seeu container (source/plan/schema.h, instruction.h) ---------------
 
 SEEU_MAGIC = 0x55454553
-SEEU_OLDEST, SEEU_NEWEST = 4, 12
+SEEU_OLDEST, SEEU_NEWEST = 4, 13
 RODATA_BIT = 1 << 63
 NULL_REF = (1 << 64) - 1
 
@@ -108,7 +108,7 @@ OPCODES = {
     32: "rms_norm.bwd", 33: "rope.fwd", 34: "rope.bwd", 35: "attn.fwd",
     36: "attn.dp", 37: "attn.dv", 38: "softmax_rows.bwd", 39: "attn.dq",
     40: "attn.dk", 41: "embed.fwd", 42: "accumulate", 43: "gemm.nn_bf16",
-    44: "gemm.nt_bf16", 45: "rope.table",
+    44: "gemm.nt_bf16", 45: "rope.table", 46: "fused.map",
 }
 GEMM_OPCODES = (1, 2, 3, 4, 29, 30, 43, 44)
 SECTIONS = ("train", "step", "eval", "merge")
@@ -1202,6 +1202,32 @@ def _embed(m, x, ins, step):
     m.write(ins.src[2], x.take_rows(table, m.read(ins.src[0], (rows,), "<i4")))
 
 
+def _fused_map(m, x, ins, step):
+    # A chain of elementwise instructions as one (plan v13): stage bytes in
+    # out[1], first stage low — kind in the low nibble (1 add, 2 mul,
+    # 3 scale, 4 relu, 5 gelu, 6 silu), operand slot / immediate index in
+    # bits 4..5, bit 7 = the running value is the right operand.
+    n = (ins.out[0],)
+    run = m.read(ins.src[0], n)
+    imm = (bits_f32(ins.out[2]), bits_f32(ins.out[2] >> 32))
+    for s in range(4):
+        stage = (ins.out[1] >> (8 * s)) & 0xFF
+        kind, arg = stage & 0x0F, (stage >> 4) & 0x3
+        if kind == 0:
+            break
+        if kind in (1, 2):
+            y = m.read(ins.src[arg], n)
+            left, right = (y, run) if stage & 0x80 else (run, y)
+            run = left + right if kind == 1 else left * right
+        elif kind == 3:
+            run = imm[arg] * run
+        elif kind in (4, 5, 6):
+            run = _act(x, kind - 3, run)
+        else:
+            raise PlanError(f"unknown fused stage kind {kind}")
+    m.write(ins.src[3], run)
+
+
 def _nop(m, x, ins, step):
     pass
 
@@ -1222,6 +1248,7 @@ INTERPRETER = {
     36: _attn_dp, 37: _attn_dv, 38: _softmax_rows_bwd, 39: _attn_dqk(False),
     40: _attn_dqk(True), 41: _embed, 42: _accumulate,
     43: _gemm_nn("<u2"), 44: _gemm_nt("<u2"), 45: _rope_table,
+    46: _fused_map,
 }
 assert sorted(INTERPRETER) == sorted(OPCODES)
 

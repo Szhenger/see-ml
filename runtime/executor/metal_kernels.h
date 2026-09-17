@@ -511,6 +511,41 @@ kernel void k_silu_bwd(KSIG, uint g [[thread_position_in_grid]]) {
 kernel void k_scale(KSIG, uint g [[thread_position_in_grid]]) {
   if (g < p.n) WF(1)[g] = p.f[0] * RF(0)[g];
 }
+// The fused elementwise chain (plan v13): p.flags = the stage bytes, first
+// stage low; p.f[0..1] = the scale immediates; operand slots as on the
+// CPU (0 = x, 1..2 = the binary stages' tensors, 3 = out). One thread per
+// element runs the stages in order, each in a statement of its own, so a
+// stage's product is rounded before the next stage's add can see it — the
+// values the k_scale / k_add_ew / k_mul_ew sequence would have stored.
+kernel void k_fused_map(KSIG, uint g [[thread_position_in_grid]]) {
+  if (g >= p.n) return;
+  float run = RF(0)[g];
+  for (uint s = 0; s < 4; ++s) {
+    const uint stage = (p.flags >> (8u * s)) & 0xFFu;
+    const uint kind = stage & 0x0Fu;
+    if (kind == 0u) break;
+    const uint arg = (stage >> 4u) & 0x3u;
+    const bool right = (stage & 0x80u) != 0u;
+    float next = run;
+    if (kind == 1u) {
+      const float y = (arg == 1u ? RF(1) : RF(2))[g];
+      next = right ? y + run : run + y;
+    } else if (kind == 2u) {
+      const float y = (arg == 1u ? RF(1) : RF(2))[g];
+      next = right ? y * run : run * y;
+    } else if (kind == 3u) {
+      next = p.f[arg] * run;
+    } else if (kind == 4u) {
+      next = relu_expr(run);
+    } else if (kind == 5u) {
+      next = gelu_expr(run);
+    } else if (kind == 6u) {
+      next = silu_expr(run);
+    }
+    run = next;
+  }
+  WF(3)[g] = run;
+}
 kernel void k_fill(KSIG, uint g [[thread_position_in_grid]]) {
   if (g < p.n) WF(0)[g] = p.f[0];
 }

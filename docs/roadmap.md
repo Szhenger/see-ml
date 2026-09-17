@@ -100,6 +100,27 @@ in the aux words) applied per element in one pass. Grafts onto the same
 no-backward legality analysis. Only pursue if profiling after 1a still
 shows elementwise chains hot; 1a covers the dominant MLP pattern.
 
+> **Status: SHIPPED (2026-09-17, E4 / #83, plan v13) — and measured to be
+> worth almost nothing today.** `ElementwiseChainFuser` folds same-shape
+> chains with single-reader intermediates into `kFusedMap`; on the Tier A
+> `dec_wide` plan it folds 39 chains and removes 47 of 504 training
+> instructions (37 of 185 in eval), bit-identically. The kernel is 1.2–2.0×
+> the sequence it replaces (scale → add: 0.115 → 0.058 ms on a 512 × 2048
+> activation at 8 threads). The step does not move: CPU 820.2 → 819.9 ms at
+> one thread, 170.1 → 169.9 at eight, Metal 50.1 → 49.8 — inside run-to-run
+> noise. The gate this phase was written under said "only if profiling
+> still shows elementwise round trips", and profiling (`seeml-plan-probe
+> --profile`) says the whole elementwise family is 2.1% of the CPU step at
+> one thread and 5.7% at eight, against 68–70% GEMM and 23–26% attention;
+> the audits' prediction that it would be the surviving bottleneck after
+> E1/E3 did not hold. It ships because it is bitwise-free and the
+> mechanism is what deeper fusion (backward activations, norm epilogues)
+> would build on — not because it moved a Tier A number. The transient
+> arena grows 1.2% on that plan (folding moves every read of a chain to
+> its tail, which lengthens the operands' lifetimes by more than dropping
+> the intermediates saves); `--no-fuse-elementwise` restores the unfused
+> program.
+
 **Verification.** Bitwise-equality fused-vs-unfused (eval loss, probs
 range); kernels_test golden refs for each epilogue; validator flag-bit
 rejection tests; system test under distillation confirming teacher fusion

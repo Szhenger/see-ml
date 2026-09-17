@@ -75,7 +75,7 @@ class ReaderTest(unittest.TestCase):
         blob = assemble(64, train=[(19, 0, (0, fx.f32_bits(2.5), N, N),
                                     (4, 0, 0))], persistent=b"\1" * 8)
         plan = fx.Plan(blob)
-        self.assertEqual((plan.version, plan.arena_size), (12, 64))
+        self.assertEqual((plan.version, plan.arena_size), (13, 64))
         self.assertEqual(len(plan.sections["train"]), 1)
         self.assertEqual(plan.sections["train"][0].opcode, 19)
         self.assertEqual(plan.initial_arena()[:9], b"\1" * 8 + b"\0")
@@ -444,7 +444,10 @@ MATRIX = [
     # The v11 program shapes plan v12 replaces, still compiled on request:
     # a standalone clip per tensor, RoPE angles recomputed in place.
     ("dec_v11_shape", "decoder.smf", "decoder_corpus.sds", 12,
-     ["--clip-norm", "0.5", "--no-fuse-clip", "--no-rope-table"]),
+     ["--clip-norm", "0.5", "--no-fuse-clip", "--no-rope-table",
+      "--no-fuse-elementwise"]),
+    ("mlp_unfused_maps", "mlp.smf", "class.sds", 8,
+     ["--no-fuse-elementwise", "--no-fuse-epilogue"]),
 ]
 # Opcodes no seeml-update-compile invocation produces today: kNop is a
 # placeholder, kCopy a utility no pass selects, and kReduceRows the bias
