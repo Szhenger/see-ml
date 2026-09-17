@@ -385,10 +385,14 @@ TEST(UpdateEngineTrain, UsesDefaultStepsWhenZeroRequested) {
 }
 
 TEST(UpdateEngineTrain, RejectsZeroStepsWithoutDefault) {
-  UpdateConfig config = BaseConfig(kBatch);
-  config.default_steps = 0;
-  const std::vector<uint8_t> plan = CompilePlan(config);
+  // The compiler refuses a zero budget (E8), so no current plan has one;
+  // the runtime guard is for the plans that predate that, reproduced here
+  // by patching the header.
+  std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
   ASSERT_FALSE(plan.empty());
+  PlanHeader h = HeaderOf(plan);
+  h.default_steps = 0;
+  PutHeader(plan, h);
   UpdateEngine engine;
   ASSERT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
 
@@ -1093,6 +1097,169 @@ TEST(UpdateEngineLr, CosineWithWarmupBoundaryBehavior) {
   EXPECT_NEAR(engine.EffectiveLr(), 0.1f * 0.1f, 1e-6);
   engine.SetStep(1000);  // past the horizon: clamped at the floor
   EXPECT_NEAR(engine.EffectiveLr(), 0.1f * 0.1f, 1e-6);
+}
+
+// --- The run's horizon (E8, #91) ----------------------------------------------
+
+/// A cosine plan with a 1000-step compiled budget and the default floor.
+std::vector<uint8_t> CosinePlan(uint64_t warmup = 0) {
+  UpdateConfig config = BaseConfig(kBatch);
+  config.optimizer.lr = 0.1f;
+  config.optimizer.lr_schedule = LrSchedule::kCosineWithWarmup;
+  config.optimizer.warmup_steps = warmup;
+  config.default_steps = 1000;
+  return CompilePlan(config);
+}
+
+TEST(UpdateEngineLr, TheHorizonIsTheRunNotTheCompiledBudget) {
+  // The same 1000-step plan, run for 20 steps and for 60: each anneals
+  // over ITS OWN length and reaches the floor on its last step. Before E8
+  // the 20-step run ended at ~99.9% of the base rate (never annealed), and
+  // a run longer than the budget idled at the floor for the excess.
+  const std::vector<uint8_t> plan = CosinePlan();
+  ASSERT_FALSE(plan.empty());
+  EXPECT_EQ(HeaderOf(plan).min_lr_factor, 0.1f);  // the default floor
+  for (const uint64_t steps : {uint64_t{20}, uint64_t{60}}) {
+    UpdateEngine engine;
+    ASSERT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
+    ASSERT_OK_AND_ASSIGN(Dataset data, MakeClassificationData(64, kInDim, 3));
+    ASSERT_OK(engine.Train(data, steps, Quiet()));
+    EXPECT_EQ(engine.horizon(), steps);
+    EXPECT_EQ(engine.step(), steps);
+    EXPECT_NEAR(engine.EffectiveLr(), 0.1f * 0.1f, 1e-7);  // at the floor
+    engine.SetStep(steps / 2);  // and genuinely mid-anneal half way
+    EXPECT_NEAR(engine.EffectiveLr(), 0.1f * (0.1f + 0.9f * 0.5f), 1e-6);
+    engine.SetStep(1);
+    EXPECT_TRUE(engine.EffectiveLr() > 0.09f);
+  }
+  // No run yet: the hook falls back to the compiled budget, as before.
+  UpdateEngine idle;
+  ASSERT_OK(idle.LoadFromMemory(plan.data(), plan.size()));
+  EXPECT_EQ(idle.horizon(), 1000u);
+  idle.SetStep(5000);  // past the horizon with the DEFAULT floor: 0.1, not 0
+  EXPECT_NEAR(idle.EffectiveLr(), 0.1f * 0.1f, 1e-7);
+}
+
+TEST(UpdateEngineLr, ResumeTrainsTheRemainderOnTheSameSchedule) {
+  // An update interrupted at step 12 of 30 and resumed with NO step count
+  // trains exactly 18 more, anneals to the floor at step 30, and commits
+  // the same bits as the uninterrupted run. Before E8 the resume ran a
+  // whole extra default budget — 1000 steps — all of it past the horizon.
+  const std::vector<uint8_t> plan = CosinePlan(/*warmup=*/4);
+  ASSERT_FALSE(plan.empty());
+  auto data_at = [&]() -> Dataset {
+    auto d = MakeClassificationData(64, kInDim, 9);
+    if (!d) std::abort();
+    d->EnableShuffle(5);
+    return std::move(*d);
+  };
+  UpdateEngine straight;
+  ASSERT_OK(straight.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d1 = data_at();
+  TrainOptions record = Quiet();
+  record.record_loss_curve = true;
+  ASSERT_OK_AND_ASSIGN(auto whole, straight.Train(d1, 30, record));
+  const std::vector<uint8_t> want(
+      straight.arena(), straight.arena() + straight.header().persistent_size);
+
+  ScopedTempDir tmp;
+  const std::string ckpt = tmp.File("horizon.ckpt");
+  UpdateEngine first;
+  ASSERT_OK(first.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d2 = data_at();
+  TrainOptions interrupted = Quiet();
+  interrupted.checkpoint_path = ckpt;
+  interrupted.checkpoint_every = 1;
+  uint64_t polls = 0;
+  interrupted.should_stop = [&] { return polls++ == 12; };  // "power cut"
+  ASSERT_OK_AND_ASSIGN(auto cut, first.Train(d2, 30, interrupted));
+  EXPECT_TRUE(cut.stopped_early);
+  EXPECT_EQ(first.step(), 12u);
+
+  UpdateEngine resumed;
+  ASSERT_OK(resumed.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d3 = data_at();
+  TrainOptions ropt = Quiet();
+  ropt.checkpoint_path = ckpt;
+  ropt.resume = true;
+  ropt.record_loss_curve = true;
+  ASSERT_OK_AND_ASSIGN(auto rest, resumed.Train(d3, /*steps=*/0, ropt));
+  EXPECT_EQ(rest.steps, 18u);           // the remainder, not a new budget
+  EXPECT_EQ(resumed.step(), 30u);
+  EXPECT_EQ(resumed.horizon(), 30u);    // restored from the checkpoint
+  EXPECT_NEAR(resumed.EffectiveLr(), 0.1f * 0.1f, 1e-7);
+  ASSERT_EQ(rest.loss_curve.size(), 18u);
+  for (size_t i = 0; i < 18; ++i)
+    EXPECT_EQ(rest.loss_curve[i], whole.loss_curve[12 + i]);
+  const std::vector<uint8_t> got(
+      resumed.arena(), resumed.arena() + resumed.header().persistent_size);
+  EXPECT_TRUE(want == got);
+
+  // A finished run resumed again has nothing left: zero steps, no error.
+  ASSERT_OK(resumed.SaveCheckpoint(ckpt));
+  UpdateEngine done;
+  ASSERT_OK(done.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d4 = data_at();
+  ASSERT_OK_AND_ASSIGN(auto nothing, done.Train(d4, 0, ropt));
+  EXPECT_EQ(nothing.steps, 0u);
+  EXPECT_EQ(done.step(), 30u);
+
+  // An explicit count on resume stretches the schedule to cover it...
+  UpdateEngine more;
+  ASSERT_OK(more.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d5 = data_at();
+  ASSERT_OK(more.Train(d5, 10, ropt));
+  EXPECT_EQ(more.step(), 40u);
+  EXPECT_EQ(more.horizon(), 40u);
+  // ... and an explicit horizon trains the head of a longer schedule.
+  UpdateEngine head;
+  ASSERT_OK(head.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d6 = data_at();
+  TrainOptions hopt = Quiet();
+  hopt.horizon_steps = 30;
+  hopt.record_loss_curve = true;
+  ASSERT_OK_AND_ASSIGN(auto early, head.Train(d6, 12, hopt));
+  for (size_t i = 0; i < 12; ++i)
+    EXPECT_EQ(early.loss_curve[i], whole.loss_curve[i]);
+  hopt.horizon_steps = 5;  // a horizon that ends before the run does
+  UpdateEngine bad;
+  ASSERT_OK(bad.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d7 = data_at();
+  EXPECT_ERROR_CONTAINS(bad.Train(d7, 12, hopt), "ends before the run");
+}
+
+TEST(UpdateEngineLr, V3CheckpointsStillResume) {
+  // A pre-E8 (v3) checkpoint has no horizon: it resumes on the plan's
+  // compiled default, exactly as it always did. Reproduced by rewriting a
+  // v4 file: drop the 8-byte horizon and set the version word back.
+  const std::vector<uint8_t> plan = CompilePlan(BaseConfig(kBatch));
+  ASSERT_FALSE(plan.empty());
+  ScopedTempDir tmp;
+  const std::string v4 = tmp.File("v4.ckpt"), v3 = tmp.File("v3.ckpt");
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
+  ASSERT_OK_AND_ASSIGN(Dataset data, MakeClassificationData(64, kInDim, 3));
+  ASSERT_OK(engine.Train(data, 4, Quiet()));
+  ASSERT_OK(engine.SaveCheckpoint(v4));
+  std::ifstream in(v4, std::ios::binary);
+  std::vector<char> bytes((std::istreambuf_iterator<char>(in)),
+                          std::istreambuf_iterator<char>());
+  const uint32_t version3 = 3;
+  std::memcpy(bytes.data() + 4, &version3, sizeof(version3));
+  bytes.erase(bytes.begin() + 40, bytes.begin() + 48);  // the v4 tail
+  std::ofstream(v3, std::ios::binary).write(bytes.data(),
+                                            static_cast<std::streamsize>(
+                                                bytes.size()));
+  UpdateEngine old;
+  ASSERT_OK(old.LoadFromMemory(plan.data(), plan.size()));
+  ASSERT_OK(old.LoadCheckpoint(v3));
+  EXPECT_EQ(old.step(), 4u);
+  EXPECT_EQ(old.horizon(), old.header().default_steps);
+  const std::vector<uint8_t> a(engine.arena(),
+                               engine.arena() + engine.header().persistent_size);
+  const std::vector<uint8_t> b(old.arena(),
+                               old.arena() + old.header().persistent_size);
+  EXPECT_TRUE(a == b);
 }
 
 }  // namespace

@@ -203,15 +203,17 @@ class Plan:
         arena[:self.persistent_size] = self.blob[o:o + self.persistent_size]
         return arena
 
-    def effective_lr(self, step):
+    def effective_lr(self, step, horizon=0):
         """UpdateEngine::EffectiveLr in f32 arithmetic: linear warmup, then
-        cosine to lr * min_lr_factor across default_steps, clamped after."""
+        cosine to lr * min_lr_factor across the RUN's horizon (E8, #91: the
+        steps the update actually trains; 0 = the plan's default_steps),
+        clamped after."""
         base = f32(self.lr)
         if self.lr_schedule != 1:
             return base
         if self.warmup_steps > 0 and step <= self.warmup_steps:
             return f32(f32(base * f32(step)) / f32(self.warmup_steps))
-        horizon = max(0, self.default_steps - self.warmup_steps)
+        horizon = max(0, (horizon or self.default_steps) - self.warmup_steps)
         floor = f32(base * f32(self.min_lr_factor))
         if horizon == 0 or step - self.warmup_steps >= horizon:
             return floor
@@ -1261,6 +1263,7 @@ class Executor:
         mem = ArenaMemory if backend.arena_views else SlotMemory
         self.mem = mem(plan, backend)
         self.step = 0
+        self.horizon = 0  # the run's LR horizon; 0 = the plan's default
         unknown = sorted({i.opcode for s in plan.sections.values() for i in s}
                          - set(INTERPRETER))
         if unknown:
@@ -1269,7 +1272,8 @@ class Executor:
 
     def step_scalars(self, step=None):
         p, step = self.plan, self.step if step is None else step
-        return {"lr": p.effective_lr(step), "beta1": f32(p.beta1),
+        return {"lr": p.effective_lr(step, self.horizon),
+                "beta1": f32(p.beta1),
                 "beta2": f32(p.beta2), "eps": f32(p.eps),
                 "weight_decay": f32(p.weight_decay), "step": max(step, 1)}
 
@@ -1545,6 +1549,7 @@ def cmd_run(args):
         corpus.enable_shuffle(args.seed)
     ex = Executor(plan, backend)
     steps = args.steps or plan.default_steps
+    ex.horizon = steps  # a fresh run anneals over its own length
     report = {"plan": args.plan, "backend": backend.name,
               "device": backend.device, "steps": steps, "loss_curve": []}
     if val is not None and plan.sections["eval"]:

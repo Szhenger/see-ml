@@ -15,7 +15,9 @@
 //       [--clip-norm 0]                per-tensor L2 gradient clip (0 = off)
 //       [--lr-schedule const|cosine]   runtime LR schedule
 //       [--warmup 0]                   warmup steps (cosine schedule)
-//       [--min-lr-factor 0]            cosine floor as a fraction of --lr
+//       [--min-lr-factor 0.1]          cosine floor as a fraction of --lr
+//       [--allow-zero-lr]              permit --min-lr-factor 0 (the last
+//                                      step then trains at LR 0)
 //       [--quantize-base]              int8-quantize frozen weights in rodata
 //       [--bf16-base]                  store frozen weights as bfloat16 rodata
 //                                      (2x smaller, f32 compute; exclusive with
@@ -84,7 +86,7 @@ void PrintUsage() {
                "  [--lora-rank R] [--lora-alpha A] [--lora-seed S]\n"
                "  [--targets substr,...] [--optimizer adamw|sgd] [--lr LR]\n"
                "  [--weight-decay WD] [--clip-norm C]\n"
-               "  [--lr-schedule const|cosine] [--warmup N]\n"
+               "  [--lr-schedule const|cosine] [--warmup N] [--allow-zero-lr]\n"
                "  [--min-lr-factor F] [--quantize-base | --bf16-base]\n"
                "  [--steps N]\n"
                "  [--grad-accum G]\n"
@@ -253,8 +255,8 @@ int main(int argc, char** argv) {
       return Fail("--data-batch must be a positive integer, got '" + *v + "'");
   }
   if (auto v = args.TakeValue("--steps")) {
-    if (!ParseU64(*v, &config.default_steps))
-      return Fail("--steps must be a non-negative integer, got '" + *v + "'");
+    if (!ParseU64(*v, &config.default_steps) || config.default_steps == 0)
+      return Fail("--steps must be a positive integer, got '" + *v + "'");
   }
   if (auto v = args.TakeValue("--grad-accum")) {
     uint64_t g = 0;
@@ -322,16 +324,27 @@ int main(int argc, char** argv) {
       config.optimizer.lr_schedule = LrSchedule::kCosineWithWarmup;
     else return Fail("unknown --lr-schedule '" + *v + "'");
   }
+  // The cosine schedule's two knobs are errors under `const` (E8, #91): a
+  // flag that cannot apply is never silently ignored — the header's rule.
+  const bool cosine =
+      config.optimizer.lr_schedule == LrSchedule::kCosineWithWarmup;
   if (auto v = args.TakeValue("--warmup")) {
+    if (!cosine)
+      return Fail("--warmup applies to --lr-schedule cosine only");
     if (!ParseU64(*v, &config.optimizer.warmup_steps))
       return Fail("--warmup must be a non-negative integer, got '" + *v + "'");
   }
   if (auto v = args.TakeValue("--min-lr-factor")) {
+    if (!cosine)
+      return Fail("--min-lr-factor applies to --lr-schedule cosine only");
     if (!ParseF32(*v, &config.optimizer.min_lr_factor) ||
         config.optimizer.min_lr_factor < 0.0f ||
         config.optimizer.min_lr_factor > 1.0f)
       return Fail("--min-lr-factor must be in [0, 1], got '" + *v + "'");
   }
+  config.optimizer.allow_zero_lr = args.Take("--allow-zero-lr");
+  if (config.optimizer.allow_zero_lr && !cosine)
+    return Fail("--allow-zero-lr applies to --lr-schedule cosine only");
   config.quantize_base = args.Take("--quantize-base");
   config.bf16_base = args.Take("--bf16-base");
   if (config.quantize_base && config.bf16_base)

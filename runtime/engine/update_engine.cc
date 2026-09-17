@@ -368,6 +368,7 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   plan_size_ = plan_size;
   rodata_ = plan + header.rodata_offset;
   step_ = 0;
+  horizon_ = 0;
   merged_ = false;
   return {};
 }
@@ -459,13 +460,15 @@ float UpdateEngine::EffectiveLr() const {
       up::LrSchedule::kCosineWithWarmup)
     return base;
   // Linear warmup over warmup_steps, cosine decay to lr*min_lr_factor across
-  // the plan's default_steps horizon; clamped at the floor beyond it.
+  // the RUN's horizon (horizon(): the steps this update actually trains,
+  // E8 #91 — not the plan's compile-time budget); clamped at the floor
+  // beyond it.
   if (header_.warmup_steps > 0 && step_ <= header_.warmup_steps)
     return base * static_cast<float>(step_) /
            static_cast<float>(header_.warmup_steps);
-  const uint64_t horizon = header_.default_steps > header_.warmup_steps
-                               ? header_.default_steps - header_.warmup_steps
-                               : 0;
+  const uint64_t run = this->horizon();
+  const uint64_t horizon =
+      run > header_.warmup_steps ? run - header_.warmup_steps : 0;
   const float floor = base * header_.min_lr_factor;
   if (horizon == 0 || step_ - header_.warmup_steps >= horizon) return floor;
   const float t = static_cast<float>(step_ - header_.warmup_steps) /
@@ -630,10 +633,7 @@ std::expected<TrainReport, std::string> UpdateEngine::Train(
 std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
     Dataset& data, uint64_t steps, const TrainOptions& options) {
   if (!arena_) return diag::executing::Error("no plan loaded");
-  if (steps == 0) steps = header_.default_steps;
-  if (steps == 0)
-    return diag::executing::Error(
-        "no steps requested and the plan has no default");
+  const bool explicit_steps = steps != 0;
   if (auto r = ValidateDataset(data); !r) return std::unexpected(r.error());
   if (options.validation)
     if (auto r = ValidateDataset(*options.validation); !r)
@@ -663,6 +663,34 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
     }
   }
 
+  // The step count and the schedule horizon, decided AFTER the checkpoint
+  // is in (E8, #91): until then a resume could not know how much of the
+  // run was left, so it asked for a full default budget — all of it past
+  // the old fixed horizon.
+  const bool resumed = step_ > 0;
+  if (!explicit_steps) {
+    if (resumed && horizon_ > 0)
+      steps = horizon_ > step_ ? horizon_ - step_ : 0;  // the remainder
+    else
+      steps = header_.default_steps;
+    if (steps == 0 && !resumed)
+      return diag::executing::Error(
+          "no steps requested and the plan has no default");
+  }
+  if (options.horizon_steps != 0) {
+    horizon_ = options.horizon_steps;
+  } else if (explicit_steps || horizon_ == 0) {
+    uint64_t end = 0;
+    if (__builtin_add_overflow(step_, steps, &end))
+      return diag::executing::Error("the requested step count overflows");
+    horizon_ = end;
+  }  // else: a resume of the remainder keeps the checkpoint's horizon
+  if (horizon_ < step_ + steps && options.horizon_steps != 0)
+    return diag::executing::Error(
+        "the requested horizon (" + std::to_string(horizon_) +
+        " steps) ends before the run does (step " +
+        std::to_string(step_ + steps) + ")");
+
   TrainReport report;
   if (options.validation) {
     auto v = EvaluateMetrics(*options.validation);
@@ -679,7 +707,8 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
           ? nullptr
           : reinterpret_cast<uint8_t*>(WritePtr(header_.label_ref));
 
-  const uint64_t window = std::max<uint64_t>(1, std::min<uint64_t>(20, steps / 5));
+  const uint64_t window =
+      std::max<uint64_t>(1, std::min<uint64_t>(20, steps / 5));
   double first_sum = 0.0, last_sum = 0.0;
   uint64_t first_n = 0, last_n = 0;
   if (options.record_loss_curve) report.loss_curve.reserve(steps);
@@ -892,16 +921,19 @@ std::expected<void, std::string> UpdateEngine::CommitToModel(
 
 std::expected<void, std::string> UpdateEngine::SaveCheckpoint(
     const std::string& path) const {
+  // The run horizon rides along (v4): a resume trains the remainder to it.
   return SaveCheckpointFile(path, header_.plan_hash, step_, arena_,
-                            header_.persistent_size);
+                            header_.persistent_size, horizon_);
 }
 
 std::expected<void, std::string> UpdateEngine::LoadCheckpoint(
     const std::string& path) {
+  uint64_t horizon = 0;
   auto step = LoadCheckpointFile(path, header_.plan_hash,
-                                 header_.persistent_size, arena_);
+                                 header_.persistent_size, arena_, &horizon);
   if (!step) return std::unexpected(step.error());
   step_ = *step;
+  horizon_ = horizon;  // 0 from a v3 file: the plan's default, as before
   // The restored persistent segment replaces the adapter state any earlier
   // RunMerge materialized deltas from; committing those would patch deltas
   // that no longer match the parameters.

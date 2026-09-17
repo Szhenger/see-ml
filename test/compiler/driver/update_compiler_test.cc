@@ -587,4 +587,50 @@ TEST(UpdateCompiler, TheConsumingCompileIsTheSamePlanAndReleasesWhatItPacked) {
   }
 }
 
+// --- The schedule triple is validated at compile time (E8, #91) ---------------
+
+TEST(UpdateCompiler, RefusesSchedulesThatWouldMisbehaveSilently) {
+  SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 91);
+  auto compile = [&](auto&& edit) {
+    UpdateConfig config = BaseConfig(kBatch);
+    config.default_steps = 1000;
+    edit(config);
+    return UpdateCompiler(config).Compile(model);
+  };
+  auto cosine = [](UpdateConfig& c) {
+    c.optimizer.lr_schedule = LrSchedule::kCosineWithWarmup;
+  };
+  EXPECT_ERROR_CONTAINS(compile([](UpdateConfig& c) { c.default_steps = 0; }),
+                        "step budget must be positive");
+  EXPECT_ERROR_CONTAINS(compile([&](UpdateConfig& c) {
+                          cosine(c);
+                          c.optimizer.warmup_steps = 1000;  // == the budget
+                        }),
+                        "must be shorter than the step budget");
+  EXPECT_ERROR_CONTAINS(
+      compile([](UpdateConfig& c) { c.optimizer.warmup_steps = 10; }),
+      "cosine schedule only");
+  EXPECT_ERROR_CONTAINS(compile([&](UpdateConfig& c) {
+                          cosine(c);
+                          c.optimizer.min_lr_factor = 0.0f;
+                        }),
+                        "learning rate of zero");
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate zero, compile([&](UpdateConfig& c) {
+                         cosine(c);
+                         c.optimizer.min_lr_factor = 0.0f;
+                         c.optimizer.allow_zero_lr = true;  // asked for twice
+                       }));
+  EXPECT_EQ(HeaderOf(zero).min_lr_factor, 0.0f);
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate normal, compile([&](UpdateConfig& c) {
+                         cosine(c);
+                         c.optimizer.warmup_steps = 999;
+                       }));
+  EXPECT_EQ(HeaderOf(normal).min_lr_factor, 0.1f);  // the default floor
+  // A constant-schedule plan records no floor: byte-identical to the plans
+  // compiled before the default moved.
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate constant, compile([](UpdateConfig&) {}));
+  EXPECT_EQ(HeaderOf(constant).min_lr_factor, 0.0f);
+  EXPECT_EQ(HeaderOf(constant).warmup_steps, 0u);
+}
+
 }  // namespace

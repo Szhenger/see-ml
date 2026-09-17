@@ -50,7 +50,13 @@ struct OptimizerSpec {
   float clip_norm = 0.0f;
   LrSchedule lr_schedule = LrSchedule::kConstant;
   uint64_t warmup_steps = 0;
-  float min_lr_factor = 0.0f;  // cosine floor as a fraction of lr
+  // The cosine floor as a fraction of lr. 0.1 (E8, #91), not 0: a floor of
+  // zero makes the schedule's last step — and, before the horizon followed
+  // the run, every step past it — train at LR 0, moving nothing while
+  // still updating AdamW's moments. A zero floor must be asked for twice:
+  // min_lr_factor = 0 AND allow_zero_lr.
+  float min_lr_factor = 0.1f;
+  bool allow_zero_lr = false;
 };
 
 struct UpdateConfig {
