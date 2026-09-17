@@ -168,11 +168,6 @@ add_executable(seeml-seeu-dump tool/seeml_seeu_dump.cc)
 # PlanSelfHash (the v4 integrity seal) runs on the parallel substrate.
 target_link_libraries(seeml-seeu-dump PRIVATE seeml_parallel)
 
-# The frontier executor's C++ oracle (tool/frontier_exec.py, P4 #78): runs
-# one plan section through one executor backend and traces every write.
-add_executable(seeml-plan-probe tool/seeml_plan_probe.cc)
-target_link_libraries(seeml-plan-probe PRIVATE seeml_update_rt)
-
 # ==============================================================================
 # Tests
 #

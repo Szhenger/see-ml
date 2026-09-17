@@ -97,7 +97,6 @@ compile runtime/engine/contract.cc            engine_contract.o
 compile runtime/engine/update_engine.cc       update_engine.o
 compile tool/seeml_update_compile.cc          seeml_update_compile.o
 compile tool/seeml_seeu_dump.cc               seeml_seeu_dump.o
-compile tool/seeml_plan_probe.cc              seeml_plan_probe.o
 compile test/framework/registry.cc            seetest_registry.o
 compile test/framework/seetest_main.cc        seetest_main.o
 compile test/support/scoped_temp_dir.cc       scoped_temp_dir.o
@@ -138,10 +137,6 @@ eval "$CXX -pthread build/seeml_update_compile.o $LIBS $METAL_LDFLAGS -o build/s
 echo "  LINK seeml-seeu-dump"
 # PlanSelfHash (the v4 integrity seal) runs on the parallel substrate.
 eval "$CXX -pthread build/seeml_seeu_dump.o build/parallel_for.o -o build/seeml-seeu-dump"
-echo "  LINK seeml-plan-probe"
-# The frontier executor's C++ oracle (tool/frontier_exec.py, P4): one plan
-# section through one executor backend, every write traced.
-eval "$CXX -pthread build/seeml_plan_probe.o $LIBS $METAL_LDFLAGS -o build/seeml-plan-probe"
 
 if seeml_bench_enabled; then
   echo "  CXX+LINK seeml-bench"

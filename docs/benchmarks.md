@@ -148,54 +148,6 @@ steps to 0.7× loss in ~2 s; serial vs 8-thread committed models are
 bitwise identical (the determinism overhead is therefore *measurable as
 pure speedup*, no correctness tax).
 
-## Pricing the frontier on a plan (`tool/frontier_exec.py`)
-
-The anchors above (torch.compile 2.8–5.6×, MLX ~20× in the v1.2.4 report)
-were measured on hand-matched PyTorch/MLX programs. `frontier_exec.py price`
-regenerates that comparison for **any compiled plan**, by interpreting the
-plan's own instruction stream through the frontier frameworks:
-
-```sh
-python3 tool/frontier_exec.py price out/pkg/update_plan.seeu \
-    --backends torch,torch-mps --probe build/seeml-plan-probe \
-    --cpp-backends cpu,metal --peak-gflops 1490 --report frontier.json
-```
-
-Each backend's cell carries `seeml-bench`'s fields under the same
-definitions (`step_ms` by steps-regression, `rows_per_s`, `tokens_per_s` /
-`samples_per_s`, `it_per_s`, `gemm_gflops` over the plan's own GEMM
-instructions, `mfu` against `--peak-gflops`, `step_ms_min/max`), plus
-`peak_rss_bytes` and the device string; the C++ numbers come from
-`seeml-plan-probe --time` (the instruction stream alone — no feeder, no
-evaluation — which is also all the Python side times). Read it with two
-rules. **It is a floor on the frontier, not the frontier:** the interpreter
-dispatches one opcode at a time, with no `torch.compile`, no `mx.compile`
-and no fusion, so a hand-written program on the same framework is faster.
-**MLX's default is not f32:** on recent Apple GPUs MLX's matmul runs a
-reduced-precision mode (~1e-3 relative error against f64 — the tool
-measures and prints it); `mlx` prices true f32 (`MLX_ENABLE_TF32=0`) and
-`mlx-tf32` the shipped default, one per process because MLX latches the
-switch. Any MLX throughput quoted without naming the mode is quoting the
-reduced-precision one.
-
-First row (Apple M5, the Tier A `dec_wide` shape V4096 D512 H8 S256 L4,
-LoRA r16, 512 tokens/step, f32 base, 2026-09-17):
-
-| executor | ms/step | tok/s | GEMM GFLOP/s | vs C++ CPU |
-|---|---:|---:|---:|---:|
-| SeeML C++ `cpu` | 248.6 | 2,060 | 108 | 1.00× |
-| PyTorch CPU (Accelerate/AMX), interpreted | 99.6 | 5,142 | 270 | 2.50× |
-| PyTorch MPS, interpreted | 82.1 | 6,239 | 328 | 3.03× |
-| MLX f32, interpreted | 58.6 | 8,734 | 459 | 4.24× |
-| MLX TF32 default, interpreted | 52.2 | 9,802 | 515 | 4.76× |
-| SeeML C++ `metal` | 29.7 | 17,237 | 905 | 8.37× |
-
-So on this plan the Accelerate exception is worth **at least 2.5×** on the
-CPU, and the C++ Metal backend already runs above what op-by-op MLX reaches.
-
-The same tool is the runtime's differential oracle — `frontier_exec.py
-diff` — described in [tool/README.md](../tool/README.md).
-
 ## Tuning the kernel policy (`tool/autotune.py`)
 
 The one knob the CPU kernels expose — the blocked GEMM's K and N tiles —
