@@ -19,6 +19,7 @@ tool/
   autotune.py             the offline tuner      ->  host-keyed kernel-policy table
   frontier_exec.py        the frontier executor  ->  runs a .seeu through NumPy / PyTorch / MLX
   seeml_plan_probe.cc     its C++ oracle half     (one plan section, every write traced)
+  certify_numerics.py     the numerics certifier ->  numerics_certificate.json, or a refusal
 ```
 
 ## What each one is for
@@ -96,6 +97,26 @@ split and shuffle. NumPy is the only requirement; `torch`, `torch-mps`,
 The priced number is a floor on the frontier, not the frontier: the
 interpreter dispatches op by op, with no graph compile or fusion. Never
 shipped, never imported by the compiler or the runtime.
+
+**`certify_numerics.py`** is the gate in front of any relaxed-reduction
+plan (P3): *no certificate, no relaxed plan*. It trains the plan twice
+through the frontier executor on the plan's own operands (its frozen
+weights, the real corpus, the adapters as they move) — once with every
+reduction exact, once with every reduction inside a float64-reducing opcode
+(norms, losses, softmaxes, attention scores, the clip norm) recomputed in
+float32 over W strided lanes — and records the worst per-site output error
+on identical inputs, the rounding bound that holds for *any* summation
+order of those operands (so the certificate survives whatever schedule a
+kernel author picks), and the free-run loss and validation deviation with
+the update gate's verdict under both contracts. It grants or refuses
+against `--max-site-error` / `--max-loss-deviation`, binds the result to
+the plan and corpus by SHA-256, and `verify` holds a measured run (a
+`frontier_exec.py diff` report) to the certified tolerances.
+`pack_update.py` refuses to package a plan beside a certificate that does
+not vouch for it, so a recompile voids a certificate loudly. The relaxed
+opcode family itself is core-plane work that does not exist yet: today the
+certificate is the measured answer to "what would relaxing cost this
+plan", and the contract that family will be admitted under.
 
 **`autotune.py`** is the offline autotuner, the second Python-plane
 subsystem of the overhaul (P2): it sweeps CPU GEMM tile arms through

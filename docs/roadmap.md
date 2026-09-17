@@ -22,6 +22,19 @@ Cross-cutting ground rules, all now in place and to be leaned on:
 - **Bitwise determinism is a contract**: any change must either preserve
   per-element expression order exactly or be introduced as a new opcode the
   old path never emits.
+- **A relaxed reduction needs a certificate** (P3, #77): the float64,
+  fixed-order reductions may only be traded for vectorized float32 ones by
+  an opt-in opcode family, and only for a plan that
+  `tool/certify_numerics.py` has certified on its own operands — no
+  certificate, no relaxed plan. The tool and the contract exist; the opcode
+  family does not yet. First evidence (Apple M5, 2026-09-17, 8 model lanes):
+  on the Tier A `dec_wide` plan (S=256, d=64, V=4096) the worst per-site
+  output error is 3.3e-6 of the tensor's scale (the attention forward),
+  every site sits inside its any-order rounding bound (worst 5.0e-4, the
+  RMSNorm backward), and three free-run steps move the loss by 1.4e-7 and
+  the validation loss by 2.3e-7 relative, the gate deciding identically —
+  the doctrine's numerical cost of relaxing is one to two float32 ulps,
+  which prices the kernel work on throughput alone.
 
 ---
 

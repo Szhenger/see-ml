@@ -473,9 +473,13 @@ class TorchBackend:
     def __init__(self, device="cpu"):
         import numpy as np
         import torch
+        if not hasattr(torch, "frombuffer"):
+            raise ImportError(f"PyTorch {torch.__version__} predates "
+                              "torch.frombuffer (needs >= 1.10)")
         self.np, self.torch = np, torch
         self.name = "torch" if device == "cpu" else "torch-" + device
-        if device == "mps" and not torch.backends.mps.is_available():
+        if device == "mps" and not (hasattr(torch.backends, "mps") and
+                                    torch.backends.mps.is_available()):
             raise ImportError("PyTorch reports no MPS device")
         self.dev = torch.device(device)
         self.arena_views = device == "cpu"

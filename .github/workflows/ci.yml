@@ -297,6 +297,10 @@ jobs:
       # instruction, over the whole fixture matrix.
       - name: Frontier executor suite (differential oracle vs seeml-plan-probe)
         run: python3 -m unittest discover -s test/tool -p 'frontier_exec_test.py' -v
+      # The numerics certifier (P3, #77) over plans compiled just above:
+      # granted, refused, voided by a recompile, enforced by pack_update.py.
+      - name: Numerics certifier suite
+        run: python3 -m unittest discover -s test/tool -p 'certify_numerics_test.py' -v
       - name: Compile the plan and build the emitted package
         run: |
           ./build/seeml-update-compile --source out/model.smf --out out/pkg \
@@ -407,7 +411,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Byte-compile every tool script
-        run: python -m py_compile tool/export_model.py tool/bench_compare.py tool/pack_update.py tool/autotune.py tool/frontier_exec.py
+        run: python -m py_compile tool/export_model.py tool/bench_compare.py tool/pack_update.py tool/autotune.py tool/frontier_exec.py tool/certify_numerics.py
       - name: Packer unit tests (assembles the stub with the runner's g++)
         run: python -m unittest discover -s test/tool -p '*_test.py' -v
 
