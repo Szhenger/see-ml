@@ -46,6 +46,9 @@ STUB_FILE = "update_plan_embedded.S"
 DECIMAL_TU = "update_plan_embedded.cc"
 BUILD_SCRIPT = "build.sh"
 BINARY = "model_update"
+# The numerics certificate tool/certify_numerics.py writes beside a plan
+# (P3, #77). Optional — but one that is present must vouch for THIS plan.
+CERTIFICATE_FILE = "numerics_certificate.json"
 
 # The four bytes every plan starts with ("SEEU" little-endian; kSeeuMagic in
 # source/plan/schema.h). Checked only to refuse embedding a file that is not
@@ -276,6 +279,33 @@ def parse_args(argv: Sequence[str]) -> Options:
                    cxx=args.cxx, page_align=align, report=args.report)
 
 
+def check_certificate(package_dir: str, plan_path: str) -> Optional[dict]:
+    """None when the package carries no numerics certificate (every package
+    today); else its summary for the report. A certificate that does not
+    verify — issued for another plan, edited, or a refusal — is a packaging
+    error: recompiling a plan silently voids what was certified about it."""
+    cert_path = os.path.join(package_dir, CERTIFICATE_FILE)
+    if not os.path.exists(cert_path):
+        return None
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import certify_numerics  # tier 0 at import; NumPy only to certify
+    try:
+        with open(cert_path, "r", encoding="utf-8") as f:
+            cert = json.load(f)
+    except (OSError, ValueError) as e:
+        raise PackError(f"cannot read '{cert_path}': {e}") from e
+    problems = certify_numerics.check_certificate(cert, plan_path)
+    if problems:
+        raise PackError(f"'{cert_path}' does not vouch for this plan: "
+                        + "; ".join(problems)
+                        + " — re-run tool/certify_numerics.py or remove it")
+    return {"file": cert_path, "family": cert["contract"]["family"],
+            "sites": cert["contract"]["sites"],
+            "site_rel_tolerance": cert["tolerances"]["site_rel"]}
+
+
 def pack(opts: Options) -> dict:
     """Embed, adapt build.sh if needed, drop the decimal TU, maybe build.
     Returns the report dictionary."""
@@ -286,6 +316,7 @@ def pack(opts: Options) -> dict:
     decimal_path = os.path.join(pkg, DECIMAL_TU)
 
     plan_bytes = check_plan(plan_path)
+    certificate = check_certificate(pkg, plan_path)
 
     try:
         with open(script_path, "r", encoding="utf-8") as f:
@@ -343,6 +374,7 @@ def pack(opts: Options) -> dict:
         "build_seconds": (None if build_seconds is None
                           else round(build_seconds, 3)),
         "binary": os.path.join(pkg, BINARY) if opts.build else None,
+        "numerics_certificate": certificate,
     }
 
 
