@@ -448,7 +448,9 @@ void BlockedNT(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
               q2[kNtLanes] = {}, q3[kNtLanes] = {};
         size_t k = 0;
         for (; k + kNtLanes <= K; k += kNtLanes) {
-          float w0[kNtLanes], w1[kNtLanes], w2[kNtLanes], w3[kNtLanes];
+          // Only the int8 / bf16 instantiations widen; f32 reads B directly.
+          [[maybe_unused]] float w0[kNtLanes], w1[kNtLanes], w2[kNtLanes],
+              w3[kNtLanes];
           if constexpr (!std::is_same_v<BType, float>) {
             for (size_t l = 0; l < kNtLanes; ++l) {
               w0[l] = static_cast<float>(b0[k + l]);
