@@ -12,9 +12,11 @@
 // it, and applied to every fixture: the harness measures the geometry a
 // package would ship with. --gemm-tiles is the offline tuner's arm switch
 // (tool/autotune.py sweeps it); the report records the resolved policy,
-// the host key the table is keyed on, the host description, and the
-// analytic tiling (SuggestGemmTiling) so the tuner can measure it as an
-// arm.
+// the host key the table is keyed on, the host description, the tiles the
+// NN core actually WALKS under that policy (`walked_gemm_tiles`: the
+// header's tiles clamped to the packed panel — what "the geometry a
+// package ships with" means since E1), and the analytic tiling
+// (SuggestGemmTiling) so the tuner can measure it as an arm.
 //
 // Compiles the standard fixture set in-process (the seeded builders the
 // test suites share), trains each plan at every requested thread width, and
@@ -505,6 +507,7 @@ int main(int argc, char** argv) {
                ", \"l2_bytes\": %" PRIu64 ", \"simd_width_f32\": %zu},\n"
                "  \"kernel_policy\": {\"source\": \"%s\", \"gemm_tile_k\": %zu, "
                "\"gemm_tile_n\": %zu},\n"
+               "  \"walked_gemm_tiles\": {\"k\": %zu, \"n\": %zu},\n"
                "  \"analytic_gemm_tiles\": {\"k\": %zu, \"n\": %zu},\n"
                "  \"config\": {\"steps_lo\": %" PRIu64 ", \"steps_hi\": %"
                PRIu64 ", \"repeats\": %" PRIu64 ", \"threads\": \"%s\", "
@@ -517,6 +520,8 @@ int main(int argc, char** argv) {
                host_arch.physical_cores, host_arch.l1d_bytes,
                host_arch.l2_bytes, host_arch.simd_width_f32,
                policy->source.c_str(), effective_tiles.k, effective_tiles.n,
+               rt::kernels::FitToPanel(effective_tiles).k,
+               rt::kernels::FitToPanel(effective_tiles).n,
                analytic.kc, analytic.nc, *lo, *hi,
                *repeats, threads_csv->c_str(), peak_gflops);
 
