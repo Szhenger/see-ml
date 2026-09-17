@@ -5,7 +5,8 @@
 //   seeml-plan-probe --plan update_plan.seeu
 //                    --section train|eval|merge|step
 //                    --arena-in arena.bin --arena-out arena.bin
-//                    [--trace trace.bin | --time N] [--lr-bits 0xHHHHHHHH]
+//                    [--trace trace.bin | --time N | --profile N]
+//                    [--lr-bits 0xHHHHHHHH]
 //                    [--step N] [--backend cpu|metal|auto] [--threads N]
 //                    [--version]
 //
@@ -33,6 +34,13 @@
 // frontier_exec.py sets beside PyTorch's and MLX's for the same plan. It
 // measures the instruction stream alone (no feeder, no evaluation), which
 // is also all the Python side times.
+//
+// --profile N is Tier B's question — why did Tier A move — asked of one
+// plan: N executions (after a warm-up) with the backend flushed after every
+// instruction, wall time accumulated per opcode and, for the GEMM family,
+// per shape; one JSON object on stdout, largest first. Flushing per
+// instruction serializes a GPU backend, so the numbers attribute time,
+// they do not predict the unprofiled step.
 //
 // The extents come from DescribeInstruction — the bounds proof itself — so
 // the trace can never claim less than the instruction was allowed to write.
@@ -62,11 +70,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <fstream>
 #include <memory>
 #include <optional>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include "runtime/executor/backend.h"
@@ -155,7 +165,7 @@ struct Options {
   std::string section;
   rt::BackendKind backend = rt::BackendKind::kCpu;
   uint32_t lr_bits = 0;
-  uint64_t step = 1, threads = 0, timed = 0;
+  uint64_t step = 1, threads = 0, timed = 0, profiled = 0;
 };
 
 /// An input path the probe will read: it must name an existing regular
@@ -216,6 +226,7 @@ int ParseOptions(int argc, char** argv, Options* opts) {
   const auto step = args.TakeValue("--step");
   const auto threads = args.TakeValue("--threads");
   const auto timed = args.TakeValue("--time");
+  const auto profiled = args.TakeValue("--profile");
   if (const auto& flag = args.MissingValue())
     return Usage(*flag + " is missing its value");
   if (const auto unknown = args.FirstUnknown())
@@ -243,9 +254,11 @@ int ParseOptions(int argc, char** argv, Options* opts) {
   if (timed && (!ParseU64(*timed, 10, &opts->timed) || opts->timed == 0 ||
                 opts->timed > 1000000))
     return Usage("--time wants an execution count in [1, 1000000]");
-  if (timed && trace)
-    return Usage("--time and --trace are mutually exclusive (tracing "
-                 "flushes after every instruction)");
+  if (profiled && (!ParseU64(*profiled, 10, &opts->profiled) ||
+                   opts->profiled == 0 || opts->profiled > 1000000))
+    return Usage("--profile wants an execution count in [1, 1000000]");
+  if ((timed ? 1 : 0) + (trace ? 1 : 0) + (profiled ? 1 : 0) > 1)
+    return Usage("--time, --trace and --profile are mutually exclusive");
 
   // Classify every path before anything is opened (see the banner).
   std::string why;
@@ -393,6 +406,60 @@ std::string TimeProgram(rt::ExecutorBackend& backend, const Program& program,
   return {};
 }
 
+/// Profile mode: per-opcode (and per-GEMM-shape) wall time over `runs`
+/// executions, each instruction flushed; one JSON object on stdout.
+std::string ProfileProgram(rt::ExecutorBackend& backend,
+                           const Program& program,
+                           const rt::StepParams& params, uint64_t runs) {
+  using Clock = std::chrono::steady_clock;
+  std::map<std::string, std::pair<double, uint64_t>> rows;  // ms, count
+  auto key_of = [](const up::UpdateInstruction& ins) {
+    std::string key = "op" + std::to_string(ins.opcode);
+    const auto op = static_cast<up::OpCode>(ins.opcode);
+    const bool gemm =
+        op == up::OpCode::kGemmNN || op == up::OpCode::kGemmNT ||
+        op == up::OpCode::kGemmTN || op == up::OpCode::kGemmAccNN ||
+        op == up::OpCode::kGemmNNQ8 || op == up::OpCode::kGemmNTQ8 ||
+        op == up::OpCode::kGemmNNBF16 || op == up::OpCode::kGemmNTBF16;
+    if (gemm)
+      key += " M" + std::to_string(ins.out[0]) + " N" +
+             std::to_string(ins.out[1]) + " K" + std::to_string(ins.out[2]);
+    return key;
+  };
+  double total = 0.0;
+  for (uint64_t run = 0; run <= runs; ++run) {  // run 0 is the warm-up
+    for (size_t i = 0; i < program.instructions.size(); ++i) {
+      const auto t0 = Clock::now();
+      if (auto r = backend.Execute(program.instructions[i], params); !r)
+        return "instruction " + std::to_string(i) + ": " + r.error();
+      if (auto r = backend.Flush(); !r) return "flush: " + r.error();
+      if (run == 0) continue;
+      const double ms =
+          std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+      auto& row = rows[key_of(program.instructions[i])];
+      row.first += ms;
+      ++row.second;
+      total += ms;
+    }
+  }
+  std::vector<std::pair<std::string, std::pair<double, uint64_t>>> sorted(
+      rows.begin(), rows.end());
+  std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) {
+    return a.second.first > b.second.first;
+  });
+  const double n = static_cast<double>(runs);
+  std::printf("{\"backend\": \"%s\", \"executions\": %" PRIu64
+              ", \"ms_per_execution\": %.4f, \"rows\": [",
+              backend.name(), runs, total / n);
+  for (size_t i = 0; i < sorted.size(); ++i)
+    std::printf("%s{\"key\": \"%s\", \"ms\": %.4f, \"calls\": %" PRIu64 "}",
+                i ? ", " : "", sorted[i].first.c_str(),
+                sorted[i].second.first / n,
+                sorted[i].second.second / runs);
+  std::printf("]}\n");
+  return {};
+}
+
 /// Oracle mode: executes the section once; with `trace`, flushes after
 /// every instruction and records each extent it was allowed to write.
 std::string RunProgram(rt::ExecutorBackend& backend, const Program& program,
@@ -492,6 +559,11 @@ int main(int argc, char** argv) {
   if (opts.timed) {
     if (const std::string err =
             TimeProgram(backend, program, params, opts.section, opts.timed);
+        !err.empty())
+      return Fail(err);
+  } else if (opts.profiled) {
+    if (const std::string err =
+            ProfileProgram(backend, program, params, opts.profiled);
         !err.empty())
       return Fail(err);
   } else {

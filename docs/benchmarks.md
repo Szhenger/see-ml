@@ -83,6 +83,35 @@ shapes — the gap the C2 SIMD and G1b Metal projects are priced against.
 | **Metal vs CPU GEMM** | the G1a harness at real shapes | the G1b engine-integration go/no-go: dispatch overhead amortization point (at which M×N×K does GPU win?) |
 | **backend split** | `seeml-bench --backend metal` vs `cpu` on the same fixtures; `bench.json` carries `"backend"` and the gate keys rows by it | where the GPU pays: on this suite's tiny fixtures Metal runs at the dispatch floor (0.64–3.50× the CPU, Apple M5); on the SmolLM-135M-shaped `tok_smollm135m_q8` fixture 7.7× (1,786 vs 233 tok/s; 27.5× before #104 fixed the CPU's q8 NT kernel) — see "The first GPU baseline row" below |
 
+### The GEMM row after the redesign (E1, #80 — Apple M5, 2026-09-17)
+
+The Tier B question above, answered for the cores as redesigned — still
+portable C++ with no intrinsics, and bit-identical to the cores they
+replace on every shape, tiling and thread count (so no baseline, plan or
+checkpoint moved):
+
+| GEMM (M × K × N) | 1 thread before → after | 8 threads before → after |
+|---|---:|---:|
+| NN projection 512 × 512 × 512 | 29.5 → 48.9 GFLOP/s | 175 → 332 |
+| NN FFN-up 512 × 512 × 2048 | 22.5 → 50.9 | 142 → 357 |
+| NN lm-head 512 × 512 × 4096 | 19.7 → 49.5 | 127 → 351 |
+| NN SmolLM head 512 × 576 × 49152 | 13.8 → 48.8 | 67 → 260 |
+| NT dX 512 × 512 × 512 | 28.0 → 45.8 | 183 → 288 |
+| NT dX FFN 512 × 2048 × 512 | 26.9 → 46.6 | 177 → 300 |
+| TN adapter dB 16 × 512 × 512 (small M) | 27.6 → 39.2 | 101 → 134 |
+| int8 weights, NN 512 × 512 × 512 | 21.6 → 50.9 | 164 → 348 |
+
+Against the ~840 GFLOP/s NEON envelope the field report derived, the
+large-shape cores moved from 15–22% to **31–43% of peak** at eight threads —
+inside the 30–60% band where this document says hand-written SIMD is no
+longer clearly worth it. End to end: `dec_wide` 1,808 → 2,637 tok/s (8T)
+and 390 → 622 (1T); the SmolLM-135M-shaped `tok_smollm135m_q8` fixture
+196 → 269 tok/s on the CPU backend, losses identical to the last printed
+digit. `seeml-plan-probe --profile N` attributes a plan's step per opcode
+and GEMM shape: on `dec_wide` the GEMM family is now ~65% of the step and
+the attention family ~24% — the f64 score reductions of #77 and the S²
+cache of E11 (#94) are where the next CPU kernel dollar goes, not GEMM.
+
 ### The first GPU baseline row (v1.3.0 gate, 2026-09-15)
 
 `tok_smollm135m_q8` on an idle Apple M5 (10 GPU cores), `--threads 10`,

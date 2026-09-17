@@ -14,6 +14,7 @@
 
 #include "runtime/executor/update_kernels.h"
 #include "source/parallel/parallel_for.h"
+#include "source/plan/bf16.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 
@@ -1220,6 +1221,162 @@ TEST(KernelBatch, FusedClipRefusesANonFiniteNormAndTouchesNothing) {
     std::vector<float> q = p0;
     EXPECT_EQ(k::SgdStep(q.data(), g.data(), 3, 0.1f, 0.0f, 1.0f), finite);
     if (!finite) EXPECT_BITWISE_EQ_F32(q, p0);
+  }
+}
+
+// --- The GEMM redesign (E1, #80): traversal, never bits -----------------------
+// The register-blocked, packed, 2D-partitioned cores must compute exactly
+// what the kernels' reduction contract says, written here the naive way:
+//   NN family   c += a0*b0 + a1*b1 + a2*b2 + a3*b3 over k-quads aligned to
+//               k = 0, then one term at a time for the K % 4 tail;
+//   NT family   eight lanes by k mod 8, combined in lane order, times alpha.
+// Exact equality, on shapes chosen to cross every internal boundary: the
+// four-row block (M % 4), the 64-row band, column bands (few rows, wide
+// N), the N tile and the panel clamp (oversized tiles), the two-row dX
+// pairing threshold (K = 64) and its odd row and leftover columns.
+
+std::vector<float> ReferenceNN(const std::vector<float>& A,
+                               const std::vector<float>& B, size_t M,
+                               size_t N, size_t K, float alpha, bool a_t,
+                               std::vector<float> C) {
+  auto a_at = [&](size_t k, size_t m) {
+    return a_t ? A[k * M + m] : A[m * K + k];
+  };
+  for (size_t m = 0; m < M; ++m)
+    for (size_t n = 0; n < N; ++n) {
+      float c = C[m * N + n];
+      size_t k = 0;
+      for (; k + 4 <= K; k += 4) {
+        const float a0 = alpha * a_at(k, m), a1 = alpha * a_at(k + 1, m);
+        const float a2 = alpha * a_at(k + 2, m), a3 = alpha * a_at(k + 3, m);
+        c += a0 * B[k * N + n] + a1 * B[(k + 1) * N + n] +
+             a2 * B[(k + 2) * N + n] + a3 * B[(k + 3) * N + n];
+      }
+      for (; k < K; ++k) {
+        const float a = alpha * a_at(k, m);
+        c += a * B[k * N + n];
+      }
+      C[m * N + n] = c;
+    }
+  return C;
+}
+
+std::vector<float> ReferenceNT(const std::vector<float>& A,
+                               const std::vector<float>& B, size_t M,
+                               size_t N, size_t K, float alpha) {
+  std::vector<float> C(M * N);
+  for (size_t m = 0; m < M; ++m)
+    for (size_t n = 0; n < N; ++n) {
+      float lane[8] = {};
+      for (size_t k = 0; k < K; ++k) lane[k % 8] += A[m * K + k] * B[n * K + k];
+      float sum = lane[0];
+      for (size_t l = 1; l < 8; ++l) sum += lane[l];
+      C[m * N + n] = alpha * sum;
+    }
+  return C;
+}
+
+struct GemmShape {
+  size_t M, N, K;
+};
+constexpr GemmShape kGemmShapes[] = {
+    {1, 1, 1},      {3, 5, 7},      {4, 4, 4},     {5, 9, 3},
+    {67, 129, 66},  {130, 257, 63}, {131, 517, 203},  // ragged everywhere
+    {8, 1100, 300},                                   // column bands
+    {2, 700, 900},  {257, 33, 64},  {66, 131, 65},    // NT pairing edges
+};
+
+TEST(GemmRedesign, TheNNFamilyIsTheReferenceReductionExactly) {
+  for (const GemmShape& sh : kGemmShapes) {
+    const size_t M = sh.M, N = sh.N, K = sh.K;
+    const auto A = RandnVector(M * K, 1000 + M);
+    const auto B = RandnVector(K * N, 2000 + N);
+    const auto C0 = RandnVector(M * N, 3000 + K);  // GemmAccNN's running C
+    const std::vector<float> zeros(M * N, 0.0f);
+    const auto want_nn = ReferenceNN(A, B, M, N, K, 1.0f, false, zeros);
+    const auto want_tn = ReferenceNN(A, B, M, N, K, 1.0f, true, zeros);
+    const auto want_acc = ReferenceNN(A, B, M, N, K, 0.375f, false, C0);
+    // The runtime defaults, a tiling that forces the panel clamp, and the
+    // smallest legal one.
+    for (const k::GemmTiles tiles :
+         {k::kDefaultGemmTiles, k::GemmTiles{4096, 100000}, k::GemmTiles{4, 1}}) {
+      for (const size_t threads : {size_t{1}, size_t{8}}) {
+        ScopedThreads scoped(threads);
+        std::vector<float> got(M * N, 9.0f);  // must be overwritten
+        k::GemmNN(A.data(), B.data(), got.data(), M, N, K, nullptr,
+                  seeml::update::EpilogueAct::kNone, tiles);
+        EXPECT_BITWISE_EQ_F32(want_nn, got);
+        std::fill(got.begin(), got.end(), 9.0f);
+        k::GemmTN(A.data(), B.data(), got.data(), M, N, K, tiles);
+        EXPECT_BITWISE_EQ_F32(want_tn, got);
+        got = C0;
+        k::GemmAccNN(A.data(), B.data(), got.data(), M, N, K, 0.375f, tiles);
+        EXPECT_BITWISE_EQ_F32(want_acc, got);
+      }
+    }
+  }
+}
+
+TEST(GemmRedesign, TheNTFamilyIsTheReferenceReductionExactly) {
+  for (const GemmShape& sh : kGemmShapes) {
+    const size_t M = sh.M, N = sh.N, K = sh.K;
+    const auto A = RandnVector(M * K, 4000 + M);
+    const auto B = RandnVector(N * K, 5000 + N);
+    const auto want = ReferenceNT(A, B, M, N, K, 1.0f);
+    for (const k::GemmTiles tiles : {k::kDefaultGemmTiles, k::GemmTiles{8, 3}}) {
+      for (const size_t threads : {size_t{1}, size_t{8}}) {
+        ScopedThreads scoped(threads);
+        std::vector<float> got(M * N, 9.0f);
+        k::GemmNT(A.data(), B.data(), got.data(), M, N, K, tiles);
+        EXPECT_BITWISE_EQ_F32(want, got);
+      }
+    }
+  }
+}
+
+TEST(GemmRedesign, PackedInt8AndBf16WeightsWidenToTheSameBits) {
+  // The panel widens a tile once instead of once per sweep; widening is
+  // exact, so the q8 and bf16 GEMMs must equal the f32 GEMMs run over the
+  // widened matrix (times the dequant scale, which rides alpha).
+  for (const GemmShape& sh : {GemmShape{131, 517, 203}, GemmShape{6, 900, 70}}) {
+    const size_t M = sh.M, N = sh.N, K = sh.K;
+    const auto A = RandnVector(M * K, 77);
+    std::vector<int8_t> q(K * N);
+    std::vector<float> widened(K * N);
+    for (size_t i = 0; i < q.size(); ++i) {
+      q[i] = static_cast<int8_t>(static_cast<int>((i * 37) % 255) - 127);
+      widened[i] = static_cast<float>(q[i]);
+    }
+    const float scale = 0.0131f;
+    const std::vector<float> zeros(M * N, 0.0f);
+    const auto want = ReferenceNN(A, widened, M, N, K, scale, false, zeros);
+    for (const size_t threads : {size_t{1}, size_t{8}}) {
+      ScopedThreads scoped(threads);
+      std::vector<float> got(M * N, 9.0f);
+      k::GemmNNQ8(A.data(), q.data(), got.data(), M, N, K, scale);
+      EXPECT_BITWISE_EQ_F32(want, got);
+    }
+    // bf16: every value here is exactly representable, so widen(B) == B.
+    std::vector<float> exact(K * N);
+    std::vector<uint16_t> half(K * N);
+    for (size_t i = 0; i < exact.size(); ++i) {
+      exact[i] = static_cast<float>(static_cast<int>((i * 13) % 64) - 32) *
+                 0.125f;
+      half[i] = seeml::update::Float32ToBf16Bits(exact[i]);
+    }
+    const auto want_h = ReferenceNN(A, exact, M, N, K, 1.0f, false, zeros);
+    // NT reads B as [N, K]: the same bytes, the other orientation.
+    const auto A_nt = RandnVector(M * N, 78);  // A is [M, N-as-K] here
+    const auto want_nt = ReferenceNT(A_nt, exact, M, K, N, 1.0f);
+    for (const size_t threads : {size_t{1}, size_t{8}}) {
+      ScopedThreads scoped(threads);
+      std::vector<float> got(M * N, 9.0f);
+      k::GemmNNBF16(A.data(), half.data(), got.data(), M, N, K);
+      EXPECT_BITWISE_EQ_F32(want_h, got);
+      std::vector<float> got_nt(M * K, 9.0f);
+      k::GemmNTBF16(A_nt.data(), half.data(), got_nt.data(), M, K, N);
+      EXPECT_BITWISE_EQ_F32(want_nt, got_nt);
+    }
   }
 }
 

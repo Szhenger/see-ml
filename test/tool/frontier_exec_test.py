@@ -551,6 +551,13 @@ class DifferentialSuite(unittest.TestCase):
         self.assertEqual(probe(*base, "--arena-out", out)[0], 0)
         self.assertTrue(os.path.isfile(out))
         self.assertFalse(os.path.exists(out + ".tmp"))  # staged, then renamed
+        done = subprocess.run([PROBE, *base, "--arena-out", out, "--profile",
+                               "2"], stdout=subprocess.PIPE, text=True,
+                              stderr=subprocess.DEVNULL, check=True)
+        profile = json.loads(done.stdout)
+        self.assertEqual(profile["executions"], 2)
+        self.assertTrue(any(row["key"].startswith("op4 M")  # gemm.acc_nn
+                            for row in profile["rows"]))
 
         for argv, code, message in (
                 ((*base, "--arena-out", out, "--bogus"), 2, "unknown argument"),
@@ -559,6 +566,10 @@ class DifferentialSuite(unittest.TestCase):
                 ((*base, "--arena-out", out, "--time", "0"), 2, "--time"),
                 ((*base, "--arena-out", out, "--time", "2", "--trace",
                   out + ".t"), 2, "mutually exclusive"),
+                ((*base, "--arena-out", out, "--profile", "2", "--time", "2"),
+                 2, "mutually exclusive"),
+                ((*base, "--arena-out", out, "--profile", "0"), 2,
+                 "--profile"),
                 (("--plan", work, "--section", "merge", "--arena-in", arena,
                   "--arena-out", out), 1, "not a regular file"),
                 ((*base, "--arena-out", os.path.join(work, "nowhere", "a")),
