@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <new>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -15,7 +16,6 @@
 // POSIX hosts only; elsewhere payloads stay on the heap.
 #if defined(__unix__) || defined(__APPLE__)
 #define SEEML_PAYLOAD_MMAP 1
-#include <new>
 #include <sys/mman.h>
 #else
 #define SEEML_PAYLOAD_MMAP 0
@@ -122,12 +122,12 @@ inline constexpr uint8_t kSmfOpKindMaxV3 = 10;
 /// payload already "freed"). munmap is unconditional. Fresh anonymous pages
 /// also arrive lazily, so a sized-but-unwritten payload costs nothing.
 template <typename T>
-struct DefaultInitAllocator : std::allocator<T> {
+struct DefaultInitAllocator {
+  using value_type = T;
+
+  DefaultInitAllocator() noexcept = default;
   template <typename U>
-  struct rebind {
-    using other = DefaultInitAllocator<U>;
-  };
-  using std::allocator<T>::allocator;
+  DefaultInitAllocator(const DefaultInitAllocator<U>&) noexcept {}
 
   static constexpr size_t kMapThresholdBytes = size_t{1} << 20;
 
@@ -140,7 +140,7 @@ struct DefaultInitAllocator : std::allocator<T> {
       return static_cast<T*>(p);
     }
 #endif
-    return std::allocator<T>::allocate(n);
+    return std::allocator<T>().allocate(n);
   }
   void deallocate(T* p, size_t n) noexcept {
 #if SEEML_PAYLOAD_MMAP
@@ -149,8 +149,9 @@ struct DefaultInitAllocator : std::allocator<T> {
       return;
     }
 #endif
-    std::allocator<T>::deallocate(p, n);
+    std::allocator<T>().deallocate(p, n);
   }
+
   template <typename U>
   void construct(U* p) noexcept(std::is_nothrow_default_constructible_v<U>) {
     ::new (static_cast<void*>(p)) U;  // default-init: no write for a byte
@@ -158,6 +159,16 @@ struct DefaultInitAllocator : std::allocator<T> {
   template <typename U, typename... Args>
   void construct(U* p, Args&&... args) {
     ::new (static_cast<void*>(p)) U(std::forward<Args>(args)...);
+  }
+
+  // Stateless: any two instances free each other's memory.
+  template <typename U>
+  bool operator==(const DefaultInitAllocator<U>&) const noexcept {
+    return true;
+  }
+  template <typename U>
+  bool operator!=(const DefaultInitAllocator<U>&) const noexcept {
+    return false;
   }
 };
 
