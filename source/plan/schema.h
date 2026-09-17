@@ -98,6 +98,15 @@ inline constexpr uint32_t kSeeuKernelBatchVersion = 12;
 // pad words and must be zero.
 inline constexpr uint32_t kSeeuGemmTilesVersion = 11;
 
+// The capacity, in f32 elements, of the packed B panel the CPU NN core
+// copies each (K tile x N tile) of B into: the runtime's default, and the
+// number the compiler's analytic tiling model (SuggestGemmTiling) is
+// derived against — one constant for both planes, so the model cannot
+// describe a kernel the runtime does not have (that was #90). A package
+// may shrink the runtime's panel (-DSEEML_GEMM_PANEL_FLOATS); the header's
+// tiles are then clamped to it, which changes traversal, never bits.
+inline constexpr uint64_t kDefaultGemmPanelFloats = 8192;  // 32 KiB
+
 // The version that introduced the bf16 GEMM opcodes.
 inline constexpr uint32_t kSeeuBf16Version = 10;
 

@@ -45,33 +45,35 @@ std::string HostKey(const HostArchInfo& arch);
 /// core geometry come from sysctl/sysconf, with zeros when undetectable.
 HostArchInfo DetectHostArch();
 
-/// Cache-blocking geometry for a GEMM microkernel, BLIS-style: a kc-deep
-/// panel of B stays resident in L1 across the mc rows of A it multiplies,
-/// and the mc x kc panel of A stays resident in L2.
+/// Cache-blocking geometry for the CPU NN GEMM core (runtime/executor/
+/// gemm.cc): each kc x nc tile of B is packed into an L1-resident panel
+/// and swept by a four-row register block of C.
 struct GemmTiling {
-  size_t mc = 0;  // rows of A per L2-resident panel
-  size_t kc = 0;  // shared depth per L1-resident panel
-  size_t nc = 0;  // columns of B per register-blocked sweep
+  size_t mc = 0;  // rows of A per L2-resident band
+  size_t kc = 0;  // K tile: rows of B per packed panel (the header's tile_k)
+  size_t nc = 0;  // N tile: the vectorized sweep width (the header's tile_n)
 
   bool operator==(const GemmTiling&) const = default;
 };
 
-/// Derives blocking from the cache geometry: kc sized so a kc x nc f32
-/// panel fills at most half of L1; mc sized so an mc x kc panel fills at
-/// most half of L2; nc a small multiple of the SIMD width. Unknown cache
-/// sizes fall back to 32 KiB L1 / 512 KiB L2. All dimensions are rounded
-/// to the SIMD width and clamped to sane minima, so the result is always
-/// usable geometry.
+/// The analytic tiling for `arch`: the packed panel (kc x nc floats) sized
+/// to at most half of L1 and at most the runtime panel's capacity
+/// (kDefaultGemmPanelFloats, source/plan/schema.h — one constant for both
+/// planes); nc the largest power of two not exceeding sqrt(2 * panel), so
+/// the sweep is a long vector loop and kc is never starved; mc so an
+/// mc x kc band of A fits half of L2. Unknown cache sizes fall back to
+/// 32 KiB L1 / 512 KiB L2. All dimensions are multiples of the SIMD width.
 ///
-/// This is a HYPOTHESIS, not a decision: the model assumes a packed BLIS
-/// microkernel the CPU runtime does not have (its cores are unpacked loop
-/// nests whose fast configuration is a 64 KiB B panel — the kernel
-/// defaults), and measured 1.3–3.3x slower than those defaults when it was
-/// emitted as the package tiling (#90). Nothing emits it any more; it is
-/// one arm of the offline tuner's sweep (tool/autotune.py reads it out of
-/// bench.json as `analytic_gemm_tiles`) and the GPU kernel emitter's
-/// clamp source, so that when a packed microkernel lands (E1, #80) the
-/// arm is already measured against the table.
+/// History, because the mistake is instructive (#90): the first model
+/// defined nc as a 4-vector REGISTER width for a packed BLIS microkernel
+/// the runtime did not have; the runtime consumed it as its N cache tile
+/// and ran 1.3-3.3x slower than its own defaults while the nightly bench,
+/// built without the emitted flags, measured a configuration no package
+/// shipped. Nothing emits a tiling any more — the geometry travels in the
+/// plan header (v11), decided from a measured table or left to the runtime
+/// defaults — and this model is now derived against the kernel that exists
+/// (E1, #80). It remains a HYPOTHESIS: one arm of the offline tuner's
+/// sweep (`analytic_gemm_tiles` in bench.json), never a decision.
 GemmTiling SuggestGemmTiling(const HostArchInfo& arch);
 
 /// Checks a tiling against the contract SuggestGemmTiling documents for

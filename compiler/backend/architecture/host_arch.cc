@@ -1,5 +1,7 @@
 #include "compiler/backend/architecture/host_arch.h"
 
+#include "source/plan/schema.h"  // kDefaultGemmPanelFloats
+
 #include <algorithm>
 #include <cctype>
 #include <string>
@@ -220,17 +222,32 @@ GemmTiling SuggestGemmTiling(const HostArchInfo& arch) {
   const uint64_t l1 = l1_usable ? arch.l1d_bytes : 32u << 10;
   const uint64_t l2 = l2_usable ? arch.l2_bytes : 512u << 10;
 
-  // Every dimension is fitted downward so the result always satisfies
-  // ValidateGemmTiling against the same arch: nc shrinks below the 4-vector
-  // ideal when half of L1 cannot hold a (simd x nc) panel, and kc respects
-  // both halves (a kc so large that no conforming mc panel fits half of L2
-  // would fail the L2 check no matter the mc).
+  // Derived for the kernel that exists (E7, #90 — re-derived after E1,
+  // #80, landed it): the CPU NN core copies each kc x nc tile of B into a
+  // packed panel of kDefaultGemmPanelFloats and sweeps it with a four-row
+  // register block of C. So:
+  //   the panel is what must stay in L1 — kc * nc floats, at most half of
+  //     L1 and at most the panel's capacity;
+  //   nc is the vectorized sweep, a LONG unit-stride loop (the first model
+  //     made it a 4-vector register width, which the runtime read as its
+  //     N tile and ran 1.3-3.3x slower on): the largest power of two with
+  //     nc <= sqrt(2 * panel), which keeps kc within a factor of two of nc
+  //     — measured flat from 16x512 to 128x128, and best at the long-K
+  //     shapes (a 49k-vocabulary head) when kc is not starved;
+  //   kc takes the rest of the panel, a multiple of the quad and of the
+  //     SIMD width.
+  // Every dimension is fitted downward, so the result always satisfies
+  // ValidateGemmTiling against the same arch.
+  const uint64_t panel_floats =
+      std::min<uint64_t>(l1 / 2 / sizeof(float), kDefaultGemmPanelFloats);
   GemmTiling t;
-  // nc: a small register-blocked sweep — 4 vectors of C columns.
-  t.nc = std::min(4 * simd, FitDim(l1 / 2, simd, simd));
-  // kc: kc x nc f32 panel of B in at most half of L1.
-  t.kc = std::min(FitDim(l1 / 2, t.nc, simd), FitDim(l2 / 2, simd, simd));
-  // mc: mc x kc f32 panel of A in at most half of L2.
+  size_t nc = simd;
+  while (uint64_t{2} * nc * 2 * nc <= 2 * panel_floats) nc *= 2;
+  t.nc = RoundToUnit(nc, simd);
+  t.kc = std::min(FitDim(panel_floats * sizeof(float), t.nc, simd),
+                  FitDim(l2 / 2, simd, simd));
+  // mc: mc x kc f32 rows of A in at most half of L2 — the band of rows one
+  // task sweeps the panel across.
   t.mc = FitDim(l2 / 2, t.kc, simd);
   return t;
 }

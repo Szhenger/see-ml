@@ -62,23 +62,6 @@ namespace {
 // (30 -> 54 GFLOP/s at D=512 projections, 14 -> 46 at SmolLM's 49k-vocab
 // head) and 2.2-2.5x on int8 weights.
 inline constexpr size_t kGemmRowBlock = 4;
-#ifndef SEEML_GEMM_PANEL_FLOATS
-#define SEEML_GEMM_PANEL_FLOATS 8192
-#endif
-inline constexpr size_t kGemmPanelFloats = SEEML_GEMM_PANEL_FLOATS;
-static_assert(kGemmPanelFloats >= 4,
-              "the packed B panel must hold at least one k-quad column");
-
-/// The tile geometry the core actually walks: K shrunk to a multiple of
-/// the quad that fits the panel (quads stay aligned to k = 0), then N to
-/// what is left. A pure function of the header's tiles.
-inline GemmTiles FitToPanel(const GemmTiles& tiles) {
-  GemmTiles fit;
-  fit.k = MinZ(tiles.k, kGemmPanelFloats / 4 * 4) / 4 * 4;
-  fit.n = MinZ(tiles.n, kGemmPanelFloats / fit.k);
-  return fit;
-}
-
 // A's orientation is a template parameter, not a run-time flag: the row
 // block reads sixteen A scalars per quad, and a branch in each of them
 // (even a perfectly predicted one) keeps the compiler from hoisting the
@@ -448,25 +431,12 @@ void BlockedNT(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
               q2[kNtLanes] = {}, q3[kNtLanes] = {};
         size_t k = 0;
         for (; k + kNtLanes <= K; k += kNtLanes) {
-          // Only the int8 / bf16 instantiations widen; f32 reads B directly.
-          [[maybe_unused]] float w0[kNtLanes], w1[kNtLanes], w2[kNtLanes],
-              w3[kNtLanes];
-          if constexpr (!std::is_same_v<BType, float>) {
-            for (size_t l = 0; l < kNtLanes; ++l) {
-              w0[l] = static_cast<float>(b0[k + l]);
-              w1[l] = static_cast<float>(b1[k + l]);
-              w2[l] = static_cast<float>(b2[k + l]);
-              w3[l] = static_cast<float>(b3[k + l]);
-            }
-          }
-          for (size_t l = 0; l < kNtLanes; ++l) {
+          // Eight products per lane: two A rows against four B rows. One
+          // body for both storage forms — f32 reads B in place; int8 and
+          // bf16 widen the block first (their own loop, as in NtRow) and
+          // only those instantiations declare the widened block.
+          auto fold = [&](size_t l, float v0, float v1, float v2, float v3) {
             const float x = a0[k + l], y = a1[k + l];
-            float v0, v1, v2, v3;
-            if constexpr (std::is_same_v<BType, float>) {
-              v0 = b0[k + l], v1 = b1[k + l], v2 = b2[k + l], v3 = b3[k + l];
-            } else {
-              v0 = w0[l], v1 = w1[l], v2 = w2[l], v3 = w3[l];
-            }
             p0[l] += x * v0;
             p1[l] += x * v1;
             p2[l] += x * v2;
@@ -475,6 +445,20 @@ void BlockedNT(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
             q1[l] += y * v1;
             q2[l] += y * v2;
             q3[l] += y * v3;
+          };
+          if constexpr (std::is_same_v<BType, float>) {
+            for (size_t l = 0; l < kNtLanes; ++l)
+              fold(l, b0[k + l], b1[k + l], b2[k + l], b3[k + l]);
+          } else {
+            float w0[kNtLanes], w1[kNtLanes], w2[kNtLanes], w3[kNtLanes];
+            for (size_t l = 0; l < kNtLanes; ++l) {
+              w0[l] = static_cast<float>(b0[k + l]);
+              w1[l] = static_cast<float>(b1[k + l]);
+              w2[l] = static_cast<float>(b2[k + l]);
+              w3[l] = static_cast<float>(b3[k + l]);
+            }
+            for (size_t l = 0; l < kNtLanes; ++l)
+              fold(l, w0[l], w1[l], w2[l], w3[l]);
           }
         }
         for (; k < K; ++k) {  // tail: the same k -> lane rule
