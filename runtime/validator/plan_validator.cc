@@ -74,15 +74,26 @@ std::expected<void, std::string> ValidateInstructionImpl(
           std::to_string(ins.opcode) + ")");
   } else {
     const auto opcode = static_cast<up::OpCode>(ins.opcode);
-    const uint16_t allowed =
-        (opcode == up::OpCode::kGemmNN || opcode == up::OpCode::kGemmNNBF16)
-            ? up::kKnownFlagsMask
-            : opcode == up::OpCode::kGemmNNQ8 ? up::kFlagEpilogueActMask
-                                              : uint16_t{0};
+    const bool addend_ok =
+        plan_version >= up::kSeeuGemmAddendVersion &&
+        (opcode == up::OpCode::kGemmNN || opcode == up::OpCode::kGemmNT ||
+         opcode == up::OpCode::kGemmTN);
+    const uint16_t allowed = static_cast<uint16_t>(
+        ((opcode == up::OpCode::kGemmNN || opcode == up::OpCode::kGemmNNBF16)
+             ? up::kEpilogueFlagsMask
+         : opcode == up::OpCode::kGemmNNQ8 ? up::kFlagEpilogueActMask
+                                           : uint16_t{0}) |
+        (addend_ok ? up::kFlagGemmAddend : uint16_t{0}));
     if (ins.flags & static_cast<uint16_t>(~allowed))
       return diag::validating::Error(
           "unknown or misplaced instruction flags " +
           std::to_string(ins.flags) + " (opcode " +
+          std::to_string(ins.opcode) + ")");
+    // One ref slot, one tenant: the addend and the epilogue both want in[3].
+    if ((ins.flags & up::kFlagGemmAddend) &&
+        (ins.flags & up::kEpilogueFlagsMask))
+      return diag::validating::Error(
+          "GEMM addend combined with a bias / activation epilogue (opcode " +
           std::to_string(ins.opcode) + ")");
   }
   // Every kernel is compiled with SEEML_RESTRICT pointers: a written range
@@ -263,6 +274,10 @@ std::expected<void, std::string> ValidateInstructionImpl(
       // in[3] is a read of N floats and joins the overlap discipline
       // against the written C range.
       if ((ins.flags & up::kFlagEpilogueBias) && !ref_ok(ins.in[3], d1, false))
+        return fail();
+      // The addend (v14, f32 GEMMs only — proved above): in[3] is a read of
+      // M*N floats, disjoint from the written C like every other operand.
+      if ((ins.flags & up::kFlagGemmAddend) && !ref_ok(ins.in[3], mn, false))
         return fail();
       return disjoint();
     }

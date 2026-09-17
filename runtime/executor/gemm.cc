@@ -541,35 +541,56 @@ void EpilogueRows(float* SEEML_RESTRICT C, const float* SEEML_RESTRICT bias,
   }
 }
 
+/// The addend epilogue of the f32 GEMMs (plan v14, E10): C = D + A@B,
+/// applied to a task's cell right after the core wrote it — while the cell
+/// is still cache-resident — instead of as a separate kAddEW over the whole
+/// tensor. Each element is `d + s` with s the COMPLETE dot product the core
+/// just produced from a zeroed (NN, TN) or fresh (NT) accumulator: the
+/// expression, and so the bits, of the GEMM + add pair it replaces. Seeding
+/// the accumulator with D instead — the kGemmAccNN form — would round
+/// differently, which is why this is not that.
+void AddendRows(float* SEEML_RESTRICT C, const float* SEEML_RESTRICT D,
+                size_t m_begin, size_t m_end, size_t n_begin, size_t n_end,
+                size_t N) {
+  for (size_t m = m_begin; m < m_end; ++m) {
+    float* SEEML_RESTRICT c_row = C + m * N;
+    const float* SEEML_RESTRICT d_row = D + m * N;
+    for (size_t n = n_begin; n < n_end; ++n) c_row[n] = d_row[n] + c_row[n];
+  }
+}
+
 }  // namespace
 
 void GemmNN(const float* A, const float* B, float* C, size_t M, size_t N,
             size_t K, const float* bias, up::EpilogueAct act,
-            const GemmTiles& tiles) {
+            const GemmTiles& tiles, const float* addend) {
   ForEachGemmTask(M, N, K, tiles,
                   [&](size_t m0, size_t m1, size_t n0, size_t n1) {
                     ZeroCell(C, N, m0, m1, n0, n1);
                     BlockedNN(A, B, C, m0, m1, n0, n1, N, K, 1.0f, K,
                               /*a_transposed=*/false, tiles);
+                    if (addend) AddendRows(C, addend, m0, m1, n0, n1, N);
                     EpilogueRows(C, bias, m0, m1, n0, n1, N, act);
                   });
 }
 
 void GemmNT(const float* A, const float* B, float* C, size_t M, size_t N,
-            size_t K, const GemmTiles& tiles) {
+            size_t K, const GemmTiles& tiles, const float* addend) {
   ForEachGemmTask(M, N, K, tiles,
                   [&](size_t m0, size_t m1, size_t n0, size_t n1) {
                     BlockedNT(A, B, C, m0, m1, n0, n1, N, K, 1.0f, tiles.n);
+                    if (addend) AddendRows(C, addend, m0, m1, n0, n1, N);
                   });
 }
 
 void GemmTN(const float* A, const float* B, float* C, size_t M, size_t N,
-            size_t K, const GemmTiles& tiles) {
+            size_t K, const GemmTiles& tiles, const float* addend) {
   ForEachGemmTask(M, N, K, tiles,
                   [&](size_t m0, size_t m1, size_t n0, size_t n1) {
                     ZeroCell(C, N, m0, m1, n0, n1);
                     BlockedNN(A, B, C, m0, m1, n0, n1, N, K, 1.0f, M,
                               /*a_transposed=*/true, tiles);
+                    if (addend) AddendRows(C, addend, m0, m1, n0, n1, N);
                   });
 }
 

@@ -75,7 +75,8 @@ class ReaderTest(unittest.TestCase):
         blob = assemble(64, train=[(19, 0, (0, fx.f32_bits(2.5), N, N),
                                     (4, 0, 0))], persistent=b"\1" * 8)
         plan = fx.Plan(blob)
-        self.assertEqual((plan.version, plan.arena_size), (13, 64))
+        self.assertEqual((plan.version, plan.arena_size),
+                         (fx.SEEU_NEWEST, 64))
         self.assertEqual(len(plan.sections["train"]), 1)
         self.assertEqual(plan.sections["train"][0].opcode, 19)
         self.assertEqual(plan.initial_arena()[:9], b"\1" * 8 + b"\0")

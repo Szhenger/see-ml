@@ -101,6 +101,10 @@ struct UpdateConfig {
   // into kFusedMap instructions (E4, roadmap Phase 1b, plan v13). Bitwise-
   // neutral, and switchable for the same reason the epilogue pass is.
   bool fuse_elementwise = true;
+  // Fold a single-reader f32 GEMM into the elementwise add that reads it
+  // (E10, #93, plan v14: kFlagGemmAddend) — the two activation-sized sums
+  // of every LoRA site. Bitwise-neutral, and switchable like its siblings.
+  bool fuse_gemm_addend = true;
   bool rope_table = true;
   bool fuse_clip = true;
   // The CPU blocked-GEMM cache tiles written into the plan header (v11).

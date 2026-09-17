@@ -85,7 +85,13 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // v13: kFusedMap (E4, roadmap Phase 1b) — a chain of elementwise
 // instructions as one. Additive, one opcode, rejected below v13;
 // bit-identical to the sequence it replaces.
-inline constexpr uint32_t kSeeuVersion = 13;
+// v14: the GEMM addend (E10) — kFlagGemmAddend on kGemmNT, C = D + A@B^T
+// with D in the free in[3]. Additive, one flag bit, rejected below v14;
+// bit-identical to the kGemmNT + kAddEW pair it replaces.
+inline constexpr uint32_t kSeeuVersion = 14;
+
+// The version that introduced kFlagGemmAddend.
+inline constexpr uint32_t kSeeuGemmAddendVersion = 14;
 
 // The version that introduced kFusedMap.
 inline constexpr uint32_t kSeeuFusedMapVersion = 13;

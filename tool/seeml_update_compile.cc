@@ -91,7 +91,8 @@ void PrintUsage() {
                "  [--min-lr-factor F] [--quantize-base | --bf16-base]\n"
                "  [--steps N]\n"
                "  [--grad-accum G]\n"
-               "  [--no-fuse-epilogue] [--no-fuse-elementwise] [--no-rope-table]\n"
+               "  [--no-fuse-epilogue] [--no-fuse-elementwise] [--no-fuse-addend]\n"
+               "  [--no-rope-table]\n"
                "  [--no-fuse-clip]\n"
                "  [--report out.json] [--dump-sir out.txt]\n"
                "  [--kernel-policy table.json] [--target-host KEY]\n"
@@ -356,6 +357,7 @@ int main(int argc, char** argv) {
   const auto dump_sir_path = args.TakeValue("--dump-sir");
   config.dump_sir = dump_sir_path.has_value();
   config.fuse_elementwise = !args.Take("--no-fuse-elementwise");
+  config.fuse_gemm_addend = !args.Take("--no-fuse-addend");
   config.rope_table = !args.Take("--no-rope-table");
   config.fuse_clip = !args.Take("--no-fuse-clip");
 

@@ -95,6 +95,7 @@ add_library(seeml_update STATIC
     compiler/analysis/algebra/epilogue_fuser.cc
     compiler/analysis/algebra/rope_table.cc
     compiler/analysis/algebra/chain_fuser.cc
+    compiler/analysis/algebra/addend_fuser.cc
     compiler/analysis/algebra/lora_grafter.cc
     compiler/analysis/algebra/merge_builder.cc
     compiler/analysis/calculus/autodiff.cc

@@ -133,28 +133,40 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
     sir::Value* t = t_op->addResult(base + ".lora_t", sir::DataType::F32,
                                     sir::Shape{n, r});
 
+    // The scale rides the RANK-r activation (E10, #93): C' = C + (s*t)@B.
+    // Scaling u = t@B instead costs a full [N, M] pass forward, and its VJP
+    // a second one backward (an alpha-scaled copy of dC) — activation-sized
+    // memory traffic to apply one constant. On [N, r] the same constant is
+    // r/M of the work, and autodiff's adjoints follow by themselves:
+    //   dB = (s*t)^T @ dC,   dt = s * (dC @ B^T),   dA = X^T @ dt.
+    // s*(t@B) and (s*t)@B agree exactly when s is a power of two (the
+    // default alpha/r is) and to rounding otherwise; s == 1 needs no op.
+    std::unique_ptr<sir::Operation> s_op;
+    sir::Value* t_scaled = t;
+    if (scale != 1.0f) {
+      s_op = std::make_unique<sir::Operation>("sc_high.scale");
+      s_op->setAttribute("alpha", scale);
+      s_op->addOperand(t);
+      t_scaled = s_op->addResult(base + ".lora_ts", sir::DataType::F32,
+                                 sir::Shape{n, r});
+    }
+
     auto u_op = std::make_unique<sir::Operation>("sc_high.matmul");
-    u_op->addOperand(t);
+    u_op->addOperand(t_scaled);
     u_op->addOperand(b);
     sir::Value* u = u_op->addResult(base + ".lora_u", sir::DataType::F32,
                                     sir::Shape{n, m});
 
-    auto s_op = std::make_unique<sir::Operation>("sc_high.scale");
-    s_op->setAttribute("alpha", scale);
-    s_op->addOperand(u);
-    sir::Value* s = s_op->addResult(base + ".lora_s", sir::DataType::F32,
-                                    sir::Shape{n, m});
-
     auto add_op = std::make_unique<sir::Operation>("sc_high.add");
     add_op->addOperand(c);
-    add_op->addOperand(s);
+    add_op->addOperand(u);
     sir::Value* c_prime = add_op->addResult(base + ".lora_out",
                                             sir::DataType::F32,
                                             sir::Shape{n, m});
 
     new_ops.push_back(std::move(t_op));
+    if (s_op) new_ops.push_back(std::move(s_op));
     new_ops.push_back(std::move(u_op));
-    new_ops.push_back(std::move(s_op));
     new_ops.push_back(std::move(add_op));
     block.insertOpsAfter(target, std::move(new_ops));
 

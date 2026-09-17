@@ -108,7 +108,8 @@ class DocumentedVersions(unittest.TestCase):
                 f"(`.sds`, v{formats.SDS_VERSION})",
                 f"(`.seeu`, v{formats.SEEU_VERSION})",
                 f"(`SEKP`, v{formats.SEKP_VERSION})"):
-            self.assertIn(heading, text)
+            self.assertTrue(heading in text,
+                            f"docs/formats.md has no heading {heading!r}")
 
     def test_the_specification_table(self):
         text = self.read("SPECIFICATION.md")
@@ -118,7 +119,8 @@ class DocumentedVersions(unittest.TestCase):
                 f'v{formats.SEEU_OLDEST_READABLE} |',
                 f'| `"SEKP"` | v{formats.SEKP_VERSION}, oldest-readable '
                 f'v{formats.SEKP_OLDEST_READABLE} |'):
-            self.assertIn(row, text)
+            self.assertTrue(row in text,
+                            f"SPECIFICATION.md has no table row {row!r}")
 
 
 @unittest.skipIf(np is None, "NumPy not installed")

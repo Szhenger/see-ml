@@ -132,10 +132,13 @@ Count the parameters: `r·(K + M)` instead of `K·M`. For our 1024×1024 example
 
 ```
 t  = X @ A          [N, r]     ← project down to rank r
-u  = t @ B          [N, M]     ← project back up
-s  = (α/r) · u
-C' = C + s          ← and every former consumer of C now reads C'
+ts = (α/r) · t      [N, r]     ← the scale, applied where the tensor is small
+C' = C + ts @ B     [N, M]     ← project back up, summing into C as it goes
 ```
+
+Every former consumer of `C` now reads `C'`.
+
+Where the scale goes is not a detail. The textbook order — `u = t@B`, `s = (α/r)·u`, `C' = C + s` — spends two elementwise passes over an `[N, M]` activation to apply one constant and one sum, and autodiff then mirrors them: a full `(α/r)`-scaled copy of `dC` for the scale's adjoint, and a full `[N, K]` add where the adapter's `dX` joins the base path's. Four activation-sized passes per adapted layer per step, in a runtime whose elementwise kernels are limited by memory bandwidth, feeding GEMMs that are rank-r and tiny. Scaling `t` instead is `r/M` of the work, and the adjoints follow by themselves — `dB = tsᵀ @ dC`, `dt = (α/r)·(dC @ Bᵀ)` — with no activation-sized scale anywhere. The two sums then ride their GEMMs: `GemmAddendFuser` (below) folds a GEMM whose only reader is an add into that add, so `C + ts@B` and `dC@Wᵀ + dt@Aᵀ` are each written as the dot products come out of the core. `(α/r)·(t@B)` and `((α/r)·t)@B` are the same floats whenever `α/r` is a power of two — the default 16/8 is — and equal to rounding otherwise; when `α/r = 1` no scale is emitted at all.
 
 Note the order of operations: `(X@A)@B` costs `O(N·r·(K+M))`, whereas materializing `A@B` first would cost `O(K·r·M)` and produce a full-size matrix — the whole point is to never form ΔW during training.
 
@@ -175,6 +178,8 @@ The VJP registry is a table of small theorems. A few bits of vocabulary for the 
 Two of these deserve a remark. The softmax-cross-entropy gradient `probs − onehot` is one of the loveliest results in the field — the messy derivative of a log of a softmax collapses into a subtraction — and it's why the forward op keeps its probabilities around. And the matmul rules explain two-thirds of the GEMM variants the runtime carries: training needs `NT` (`dC @ Wᵀ`) and `TN` (`Xᵀ @ dC`) as first-class citizens, not just plain `NN`.
 
 Each backward rule is the exact derivative of *its own forward's expression* — the GELU backward differentiates the tanh approximation the forward actually uses, not the "true" erf GELU. That discipline is what makes finite-difference gradient checking in the test suite meaningful.
+
+One more thing the table implies: when a value feeds several ops, its gradient is the *sum* of what flows back from each, and the pass injects an `sc_high.add` for every such fan-out. At a LoRA site that sum is `dX = dC@Wᵀ + dt@Aᵀ` — an activation-sized add whose second operand is a rank-r GEMM with no other reader. `GemmAddendFuser` (`analysis/algebra/`, after autodiff so legality is read off the use-lists) folds exactly that shape — a plain f32 GEMM, one reader, nothing mutating storage in between — into the add, which lowers to the GEMM itself with `kFlagGemmAddend` (plan v14): `C = D + A@B`. The kernel applies the addend to each task's cell right after the core writes it, while the cell is still in cache, and each element is `d + s` over the *complete* dot product — the expression of the two instructions it replaces, so the fold never changes a bit (`--no-fuse-addend` compiles the unfolded program; the system suite trains both and compares every byte). When both operands qualify, the GEMM with the smaller inner dimension folds: the rank-r one, leaving the frozen-weight GEMM its own instruction and its int8 / bf16 forms.
 
 Finally, the pass verifies every trainable actually *received* a gradient. A LoRA adapter the loss can't see is a configuration bug, and it's caught here.
 
