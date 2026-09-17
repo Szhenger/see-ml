@@ -63,6 +63,7 @@
 #include <string>
 #include <vector>
 
+#include "compiler/backend/architecture/host_arch.h"
 #include "compiler/backend/trainer/native_emitter.h"
 #include "compiler/backend/tuner/kernel_policy_table.h"
 #include "compiler/driver/update_compiler.h"
@@ -468,6 +469,9 @@ int main(int argc, char** argv) {
   if (report_path) {
     std::FILE* f = std::fopen(report_path->c_str(), "w");
     if (!f) return Fail("cannot write report '" + *report_path + "'");
+    PlanHeader plan_header;
+    std::memcpy(&plan_header, compiled->plan.data(), sizeof(plan_header));
+    const HostArchInfo host_arch = DetectHostArch();
     // null when no embedded TU was written (--no-embed): the packer's stub
     // is the package's TU then, and the emitter has no path to report.
     const std::string embedded_tu_json =
@@ -476,7 +480,16 @@ int main(int argc, char** argv) {
             : "\"" + JsonEscape(paths->embedded_tu) + "\"";
     std::fprintf(f,
                  "{\n"
+                 "  \"schema\": 1,\n"
+                 "  \"seeml_version\": \"%s\",\n"
                  "  \"plan_file\": \"%s\",\n"
+                 "  \"plan_bytes\": %zu,\n"
+                 "  \"plan_version\": %u,\n"
+                 "  \"plan_hash\": \"%016" PRIx64 "\",\n"
+                 "  \"source_model_hash\": \"%016" PRIx64 "\",\n"
+                 "  \"host_arch\": {\"isa\": \"%s\", \"cpu_model\": \"%s\", "
+                 "\"physical_cores\": %zu, \"l1d_bytes\": %" PRIu64
+                 ", \"l2_bytes\": %" PRIu64 ", \"simd_width_f32\": %zu},\n"
                  "  \"arena_bytes\": %" PRIu64 ",\n"
                  "  \"persistent_bytes\": %" PRIu64 ",\n"
                  "  \"rodata_bytes\": %" PRIu64 ",\n"
@@ -492,7 +505,14 @@ int main(int argc, char** argv) {
                  "  \"kernel_policy\": {\"source\": \"%s\", \"host_key\": "
                  "\"%s\", \"gemm_tile_k\": %u, \"gemm_tile_n\": %u},\n"
                  "  \"adapters\": [",
-                 JsonEscape(paths->plan_file).c_str(), compiled->arena_size,
+                 kSeemlVersion, JsonEscape(paths->plan_file).c_str(),
+                 compiled->plan.size(), plan_header.version,
+                 plan_header.plan_hash, plan_header.source_model_hash,
+                 std::string(host_arch.isa).c_str(),
+                 JsonEscape(host_arch.cpu_model).c_str(),
+                 host_arch.physical_cores, host_arch.l1d_bytes,
+                 host_arch.l2_bytes, host_arch.simd_width_f32,
+                 compiled->arena_size,
                  compiled->persistent_size, compiled->rodata_size,
                  compiled->train_instruction_count,
                  compiled->eval_instruction_count,
@@ -513,9 +533,15 @@ int main(int argc, char** argv) {
                    i ? "," : "", JsonEscape(a.weight_name).c_str(), a.k, a.m,
                    a.r, a.scale, a.quant_scale, a.bf16 ? "true" : "false");
     }
+    // The package's exact contents (P6): what the packer vendors against.
+    std::fprintf(f, "\n  ],\n  \"vendored_sources\": [");
+    for (size_t i = 0; i < paths->vendored_sources.size(); ++i)
+      std::fprintf(f, "%s\"%s\"", i ? ", " : "",
+                   JsonEscape(paths->vendored_sources[i]).c_str());
+    std::fprintf(f, "]");
     // Every pass and driver phase, in order, with its wall time: the
     // measurement behind any compile-side performance claim (E5, #84).
-    std::fprintf(f, "\n  ],\n  \"passes\": [");
+    std::fprintf(f, ",\n  \"passes\": [");
     for (size_t i = 0; i < compiled->pass_timings.size(); ++i) {
       const auto& t = compiled->pass_timings[i];
       std::fprintf(f, "%s\n    {\"name\": \"%s\", \"ops\": %zu, \"ms\": %.3f}",

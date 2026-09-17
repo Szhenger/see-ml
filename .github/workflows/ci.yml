@@ -398,7 +398,7 @@ jobs:
   # Two interpreters: the pinned 3.14.7 and the 3.9 floor, so no tool grows
   # syntax or a stdlib API the oldest supported build host lacks.
   python-tools:
-    name: python tools (${{ matrix.python }}, syntax + packer + tuner suites)
+    name: python tools (${{ matrix.python }}, syntax + tiers + suites + lint)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     strategy:
@@ -410,10 +410,98 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - name: Byte-compile every tool script
-        run: python -m py_compile tool/export_model.py tool/bench_compare.py tool/pack_update.py tool/autotune.py tool/frontier_exec.py tool/certify_numerics.py
+      - name: Byte-compile every Python file in the tree
+        run: python -m compileall -q -f tool test/tool test/fixtures
+      # Tier 0 (pyproject.toml): the compile- and gate-path tools and the
+      # shared seam import under a bare interpreter. A stray NumPy/torch
+      # import fails here, not on a build host that lacks them.
+      - name: Tier-0 tools import with the standard library alone
+        run: |
+          python - <<'PY'
+          import sys
+          sys.path.insert(0, "tool")
+          import autotune, bench_compare, pack_update  # noqa: E401,F401
+          from seeml import formats
+          heavy = {"numpy", "torch", "mlx"} & set(sys.modules)
+          assert not heavy, f"tier 0 pulled in {sorted(heavy)}"
+          problems = formats.check_against(formats.load_abi())
+          assert not problems, problems
+          PY
       - name: Packer unit tests (assembles the stub with the runner's g++)
         run: python -m unittest discover -s test/tool -p '*_test.py' -v
+      - name: ruff (whole tree) and mypy --strict (tool/seeml)
+        if: matrix.python == '3.14.7'
+        run: |
+          pip install "ruff==0.16.8" "mypy==2.3.1"
+          ruff check .
+          mypy
+
+  # --- The seam between the planes (P6, #86) ----------------------------------
+  # Torch-free, on every PR: the committed ABI manifest is what the headers
+  # say today; the Python layouts agree with it; the golden fixtures are
+  # what the exporter writes and what the C++ readers accept; and a plan the
+  # compiler writes decodes identically in C++ (seeml-seeu-dump --json) and
+  # in Python (frontier_exec.Plan).
+  seam:
+    name: plane seam (ABI manifest, golden bytes, two decoders)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CXX: clang++-19
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14.7"
+      - name: Pin the Linux toolchain
+        timeout-minutes: 6
+        run: |
+          # The runner image ships third-party apt sources (Google Chrome,
+          # Microsoft) that nothing here needs, and a stale index on any of
+          # them fails every apt-get update -- including the one inside
+          # llvm.sh (observed 2026-09-09: a dl.google.com "Hash Sum
+          # mismatch" took down all seven Linux jobs). Keep Ubuntu's own
+          # archive only; llvm.sh adds its source afterwards.
+          sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu.sources' -delete
+          for i in 1 2 3; do
+            if wget -T 30 -t 1 -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- 19 all; then
+              exit 0
+            fi
+            echo "apt.llvm.org attempt $i failed; retrying" >&2
+            sleep 20
+          done
+          exit 1
+      - name: Install NumPy only
+        run: pip install "numpy==2.5.3"
+      - name: Build the tools
+        run: sh build/build.sh
+      - name: The committed ABI manifest is current
+        run: |
+          ./build/seeml-abi > abi.now.json
+          diff -u tool/seeml/abi.json abi.now.json || {
+            echo "::error::tool/seeml/abi.json is stale — run build/seeml-abi > tool/seeml/abi.json and update tool/seeml/formats.py"
+            exit 1
+          }
+      - name: C++ reads the golden fixtures
+        run: ./build/seeml_golden_fixture_test
+      - name: Python holds the seam (nothing skipped — the tools are built)
+        run: |
+          python -W error -m unittest test/tool/formats_test.py -v 2>&1 | tee seam.log
+          ! grep -q "skipped" seam.log
+      - name: export -> compile -> dump -> validate, no torch
+        run: |
+          python -W error tool/export_model.py --demo-decoder out/
+          ./build/seeml-update-compile --source out/decoder.smf --out out/pkg \
+            --data-batch 16 --lora-rank 4 --steps 20 --no-embed --report out/report.json
+          ./build/seeml-seeu-dump out/pkg/update_plan.seeu --json > out/plan.json
+          python - <<'PY'
+          import json
+          plan, report = json.load(open("out/plan.json")), json.load(open("out/report.json"))
+          assert report["schema"] == 1, report.get("schema")
+          assert int(report["plan_hash"], 16) == plan["header"]["plan_hash"], "report and plan disagree"
+          assert report["vendored_sources"], "the packer needs the vendored list"
+          assert plan["sections"]["train"], "empty training program"
+          PY
 
   # --- Generality: the emitted package on an Apple host (G1c, #64) ------------
   # The same package that CI builds on Linux with c++ alone must, on a Mac,

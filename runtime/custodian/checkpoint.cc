@@ -4,6 +4,7 @@
 #include <fstream>
 #include <vector>
 
+#include "runtime/custodian/checkpoint_format.h"
 #include "runtime/custodian/durable_io.h"
 #include "runtime/diagnostics/persisting/error.h"
 #include "source/identity/hash.h"
@@ -11,37 +12,6 @@
 namespace seeml::update_rt {
 
 namespace up = seeml::update;
-
-namespace {
-
-inline constexpr uint32_t kCkptMagic = 0x504B4553;  // "SEKP"
-// v3: payload_hash uses ContentHash64 — the deterministic parallel identity
-// hash — instead of serial byte-at-a-time Fnv1a64. The persistent segment
-// (parameters + AdamW moments) is the largest thing the custodian hashes,
-// every checkpoint_every steps; the buffer is immutable for the duration of
-// the call, so the chunked hash is race-free. v2 checkpoints are rejected
-// by the version gate (resume restarts from the plan's initial state).
-// v4: the header grows a trailing u64, the run's LR-schedule horizon (E8).
-// Additive — v3 files are still read, their horizon 0 (the plan default).
-inline constexpr uint32_t kCkptVersion = 4;
-inline constexpr uint32_t kCkptOldestReadable = 3;
-
-#pragma pack(push, 1)
-struct CkptHeader {
-  uint32_t magic = kCkptMagic;
-  uint32_t version = kCkptVersion;
-  uint64_t plan_hash = 0;
-  uint64_t step = 0;
-  uint64_t persistent_size = 0;
-  uint64_t payload_hash = 0;
-};
-/// What v4 appends to the v3 header.
-struct CkptHeaderV4Tail {
-  uint64_t horizon_steps = 0;
-};
-#pragma pack(pop)
-
-}  // namespace
 
 std::expected<void, std::string> SaveCheckpointFile(
     const std::string& path, uint64_t plan_hash, uint64_t step,

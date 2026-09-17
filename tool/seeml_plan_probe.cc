@@ -85,6 +85,7 @@
 #include "source/identity/version.h"
 #include "source/parallel/parallel_for.h"
 #include "source/plan/update_types.h"
+#include "tool/probe_trace.h"
 
 namespace {
 
@@ -466,8 +467,8 @@ std::string RunProgram(rt::ExecutorBackend& backend, const Program& program,
                        const rt::StepParams& params, const uint8_t* arena,
                        StagedFile* trace) {
   if (trace) {
-    trace->Put<uint32_t>(0x54504553u);  // "SEPT"
-    trace->Put<uint32_t>(1);
+    trace->Put<uint32_t>(seeml::tool::kProbeTraceMagic);
+    trace->Put<uint32_t>(seeml::tool::kProbeTraceVersion);
     trace->Put<uint64_t>(program.instructions.size());
   }
   for (size_t i = 0; i < program.instructions.size(); ++i) {

@@ -35,6 +35,10 @@ struct EmitPaths {
   std::string embedded_tu;  // empty when the decimal TU was not emitted
   std::string main_tu;
   std::string build_script;
+  // Every runtime source vendored into the package, relative to its root,
+  // in emission order — what a packer or an auditor needs to know the
+  // package's exact contents without listing the directory (P6, #86).
+  std::vector<std::string> vendored_sources;
 };
 
 struct EmitOptions {

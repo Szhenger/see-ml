@@ -455,7 +455,7 @@ MATRIX = [
 # bias. They are interpreted, and InterpreterSelfCheck runs them from a
 # hand-assembled plan; when a compiler path starts emitting one, this set
 # shrinks and the matrix grows.
-NEVER_COMPILED = {"nop", "copy", "reduce_rows"}
+NEVER_COMPILED = {"nop", "copy", "reduce.rows"}
 
 
 @unittest.skipIf(np is None, "NumPy not installed")

@@ -170,6 +170,11 @@ add_executable(seeml-seeu-dump tool/seeml_seeu_dump.cc)
 # PlanSelfHash (the v4 integrity seal) runs on the parallel substrate.
 target_link_libraries(seeml-seeu-dump PRIVATE seeml_parallel)
 
+# The ABI manifest generator (P6, #86): prints every format constant and
+# packed layout the two planes share; committed as tool/seeml/abi.json and
+# regenerated-and-diffed in CI.
+add_executable(seeml-abi tool/seeml_abi.cc)
+
 # The frontier executor's C++ oracle (tool/frontier_exec.py, P4 #78): runs
 # one plan section through one executor backend and traces every write.
 add_executable(seeml-plan-probe tool/seeml_plan_probe.cc)
@@ -217,6 +222,7 @@ endfunction()
 seeml_add_test(seeml_hash_test            test/source/identity/hash_test.cc)
 seeml_add_test(seeml_parallel_for_test    test/source/parallel/parallel_for_test.cc)
 seeml_add_test(seeml_model_io_test        test/compiler/frontend/model_io_test.cc)
+seeml_add_test(seeml_golden_fixture_test  test/compiler/frontend/golden_fixture_test.cc)
 seeml_add_test(seeml_resource_analyzer_test test/compiler/frontend/resource_analyzer_test.cc)
 seeml_add_test(seeml_sir_test             test/compiler/frontend/sir_test.cc)
 seeml_add_test(seeml_operator_test        test/compiler/frontend/operator_test.cc)

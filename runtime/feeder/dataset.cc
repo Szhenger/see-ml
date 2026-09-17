@@ -17,8 +17,6 @@ bool MulU64(uint64_t a, uint64_t b, uint64_t* out) {
   return true;
 }
 
-constexpr uint64_t kSdsHeaderBytes = 40;
-
 }  // namespace
 
 uint64_t Dataset::label_bytes_per_sample() const {
@@ -105,7 +103,7 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
   uint64_t num_samples = 0, input_dim = 0, label_dim = 0;
   if (!read(&magic, 4) || magic != kSdsMagic)
     return diag::feeding::Error("bad magic in '" + path + "'");
-  if (!read(&version, 4) || version < 1 || version > 2)
+  if (!read(&version, 4) || version < kSdsMinVersion || version > kSdsVersion)
     return diag::feeding::Error("unsupported version");
   if (!read(&num_samples, 8) || !read(&input_dim, 8) || !read(&label_kind, 4) ||
       !read(&input_kind, 4) || !read(&label_dim, 8))
@@ -119,7 +117,7 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
   d.input_kind_ = input_kind;
   if (num_samples == 0 || input_dim == 0)
     return diag::feeding::Error("empty dataset");
-  if (label_kind > 2)
+  if (label_kind > kSdsLabelKindMax)
     return diag::feeding::Error("unknown label kind");
   if (label_kind == 2 &&
       (label_dim == 0 || label_dim > UINT64_MAX / sizeof(float)))

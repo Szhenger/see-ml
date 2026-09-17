@@ -34,6 +34,14 @@
 namespace seeml::update_rt {
 
 inline constexpr uint32_t kSdsMagic = 0x31534453;  // "SDS1" little-endian
+// The readable version window and the fixed header length, named (P6, #86)
+// so the ABI manifest publishes them and the Python writer is checked
+// against them; v1 = f32 feature rows, v2 = adds i32 token records.
+inline constexpr uint32_t kSdsVersion = 2;
+inline constexpr uint32_t kSdsMinVersion = 1;
+inline constexpr uint64_t kSdsHeaderBytes = 40;
+// label_kind: 0 none, 1 class index (i32), 2 dense f32[label_dim].
+inline constexpr uint32_t kSdsLabelKindMax = 2;
 
 // SDS is read/written by memcpy of host integers; the documented on-disk
 // contract is little-endian. Big-endian hosts need byte-swapping I/O.

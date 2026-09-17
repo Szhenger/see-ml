@@ -65,22 +65,29 @@ import io
 import struct
 import sys
 
-SMF_MAGIC = 0x31464D53  # "SMF1"
-SMF_VERSION = 5         # v5: per-op attr1 (RoPE base as f32 bits) after attr0
-DEFAULT_ROPE_BASE = 10000.0  # what attr1 == 0 means on a Rope op
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from seeml import formats  # noqa: E402
+
+SMF_MAGIC = formats.SMF_MAGIC
+SMF_VERSION = formats.SMF_VERSION
+DEFAULT_ROPE_BASE = formats.SMF_DEFAULT_ROPE_BASE  # attr1 == 0 on a Rope op
 # The writer emits the LOWEST version that can carry the model: v3 for a
 # feature-input model, v4 for a token-native one, v5 only when some Rope op
 # carries a non-default base (attr1 != 0). Files that use nothing newer keep
 # loading on older compilers, and the classic demos stay byte-for-byte.
-SDS_MAGIC = 0x31534453  # "SDS1"
+SDS_MAGIC = formats.SDS_MAGIC
 ALIGN = 64
 # Feature corpora stream to disk in row chunks: constant memory at any
 # corpus size, one write per chunk instead of two per row.
 SDS_CHUNK_ROWS = 1 << 16
 
+_K = formats.SMF_OP_KINDS
 (OP_MATMUL, OP_ADDBIAS, OP_RELU, OP_GELU, OP_SILU, OP_MUL, OP_LAYERNORM,
- OP_ADD, OP_RMSNORM, OP_ROPE, OP_ATTENTION) = range(11)
-OP_EMBEDDING = 11  # SMF v4: gather table rows by the model's i32 token input
+ OP_ADD, OP_RMSNORM, OP_ROPE, OP_ATTENTION) = (
+    _K["matmul"], _K["add_bias"], _K["relu"], _K["gelu"], _K["silu"],
+    _K["mul"], _K["layer_norm"], _K["add"], _K["rms_norm"], _K["rope"],
+    _K["attention"])
+OP_EMBEDDING = _K["embedding"]  # SMF v4: gather table rows by the model's i32 token input
 
 
 def _align(n: int) -> int:
@@ -151,8 +158,8 @@ class _SmfBuilder:
         return max(self.min_version, 5 if needs_v5 else 3)
 
     def _meta(self, offsets, version: int) -> bytes:
-        out = struct.pack("<IIII", SMF_MAGIC, version,
-                          len(self.tensors), len(self.ops))
+        out = formats.SMF_PREAMBLE.pack(SMF_MAGIC, version,
+                                        len(self.tensors), len(self.ops))
         out += _s(self.input_name) + _s(self.output_name)
         out += struct.pack("<Q", self.seq_len)
         for t in self.tensors:
@@ -577,7 +584,7 @@ def hf_llama_to_seeml(config: dict, tensors: dict, seq_len: int,
     D = int(config["hidden_size"])
     H = int(config["num_attention_heads"])
     Hkv = int(config.get("num_key_value_heads") or H)
-    F = int(config["intermediate_size"])
+    int(config["intermediate_size"])  # required; the widths come from the tensors
     L = int(config["num_hidden_layers"])
     V = int(config["vocab_size"])
     eps = float(config.get("rms_norm_eps", 1e-6))
@@ -854,7 +861,7 @@ def export_sds(inputs, labels, path: str, label_kind: int = 1):
         record = np.dtype([("x", "<f4", (d,)), ("y", "<f4", (label_dim,))])
 
     with open(path, "wb") as f:
-        f.write(struct.pack("<IIQQIIQ", SDS_MAGIC, 1, n, d, label_kind, 0, label_dim))
+        f.write(formats.SDS_HEADER.pack(SDS_MAGIC, 1, n, d, label_kind, 0, label_dim))
         for start in range(0, n, SDS_CHUNK_ROWS):
             end = min(n, start + SDS_CHUNK_ROWS)
             if record is None:
@@ -901,7 +908,7 @@ def export_token_sds(records, path: str):
         raise ValueError("export_token_sds: negative token id")
     n, s = a.shape[0], a.shape[1] - 1
     with open(path, "wb") as f:
-        f.write(struct.pack("<IIQQIIQ", SDS_MAGIC, 2, n, s, 1, 1, 0))
+        f.write(formats.SDS_HEADER.pack(SDS_MAGIC, 2, n, s, 1, 1, 0))
         f.write(_flat_bytes(a))
     print(f"wrote {path} ({n} records, seq_len={s}, token-native)")
 

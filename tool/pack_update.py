@@ -41,6 +41,9 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from seeml import formats  # noqa: E402
+
 PLAN_FILE = "update_plan.seeu"
 STUB_FILE = "update_plan_embedded.S"
 DECIMAL_TU = "update_plan_embedded.cc"
@@ -52,9 +55,9 @@ CERTIFICATE_FILE = "numerics_certificate.json"
 
 # The four bytes every plan starts with ("SEEU" little-endian; kSeeuMagic in
 # source/plan/schema.h). Checked only to refuse embedding a file that is not
-# a plan at all — the runtime re-verifies the full seal at load. When P6's
-# ABI manifest lands this constant is read from it rather than restated.
-PLAN_MAGIC = b"SEEU"
+# a plan at all — the runtime re-verifies the full seal at load. The value
+# is the shared seam's (tool/seeml/formats.py, held to the header by abi.json).
+PLAN_MAGIC = formats.SEEU_MAGIC.to_bytes(4, "little")
 
 # Apple Silicon pages are 16 KiB; a plan aligned to that is the page-aligned
 # blob zero-copy GPU residency (G1b-2) wants, and it costs at most one page

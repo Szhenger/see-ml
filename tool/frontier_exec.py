@@ -72,44 +72,21 @@ import sys
 import tempfile
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from seeml import formats  # noqa: E402
+
 # --- The .seeu container (source/plan/schema.h, instruction.h) ---------------
 
-SEEU_MAGIC = 0x55454553
-SEEU_OLDEST, SEEU_NEWEST = 4, 13
-RODATA_BIT = 1 << 63
-NULL_REF = (1 << 64) - 1
+SEEU_MAGIC = formats.SEEU_MAGIC
+SEEU_OLDEST, SEEU_NEWEST = formats.SEEU_OLDEST_READABLE, formats.SEEU_VERSION
+RODATA_BIT = formats.RODATA_BIT
+NULL_REF = formats.NULL_REF
 
-_HEADER = struct.Struct(
-    "<II" "QQ" "QQQQ" "II" "Q" "QQQQQQQQQQ" "fffff" "I" "QQ" "QQ" "QQ"
-    "II" "Q" "ff" "II" "Q" "QQ")
-_HEADER_FIELDS = (
-    "magic version arena_size persistent_size input_ref input_floats "
-    "label_ref label_bytes label_kind optimizer_kind loss_ref "
-    "train_instr_offset train_instr_count merge_instr_offset "
-    "merge_instr_count rodata_offset rodata_size persist_init_offset "
-    "persist_init_size emit_table_offset emit_count lr beta1 beta2 eps "
-    "weight_decay gemm_tile_k batch default_steps eval_instr_offset "
-    "eval_instr_count source_model_hash plan_hash lr_schedule gemm_tile_n "
-    "warmup_steps min_lr_factor clip_norm input_kind grad_accum_steps "
-    "seq_len step_instr_offset step_instr_count").split()
-assert _HEADER.size == 280 and len(_HEADER_FIELDS) == 43
-_INSTRUCTION = struct.Struct("<HHI4Q3Q")
-assert _INSTRUCTION.size == 64
+_HEADER = formats.PLAN_HEADER.struct
+_HEADER_FIELDS = formats.PLAN_HEADER.names
+_INSTRUCTION = formats.INSTRUCTION.struct
 
-OPCODES = {
-    0: "nop", 1: "gemm.nn", 2: "gemm.nt", 3: "gemm.tn", 4: "gemm.acc_nn",
-    5: "add.ew", 6: "add.bias", 7: "relu.fwd", 8: "relu.bwd", 9: "scale",
-    10: "reduce_rows", 11: "softmax_xent.fwd", 12: "softmax_xent.bwd",
-    13: "mse.fwd", 14: "mse.bwd", 15: "kl_distill.fwd", 16: "kl_distill.bwd",
-    17: "sgd.step", 18: "adamw.step", 19: "fill", 20: "copy", 21: "mul.ew",
-    22: "gelu.fwd", 23: "gelu.bwd", 24: "silu.fwd", 25: "silu.bwd",
-    26: "layer_norm.fwd", 27: "layer_norm.bwd", 28: "clip_norm",
-    29: "gemm.nn_q8", 30: "gemm.nt_q8", 31: "rms_norm.fwd",
-    32: "rms_norm.bwd", 33: "rope.fwd", 34: "rope.bwd", 35: "attn.fwd",
-    36: "attn.dp", 37: "attn.dv", 38: "softmax_rows.bwd", 39: "attn.dq",
-    40: "attn.dk", 41: "embed.fwd", 42: "accumulate", 43: "gemm.nn_bf16",
-    44: "gemm.nt_bf16", 45: "rope.table", 46: "fused.map",
-}
+OPCODES = formats.OPCODES
 GEMM_OPCODES = (1, 2, 3, 4, 29, 30, 43, 44)
 SECTIONS = ("train", "step", "eval", "merge")
 NORM_EPS = 1e-5  # runtime/executor/normalization.cc; SMF carries none (#96)
@@ -251,7 +228,8 @@ class Plan:
 
 # --- The SDS corpus and the feeder (runtime/feeder/dataset.cc) ---------------
 
-SDS_MAGIC = 0x31534453
+SDS_MAGIC = formats.SDS_MAGIC
+_SDS_HEAD = formats.SDS_HEADER_BYTES
 _MASK64 = (1 << 64) - 1
 
 
@@ -275,18 +253,20 @@ class Corpus:
                 raw = f.read()
         except OSError as e:
             raise PlanError(f"cannot read {path}: {e}")
-        if len(raw) < 40:
+        if len(raw) < _SDS_HEAD:
             raise PlanError(f"{path}: truncated (no SDS header)")
         (magic, version, self.num_samples, self.input_dim, self.label_kind,
-         self.input_kind, self.label_dim) = struct.unpack_from("<IIQQIIQ", raw)
-        if magic != SDS_MAGIC or version not in (1, 2):
+         self.input_kind, self.label_dim) = formats.SDS_HEADER.unpack_from(raw)
+        if magic != SDS_MAGIC or not (
+                formats.SDS_MIN_VERSION <= version <= formats.SDS_VERSION):
             raise PlanError(f"{path}: not an SDS v1/v2 corpus")
         n, d = self.num_samples, self.input_dim
         if self.input_kind == 1:
             self.record = (d + 1) * 4
-            if len(raw) - 40 < n * self.record:
+            if len(raw) - _SDS_HEAD < n * self.record:
                 raise PlanError(f"{path}: truncated records")
-            self.tokens = np.frombuffer(raw, "<i4", n * (d + 1), 40).reshape(
+            self.tokens = np.frombuffer(raw, "<i4", n * (d + 1),
+                                        _SDS_HEAD).reshape(
                 n, d + 1)
         else:
             self.label_nbytes = {0: 0, 1: 4, 2: 4 * self.label_dim}.get(
@@ -294,9 +274,10 @@ class Corpus:
             if self.label_nbytes is None:
                 raise PlanError(f"{path}: unknown label kind")
             self.record = d * 4 + self.label_nbytes
-            if len(raw) - 40 < n * self.record:
+            if len(raw) - _SDS_HEAD < n * self.record:
                 raise PlanError(f"{path}: truncated records")
-            rows = np.frombuffer(raw, np.uint8, n * self.record, 40).reshape(
+            rows = np.frombuffer(raw, np.uint8, n * self.record,
+                                 _SDS_HEAD).reshape(
                 n, self.record)
             self.inputs = np.ascontiguousarray(rows[:, :d * 4])
             self.labels = np.ascontiguousarray(rows[:, d * 4:])
@@ -1326,7 +1307,7 @@ class Executor:
 
 # --- diff: the oracle ------------------------------------------------------------
 
-TRACE_MAGIC = 0x54504553
+TRACE_MAGIC = formats.PROBE_TRACE_MAGIC
 
 
 def read_trace(np, path):
@@ -1334,7 +1315,7 @@ def read_trace(np, path):
     with open(path, "rb") as f:
         raw = f.read()
     magic, version, count = struct.unpack_from("<IIQ", raw, 0)
-    if magic != TRACE_MAGIC or version != 1:
+    if magic != TRACE_MAGIC or version != formats.PROBE_TRACE_VERSION:
         raise PlanError(f"{path}: not a seeml-plan-probe trace")
     pos, out = 16, []
     for _ in range(count):

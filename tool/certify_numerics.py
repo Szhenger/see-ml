@@ -79,9 +79,9 @@ UNIT_ROUNDOFF = 2.0 ** -24  # float32, round to nearest
 # normalization.cc, loss.cc, optimizer.cc, elementwise.cc). The GEMMs are
 # float32 accumulations already and are not sites.
 SITES = {
-    10: "reduce_rows", 11: "softmax_xent.fwd", 13: "mse.fwd",
+    10: "reduce.rows", 11: "softmax_xent.fwd", 13: "mse.fwd",
     15: "kl_distill.fwd", 26: "layer_norm.fwd", 27: "layer_norm.bwd",
-    28: "clip_norm", 31: "rms_norm.fwd", 32: "rms_norm.bwd",
+    28: "clip.norm", 31: "rms_norm.fwd", 32: "rms_norm.bwd",
     35: "attn.fwd", 36: "attn.dp", 38: "softmax_rows.bwd",
 }
 # The optimizer steps reduce only when they carry a fused clip (plan v12,

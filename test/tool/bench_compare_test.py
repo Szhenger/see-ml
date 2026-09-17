@@ -37,7 +37,7 @@ def wobble(i, amplitude):
 
 def report(runner=1.0, schema=4, noise=0.03, night=0, regress=None,
            per_key=None, calibration=True, kernel="sgemm_ikj_128_f32_v1",
-           policy=None):
+           policy=None, version="test"):
     """One night's report on a runner `runner` times the reference speed.
     `regress` {fixture: factor} is a REAL regression (the calibration
     kernel does not see it); `per_key` overrides the runner factor per key
@@ -53,7 +53,7 @@ def report(runner=1.0, schema=4, noise=0.03, night=0, regress=None,
             cells[t] = {"rows_per_s": rows}
             i += 1
         fixtures[name] = {"threads": cells}
-    out = {"seeml_version": "test", "schema": schema, "backend": "cpu",
+    out = {"seeml_version": version, "schema": schema, "backend": "cpu",
            "fixtures": fixtures}
     if policy:
         out["kernel_policy"] = {"source": "table", "gemm_tile_k": policy[0],
@@ -115,6 +115,24 @@ class GateTest(unittest.TestCase):
 
     def runner_speeds(self):
         return [self.NIGHTLY_20_24[0] / s for s in self.NIGHTLY_20_24]
+
+    def test_a_baseline_from_another_release_does_not_compare_silently(self):
+        gate = Gate(self.tmp)
+        self.assertEqual(gate.night(report(1.0, version="1.3.0")), 0)  # seeds
+        # The rolling baseline fails closed; the refusal names both releases.
+        self.assertEqual(gate.night(report(1.0, night=1, version="1.4.0")), 1)
+        self.assertIn("seeml 1.3.0", gate.log)
+        self.assertIn("seeml 1.4.0", gate.log)
+        self.assertEqual(gate.baseline_report()["seeml_version"], "1.3.0")
+        # Asked for, the comparison runs — announced against both baselines
+        # (the pinned epoch spans releases by design) — and promotes.
+        self.assertEqual(gate.night(report(1.0, night=1, version="1.4.0"),
+                                    extra=["--across-releases"]), 0, gate.log)
+        self.assertEqual(gate.log.count("NOTE the"), 2, gate.log)
+        self.assertEqual(gate.baseline_report()["seeml_version"], "1.4.0")
+        # From then on only the epoch baseline is from another release.
+        self.assertEqual(gate.night(report(1.0, night=2, version="1.4.0")), 0)
+        self.assertIn("NOTE the epoch baseline", gate.log)
 
     def test_replay_nightly_20_to_24_is_five_green_gates(self):
         gate = Gate(self.tmp)

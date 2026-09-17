@@ -528,6 +528,7 @@ constexpr const char* kVendoredSources[] = {
     "runtime/feeder/batch_pipeline.h",    "runtime/feeder/batch_pipeline.cc",
     "runtime/validator/plan_validator.h", "runtime/validator/plan_validator.cc",
     "runtime/custodian/durable_io.h",     "runtime/custodian/durable_io.cc",
+    "runtime/custodian/checkpoint_format.h",
     "runtime/custodian/checkpoint.h",     "runtime/custodian/checkpoint.cc",
     "runtime/diagnostics/diagnostic.h",
     "runtime/diagnostics/feeding/error.h",
@@ -667,6 +668,7 @@ std::expected<EmitPaths, std::string> EmitNativePackage(
     return std::unexpected(r.error());
 
   // Vendor the runtime into the package so it builds without the repo.
+  for (const char* rel : kVendoredSources) paths.vendored_sources.push_back(rel);
   for (const char* rel : kVendoredSources) {
     const auto src = std::filesystem::path(repo_root) / rel;
     const auto dst = std::filesystem::path(out_dir) / rel;
