@@ -1,6 +1,7 @@
 #ifndef SEEML_SOURCE_PLAN_INSTRUCTION_H_
 #define SEEML_SOURCE_PLAN_INSTRUCTION_H_
 
+#include <cstddef>
 #include <cstdint>
 
 // =============================================================================
@@ -131,7 +132,57 @@ enum class OpCode : uint16_t {
   // of every RoPE instruction recomputes them. Built on the device, never
   // by the compiler: its sin/cos are the device libm's, as before.
   kRopeTable = 45,  // in: table([S, d/2, 2]); out[0]=S<<32|d, out[1]=base bits
+  // --- Fused elementwise chain (plan v13, E4 / roadmap Phase 1b). -------------
+  // One pass over `count` elements running a micro-program of 1..4 stages
+  // (FusedStage, below) on a running value that starts as in[0]:
+  //   in[0] = x, in[1..2] = the chain's other tensor operands (kNullRef
+  //   when unused), in[3] = out;  out[0] = count,  out[1] = the stages, one
+  //   byte each, first stage in the low byte, zero-terminated,  out[2] =
+  //   two f32 immediates (imm0 bits | imm1 bits << 32) for scale stages.
+  // Each stage evaluates exactly the expression of the standalone opcode it
+  // replaces, as its own loop over a cache-resident block, so a fused chain
+  // is bit-identical to the instruction sequence it stands for; what it
+  // removes is one arena-sized write and read per folded instruction.
+  kFusedMap = 46,
 };
+
+// --- kFusedMap stages ----------------------------------------------------------
+// A stage byte: the kind in the low nibble, an argument in the high nibble.
+//   binary kinds (add, mul): bits 4..5 = which operand slot (1 or 2) holds
+//     the other tensor; bit 7 set = the running value is the RIGHT operand
+//     (x_other OP run), clear = the left (run OP x_other). IEEE add and mul
+//     commute in value, but not in which NaN payload survives; the order of
+//     the instruction being replaced is kept.
+//   scale: bits 4..5 = which immediate (0 or 1) is alpha.
+//   unary kinds: the high nibble is zero.
+enum class FusedStage : uint8_t {
+  kEnd = 0,
+  kAdd = 1,    // run + x        (kAddEW)
+  kMul = 2,    // run * x        (kMulEW)
+  kScale = 3,  // alpha * run    (kScale)
+  kRelu = 4,   // kReluFwd
+  kGelu = 5,   // kGeluFwd
+  kSilu = 6,   // kSiluFwd
+};
+inline constexpr uint8_t kFusedStageKindMask = 0x0F;
+inline constexpr uint8_t kFusedStageArgShift = 4;
+inline constexpr uint8_t kFusedStageArgMask = 0x03;
+inline constexpr uint8_t kFusedStageRunIsRight = 0x80;
+inline constexpr size_t kFusedMapMaxStages = 4;
+
+inline constexpr uint8_t MakeFusedStage(FusedStage kind, uint8_t arg = 0,
+                                        bool run_is_right = false) {
+  return static_cast<uint8_t>(
+      static_cast<uint8_t>(kind) |
+      static_cast<uint8_t>((arg & kFusedStageArgMask) << kFusedStageArgShift) |
+      (run_is_right ? kFusedStageRunIsRight : uint8_t{0}));
+}
+inline constexpr FusedStage FusedStageKind(uint8_t stage) {
+  return static_cast<FusedStage>(stage & kFusedStageKindMask);
+}
+inline constexpr uint8_t FusedStageArg(uint8_t stage) {
+  return (stage >> kFusedStageArgShift) & kFusedStageArgMask;
+}
 
 // --- Instruction flags (plan v5): fused GEMM epilogues. ----------------------
 // Every plan before v5 carries flags == 0 on every instruction; from v5 on

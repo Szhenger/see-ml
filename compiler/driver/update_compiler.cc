@@ -402,6 +402,26 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
                }
                return {};
              });
+    if (config_.fuse_elementwise)
+      pm.Add("fuse-elementwise",
+             [&](sir::Block& b) -> std::expected<void, std::string> {
+               std::unordered_set<const sir::Value*> protected_values;
+               protected_values.insert(loss);
+               for (const auto& [p, g] : param_grads)
+                 protected_values.insert(g);
+               auto fused = ElementwiseChainFuser().Run(b, protected_values);
+               if (!fused) return std::unexpected(fused.error());
+               // Fuse-then-rebind, as above: the folded ops leave the eval
+               // snapshot (their tail stays in it, now carrying the chain).
+               if (!fused->fused_away.empty()) {
+                 std::unordered_set<const sir::Operation*> dead(
+                     fused->fused_away.begin(), fused->fused_away.end());
+                 std::erase_if(primal_ops, [&](const sir::Operation* op) {
+                   return dead.contains(op);
+                 });
+               }
+               return {};
+             });
     // The optimization phase's sweep: no op whose results nothing reads may
     // survive to lowering. Beyond the fusion orphans this proves an
     // invariant (the driver builds its programs minimally) — and it is the

@@ -6,6 +6,7 @@
 // =============================================================================
 
 #include <bit>
+#include <limits>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -559,6 +560,74 @@ TEST(PlanValidator, EveryCompiledInstructionValidates) {
   check(h.train_instr_offset, h.train_instr_count);
   check(h.eval_instr_offset, h.eval_instr_count);
   check(h.merge_instr_offset, h.merge_instr_count);
+}
+
+// --- kFusedMap (plan v13, E4): the micro-program is proven like any operand ---
+
+up::UpdateInstruction FusedMap(uint64_t stages, uint64_t imms = 0) {
+  up::UpdateInstruction ins;
+  ins.opcode = static_cast<uint16_t>(up::OpCode::kFusedMap);
+  ins.in[0] = up::MakeArenaRef(0);
+  ins.in[3] = up::MakeArenaRef(768);
+  ins.out[0] = 32;
+  ins.out[1] = stages;
+  ins.out[2] = imms;
+  return ins;
+}
+
+TEST(PlanValidator, FusedMapProgramsAreProven) {
+  using up::FusedStage;
+  using up::MakeFusedStage;
+  const uint64_t scale0 = MakeFusedStage(FusedStage::kScale, 0);
+  const uint64_t add1 = MakeFusedStage(FusedStage::kAdd, 1);
+  const uint64_t mul2r = MakeFusedStage(FusedStage::kMul, 2, true);
+  const uint64_t silu = MakeFusedStage(FusedStage::kSilu);
+  const uint64_t half = std::bit_cast<uint32_t>(0.5f);
+  auto check = [&](up::UpdateInstruction ins, uint32_t version = up::kSeeuVersion) {
+    return ValidateInstruction(ins, kArena, kRodata, version);
+  };
+
+  // scale -> add: the LoRA forward chain.
+  up::UpdateInstruction lora = FusedMap(scale0 | add1 << 8, half);
+  lora.in[1] = up::MakeArenaRef(256);
+  EXPECT_OK(check(lora));
+  EXPECT_ERROR_CONTAINS(check(lora, up::kSeeuFusedMapVersion - 1), "pre-v13");
+
+  // Four stages, both slots, both immediates.
+  up::UpdateInstruction full = FusedMap(
+      silu | add1 << 8 |
+          (uint64_t{MakeFusedStage(FusedStage::kScale, 1)} << 16) |
+          mul2r << 24,
+      half << 32);
+  full.in[1] = up::MakeArenaRef(256);
+  full.in[2] = up::MakeRodataRef(0);
+  // rodata slot 2 is 256 bytes = 64 floats >= 32: in bounds.
+  EXPECT_OK(check(full));
+
+  // Every way a program can lie:
+  EXPECT_ERROR(check(FusedMap(0)));                        // empty
+  EXPECT_ERROR(check(FusedMap(7)));                        // unknown kind
+  EXPECT_ERROR(check(FusedMap(silu | uint64_t{1} << 40)));  // bytes past 4 stages
+  EXPECT_ERROR(check(FusedMap(silu | silu << 16)));        // data after the end
+  EXPECT_ERROR(check(FusedMap(silu | 0x10)));              // arg on a unary
+  EXPECT_ERROR(check(FusedMap(MakeFusedStage(FusedStage::kAdd, 0))));  // slot 0
+  EXPECT_ERROR(check(FusedMap(add1)));                     // slot 1 named, absent
+  up::UpdateInstruction stray = FusedMap(silu);
+  stray.in[2] = up::MakeArenaRef(512);                     // slot 2 present, unnamed
+  EXPECT_ERROR(check(stray));
+  EXPECT_ERROR(check(FusedMap(silu, half)));               // immediate set, unused
+  EXPECT_ERROR(check(FusedMap(
+      scale0, std::bit_cast<uint32_t>(std::numeric_limits<float>::infinity()))));
+  EXPECT_ERROR(check(FusedMap(scale0 | 0x80, half)));      // run-is-right on scale
+  up::UpdateInstruction alias = FusedMap(silu);
+  alias.in[3] = alias.in[0];                               // in-place is not the ABI
+  EXPECT_ERROR_CONTAINS(check(alias), "alias");
+  up::UpdateInstruction oob = FusedMap(silu);
+  oob.out[0] = 1 << 20;
+  EXPECT_ERROR(check(oob));
+  up::UpdateInstruction ro_out = FusedMap(silu);
+  ro_out.in[3] = up::MakeRodataRef(0);
+  EXPECT_ERROR(check(ro_out));
 }
 
 }  // namespace

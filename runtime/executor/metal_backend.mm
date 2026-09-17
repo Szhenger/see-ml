@@ -101,7 +101,7 @@ enum Pipe : int {
   kPGemmNNQ8ColsG, kPGemmNTQ8ColsG, kPGemmNNBF16ColsG, kPGemmNTBF16ColsG,
   kPGemmSplitKFin,
   kPAddEW, kPMulEW, kPAddBias, kPReluFwd, kPReluBwd, kPGeluFwd, kPGeluBwd,
-  kPSiluFwd, kPSiluBwd, kPScale, kPFill, kPCopy, kPAccumulate, kPSgd, kPAdamW,
+  kPSiluFwd, kPSiluBwd, kPScale, kPFusedMap, kPFill, kPCopy, kPAccumulate, kPSgd, kPAdamW,
   kPReduceRows, kPLnFwd, kPLnBwd, kPRmsFwd, kPRmsBwd,
   kPClipPartials, kPClipFinish, kPClipApply, kPSgdClip, kPAdamWClip,
   kPRopeFwd, kPRopeBwd, kPAttnSoftmax, kPSoftmaxRowsBwd,
@@ -124,7 +124,7 @@ const char* const kPipeNames[kPipeCount] = {
     "k_gemm_nn_bf16_colsg", "k_gemm_nt_bf16_colsg",
     "k_gemm_splitk_fin", "k_add_ew", "k_mul_ew", "k_add_bias", "k_relu_fwd",
     "k_relu_bwd", "k_gelu_fwd", "k_gelu_bwd", "k_silu_fwd", "k_silu_bwd",
-    "k_scale", "k_fill", "k_copy", "k_accumulate", "k_sgd", "k_adamw",
+    "k_scale", "k_fused_map", "k_fill", "k_copy", "k_accumulate", "k_sgd", "k_adamw",
     "k_reduce_rows",
     "k_layernorm_fwd", "k_layernorm_bwd", "k_rmsnorm_fwd", "k_rmsnorm_bwd",
     "k_clip_partials", "k_clip_finish", "k_clip_apply", "k_sgd_clip",
@@ -350,6 +350,7 @@ bool DimsFit32(up::OpCode op, const up::UpdateInstruction& ins) {
     case up::OpCode::kFill:
     case up::OpCode::kCopy:
     case up::OpCode::kAccumulate:
+    case up::OpCode::kFusedMap:
     case up::OpCode::kSgdStep:
     case up::OpCode::kAdamWStep:
     case up::OpCode::kClipNorm:
@@ -782,6 +783,16 @@ std::expected<void, std::string> MetalBackend::Encode(
       ref(0, ins.in[0]); ref(1, ins.in[1]);
       a.n = u32(ins.out[0]);
       Dispatch(kPAccumulate, a, a.n, kElementwiseGroup);
+      return {};
+    case up::OpCode::kFusedMap:
+      ref(0, ins.in[0]); ref(3, ins.in[3]);
+      if (ins.in[1] != up::kNullRef) ref(1, ins.in[1]);
+      if (ins.in[2] != up::kNullRef) ref(2, ins.in[2]);
+      a.n = u32(ins.out[0]);
+      a.flags = u32(ins.out[1]);
+      a.f[0] = BitsToF32(ins.out[2]);
+      a.f[1] = BitsToF32(ins.out[2] >> 32);
+      Dispatch(kPFusedMap, a, a.n, kElementwiseGroup);
       return {};
     case up::OpCode::kSgdStep: {
       ref(0, ins.in[0]); ref(1, ins.in[1]);
