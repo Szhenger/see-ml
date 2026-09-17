@@ -11,6 +11,7 @@
 
 #include "compiler/frontend/ingressor/model_reader.h"
 #include "compiler/frontend/ingressor/model_writer.h"
+#include "source/parallel/parallel_for.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 #include "test/support/scoped_temp_dir.h"
@@ -19,6 +20,7 @@ namespace {
 
 using namespace seeml::update;
 using seeml::testing::AsBytes;
+using seeml::testing::AsPayload;
 using seeml::testing::MakeMlp;
 using seeml::testing::ScopedTempDir;
 
@@ -291,7 +293,7 @@ TEST(Smf, LoadRejectsByteSizeDimsDisagreement) {
   model.tensors.push_back({.name = "w",
                            .dims = {2, 2},
                            .is_const = true,
-                           .data = AsBytes({1.0f, 2.0f, 3.0f})});
+                           .data = AsPayload({1.0f, 2.0f, 3.0f})});
   model.ops.push_back({SmfOpKind::kMatMul, "mm", {"x", "w"}, "y"});
 
   const std::string path = dir.File("model.smf");
@@ -308,7 +310,7 @@ TEST(Smf, LoadRejectsInvalidDims) {
   zero_dim.input_name = "x";
   zero_dim.output_name = "y";
   zero_dim.tensors.push_back(
-      {.name = "w", .dims = {0}, .is_const = true, .data = AsBytes({1.0f})});
+      {.name = "w", .dims = {0}, .is_const = true, .data = AsPayload({1.0f})});
   ASSERT_OK(SaveSmf(path, zero_dim));
   EXPECT_ERROR_CONTAINS(LoadSmf(path), "invalid dims");
 
@@ -317,7 +319,7 @@ TEST(Smf, LoadRejectsInvalidDims) {
   dynamic_const.input_name = "x";
   dynamic_const.output_name = "y";
   dynamic_const.tensors.push_back(
-      {.name = "w", .dims = {-1}, .is_const = true, .data = AsBytes({1.0f})});
+      {.name = "w", .dims = {-1}, .is_const = true, .data = AsPayload({1.0f})});
   ASSERT_OK(SaveSmf(path, dynamic_const));
   EXPECT_ERROR_CONTAINS(LoadSmf(path), "invalid dims");
 
@@ -326,7 +328,7 @@ TEST(Smf, LoadRejectsInvalidDims) {
   rank0.input_name = "x";
   rank0.output_name = "y";
   rank0.tensors.push_back(
-      {.name = "w", .dims = {}, .is_const = true, .data = AsBytes({1.0f})});
+      {.name = "w", .dims = {}, .is_const = true, .data = AsPayload({1.0f})});
   ASSERT_OK(SaveSmf(path, rank0));
   EXPECT_ERROR_CONTAINS(LoadSmf(path), "invalid dims");
 }
@@ -383,6 +385,44 @@ TEST(Smf, ConcurrentLoadReportsFirstFailureInInputOrder) {
 
   const std::string paths[] = {dir.File("missing.smf"), pa};
   EXPECT_ERROR_CONTAINS(LoadSmfMany(paths), "missing.smf");
+}
+
+TEST(ModelIo, ByteBalancedParallelLoadIsExactAtAnyWidth) {
+  // One tensor dominating the payload, a tail of small ones, and sizes
+  // that are multiples of nothing: the load copies by byte ranges (8 MiB
+  // chunks) that start and stop inside tensors (E2, #81), and must
+  // reproduce every byte and the content hash at one thread and at eight.
+  SmfModel model;
+  model.input_name = "x";
+  model.tensors.push_back({.name = "x", .dims = {-1, 3}});
+  std::string prev = "x";
+  const std::vector<std::pair<int64_t, int64_t>> shapes = {
+      {3, 1500007}, {1500007, 5}, {5, 7}, {7, 900001}, {900001, 2}};
+  for (size_t i = 0; i < shapes.size(); ++i) {
+    const auto [rows, cols] = shapes[i];
+    const std::string w = "w" + std::to_string(i);
+    model.tensors.push_back(
+        {.name = w, .dims = {rows, cols}, .is_const = true,
+         .data = AsPayload(seeml::testing::RandnVector(
+             static_cast<size_t>(rows * cols), 100 + i))});
+    const std::string out = "h" + std::to_string(i);
+    model.ops.push_back({.kind = SmfOpKind::kMatMul, .name = "mm" + w,
+                         .inputs = {prev, w}, .output = out});
+    prev = out;
+  }
+  model.output_name = prev;
+  ScopedTempDir dir;
+  const std::string path = dir.File("wide.smf");
+  ASSERT_OK(SaveSmf(path, model));
+  for (const size_t threads : {size_t{1}, size_t{8}}) {
+    seeml::update::SetParallelThreadCount(threads);
+    ASSERT_OK_AND_ASSIGN(SmfModel loaded, LoadSmf(path));
+    EXPECT_EQ(loaded.content_hash, model.content_hash);
+    ASSERT_EQ(loaded.tensors.size(), model.tensors.size());
+    for (size_t i = 0; i < model.tensors.size(); ++i)
+      EXPECT_TRUE(loaded.tensors[i].data == model.tensors[i].data);
+  }
+  seeml::update::SetParallelThreadCount(0);
 }
 
 }  // namespace

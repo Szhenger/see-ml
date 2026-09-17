@@ -97,10 +97,20 @@ class UpdateCompiler {
   [[nodiscard]] std::expected<CompiledUpdate, std::string> Compile(
       const SmfModel& source, const SmfModel* teacher = nullptr);
 
+  /// The consuming form, for callers done with the models (the CLI): the
+  /// same plan, byte for byte, but each frozen weight's payload — in
+  /// `source` and, when given, `*teacher` — is released as soon as plan
+  /// assembly has written it, so the weights are resident about once
+  /// rather than twice while the blob is built (E2, #81). On return the
+  /// models keep their metadata and content hashes and no payload that was
+  /// packed; on error they are unspecified-but-valid.
+  [[nodiscard]] std::expected<CompiledUpdate, std::string> Compile(
+      SmfModel&& source, SmfModel* teacher = nullptr);
+
  private:
   /// The pipeline itself; Compile wraps it with the diagnostics contract.
   [[nodiscard]] std::expected<CompiledUpdate, std::string> CompileImpl(
-      const SmfModel& source, const SmfModel* teacher);
+      const SmfModel& source, const SmfModel* teacher, bool consume);
 
   UpdateConfig config_;
 };

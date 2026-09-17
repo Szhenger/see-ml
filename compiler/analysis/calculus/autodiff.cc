@@ -232,6 +232,9 @@ const std::unordered_map<std::string_view, VjpRule>& VjpRegistry() {
          if (auto base = op->getAttrAs<float>("base"))
            g->setAttribute("base", *base);
          g->addOperand(dy);
+         // The angle table (RopeTableHoister), when the forward has one:
+         // the transpose rotation reads the same angles.
+         if (op->numOperands() > 1) g->addOperand(op->operand(1));
          sir::Value* dx = g->addResult(
              std::string(x->id()) + ".d" + std::to_string(ctx.fresh_counter++),
              sir::DataType::F32, x->shape());

@@ -24,6 +24,7 @@ inline constexpr std::string_view kLoraGrafter = "LoraGrafter";
 inline constexpr std::string_view kMergeBuilder = "MergeBuilder";
 inline constexpr std::string_view kOptimizer = "OptimizerSynthesizer";
 inline constexpr std::string_view kEpilogueFuser = "GemmEpilogueFuser";
+inline constexpr std::string_view kRopeTable = "RopeTableHoister";
 
 /// Analytic failure in `unit`: "<unit>: <message>".
 [[nodiscard]] inline std::unexpected<std::string> Error(std::string_view unit,

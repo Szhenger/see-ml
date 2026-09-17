@@ -87,7 +87,8 @@ void PrintUsage() {
                "  [--min-lr-factor F] [--quantize-base | --bf16-base]\n"
                "  [--steps N]\n"
                "  [--grad-accum G]\n"
-               "  [--no-fuse-epilogue] [--report out.json]\n"
+               "  [--no-fuse-epilogue] [--no-rope-table] [--no-fuse-clip]\n"
+               "  [--report out.json]\n"
                "  [--kernel-policy table.json] [--target-host KEY]\n"
                "  [--gemm-tiles K,N]\n"
                "  [--no-embed] [--build] [--version]\n");
@@ -335,6 +336,8 @@ int main(int argc, char** argv) {
     return Fail("--quantize-base and --bf16-base are mutually exclusive "
                 "(one storage precision per weight)");
   config.fuse_epilogues = !args.Take("--no-fuse-epilogue");
+  config.rope_table = !args.Take("--no-rope-table");
+  config.fuse_clip = !args.Take("--no-fuse-clip");
 
   // --- Kernel policy: explicit tiles, the tuner's table, or the defaults.
   KernelPolicyRequest policy_request;
@@ -391,7 +394,7 @@ int main(int argc, char** argv) {
 
   SmfModel source_model = std::move((*models)[0]);
   SmfModel teacher_model;
-  const SmfModel* teacher = nullptr;
+  SmfModel* teacher = nullptr;
   if (teacher_path) {
     teacher_model = std::move((*models)[1]);
     teacher = &teacher_model;
@@ -399,7 +402,10 @@ int main(int argc, char** argv) {
 
   // --- Compile ----------------------------------------------------------------
   UpdateCompiler compiler(config);
-  auto compiled = compiler.Compile(source_model, teacher);
+  // The consuming compile: nothing below reads a weight again, so each
+  // payload is released as plan assembly packs it (one resident copy of
+  // the weights while the blob is built, not two).
+  auto compiled = compiler.Compile(std::move(source_model), teacher);
   if (!compiled) return Fail(compiled.error());
 
   std::fprintf(stderr,

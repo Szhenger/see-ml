@@ -103,7 +103,7 @@ enum Pipe : int {
   kPAddEW, kPMulEW, kPAddBias, kPReluFwd, kPReluBwd, kPGeluFwd, kPGeluBwd,
   kPSiluFwd, kPSiluBwd, kPScale, kPFill, kPCopy, kPAccumulate, kPSgd, kPAdamW,
   kPReduceRows, kPLnFwd, kPLnBwd, kPRmsFwd, kPRmsBwd,
-  kPClipPartials, kPClipFinish, kPClipApply,
+  kPClipPartials, kPClipFinish, kPClipApply, kPSgdClip, kPAdamWClip,
   kPRopeFwd, kPRopeBwd, kPAttnSoftmax, kPSoftmaxRowsBwd,
   kPipeCount
 };
@@ -127,7 +127,8 @@ const char* const kPipeNames[kPipeCount] = {
     "k_scale", "k_fill", "k_copy", "k_accumulate", "k_sgd", "k_adamw",
     "k_reduce_rows",
     "k_layernorm_fwd", "k_layernorm_bwd", "k_rmsnorm_fwd", "k_rmsnorm_bwd",
-    "k_clip_partials", "k_clip_finish", "k_clip_apply", "k_rope_fwd",
+    "k_clip_partials", "k_clip_finish", "k_clip_apply", "k_sgd_clip",
+    "k_adamw_clip", "k_rope_fwd",
     "k_rope_bwd", "k_attn_softmax", "k_softmax_rows_bwd"};
 
 constexpr uint32_t kElementwiseGroup = 256;
@@ -368,6 +369,11 @@ bool IsGpuOpcode(up::OpCode op) {
     case up::OpCode::kKLDistillFwd:
     case up::OpCode::kKLDistillBwd:
     case up::OpCode::kEmbedFwd:
+    // The RoPE angle table (v12) is a CPU-side convenience the GPU rotation
+    // kernels do not read — one thread per (b, s, h) unit recomputes its
+    // angles, as before — so the table is built on the CPU, where the
+    // rotations that do read it run.
+    case up::OpCode::kRopeTable:
       return false;
     default:
       return true;
@@ -646,6 +652,29 @@ std::expected<void, std::string> MetalBackend::Encode(
   auto u32 = [](uint64_t v) { return static_cast<uint32_t>(v); };
   auto hi = [](uint64_t v) { return static_cast<uint32_t>(v >> 32); };
   auto lo = [](uint64_t v) { return static_cast<uint32_t>(v & 0xFFFFFFFFu); };
+  // The clip factor min(1, max/||g||) for the gradient in ref slot
+  // `g_slot` of `args`, left in scratch[256] — kClipNorm's first two
+  // dispatches, shared with the fused-clip steps (v12), whose `word` is
+  // zero when they carry no clip. Runs on a copy: the clip kernels read g
+  // through slot 0 and their own f[0]. The partial sums follow the CPU's
+  // chunk geometry (a pure function of n), so they combine in the order
+  // the reference combines them.
+  auto EncodeClipScale = [&](const KArgs& args, uint64_t word,
+                             int g_slot = 1) {
+    if (word == 0) return false;
+    KArgs c;
+    c.off[0] = args.off[g_slot];
+    c.space = (args.space >> g_slot) & 1u;
+    c.n = args.n;
+    c.f[0] = BitsToF32(word);
+    c.k = static_cast<uint32_t>(
+        up::ParallelChunkGrain(c.n, kernels::kGrainCheap));
+    c.m = static_cast<uint32_t>(
+        up::ParallelChunkCount(c.n, kernels::kGrainCheap));
+    Dispatch(kPClipPartials, c, c.m, kElementwiseGroup, true);
+    Dispatch(kPClipFinish, c, 1, 1, true);
+    return true;
+  };
   const auto op = static_cast<up::OpCode>(ins.opcode);
   switch (op) {
     case up::OpCode::kGemmNN:
@@ -754,22 +783,25 @@ std::expected<void, std::string> MetalBackend::Encode(
       a.n = u32(ins.out[0]);
       Dispatch(kPAccumulate, a, a.n, kElementwiseGroup);
       return {};
-    case up::OpCode::kSgdStep:
+    case up::OpCode::kSgdStep: {
       ref(0, ins.in[0]); ref(1, ins.in[1]);
       a.n = u32(ins.out[0]);
+      const bool clip = EncodeClipScale(a, ins.out[1]);
       a.f[0] = params.lr; a.f[1] = params.weight_decay;
-      Dispatch(kPSgd, a, a.n, kElementwiseGroup);
+      Dispatch(clip ? kPSgdClip : kPSgd, a, a.n, kElementwiseGroup, clip);
       return {};
+    }
     case up::OpCode::kAdamWStep: {
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]); ref(3, ins.in[3]);
       a.n = u32(ins.out[0]);
+      const bool clip = EncodeClipScale(a, ins.out[1]);
       // The per-step factors exactly as the CPU kernel hoists them.
       const float step = static_cast<float>(params.step);
       a.f[0] = params.lr; a.f[1] = params.beta1; a.f[2] = params.beta2;
       a.f[3] = params.eps; a.f[4] = params.weight_decay;
       a.f[5] = 1.0f / (1.0f - std::pow(params.beta1, step));
       a.f[6] = 1.0f / (1.0f - std::pow(params.beta2, step));
-      Dispatch(kPAdamW, a, a.n, kElementwiseGroup);
+      Dispatch(clip ? kPAdamWClip : kPAdamW, a, a.n, kElementwiseGroup, clip);
       return {};
     }
     case up::OpCode::kReduceRows:
@@ -803,15 +835,7 @@ std::expected<void, std::string> MetalBackend::Encode(
     case up::OpCode::kClipNorm: {
       ref(0, ins.in[0]);
       a.n = u32(ins.out[0]);
-      a.f[0] = BitsToF32(ins.in[1]);
-      // The CPU's chunk geometry (pure function of n), so the partial
-      // sums combine in the same order the reference combines them.
-      const size_t grain = up::ParallelChunkGrain(a.n, kernels::kGrainCheap);
-      const size_t chunks = up::ParallelChunkCount(a.n, kernels::kGrainCheap);
-      a.k = u32(grain);
-      a.m = u32(chunks);
-      Dispatch(kPClipPartials, a, a.m, kElementwiseGroup, true);
-      Dispatch(kPClipFinish, a, 1, 1, true);
+      EncodeClipScale(a, ins.in[1], /*slot=*/0);
       Dispatch(kPClipApply, a, a.n, kElementwiseGroup, true);
       return {};
     }

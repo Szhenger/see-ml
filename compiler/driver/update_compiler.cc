@@ -28,11 +28,12 @@ namespace generating = seeml::diag::generating;
 // UpdateCompiler::Compile
 // =============================================================================
 
-std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
-    const SmfModel& source, const SmfModel* teacher) {
-  auto compiled = CompileImpl(source, teacher);
-  // The diagnostics contract: every error that crosses the driver boundary
-  // must name a registered unit, or the failing process cannot be delimited.
+namespace {
+
+// The diagnostics contract: every error that crosses the driver boundary
+// must name a registered unit, or the failing process cannot be delimited.
+std::expected<CompiledUpdate, std::string> Attributed(
+    std::expected<CompiledUpdate, std::string> compiled) {
   if (!compiled && !WellFormedDiagnostic(compiled.error()))
     return generating::Error(
         generating::kDriver,
@@ -40,8 +41,22 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
   return compiled;
 }
 
-std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
+}  // namespace
+
+std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
     const SmfModel& source, const SmfModel* teacher) {
+  return Attributed(CompileImpl(source, teacher, /*consume=*/false));
+}
+
+std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
+    SmfModel&& source, SmfModel* teacher) {
+  // `source` binds to a caller's non-const model (as `teacher` points to
+  // one), which is what makes releasing their payloads well-defined.
+  return Attributed(CompileImpl(source, teacher, /*consume=*/true));
+}
+
+std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
+    const SmfModel& source, const SmfModel* teacher, bool consume) {
   const bool wants_teacher = config_.loss == LossKind::kKLDistill ||
                              config_.loss == LossKind::kXEntPlusKL;
   if (wants_teacher && !teacher)
@@ -97,6 +112,10 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   if (wants_teacher)
     footprint += EstimateFrozenForwardFootprint(*teacher, batch);
   if (config_.quantize_base) footprint.weight_bytes /= 4;
+  // The merged deltas are full-size f32 whatever the base is stored as
+  // (finding #8): under --quantize-base, 4x the weights they patch.
+  footprint.delta_bytes =
+      EstimateLoraDeltaBytes(source, config_.lora.target_filters);
   if (auto fits = CheckTrainableLocally(footprint, config_.memory_budget_bytes);
       !fits)
     return std::unexpected(fits.error());
@@ -236,6 +255,21 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
              adapters = std::move(*grafted);
              return {};
            });
+    // The RoPE angle table (E3, plan v12): before the snapshot, so the
+    // eval program builds and reads it too, and before autodiff, which
+    // hands the same table to every backward rotation.
+    if (config_.rope_table)
+      pm.Add("rope-table",
+             [](sir::Block& b) -> std::expected<void, std::string> {
+               auto tables = RopeTableHoister().Run(b);
+               if (!tables) return std::unexpected(tables.error());
+               if (*tables != 0)
+                 seeml::diag::Note(generating::kDriver,
+                                   "hoisted the RoPE angles into " +
+                                       std::to_string(*tables) +
+                                       " table(s)");
+               return {};
+             });
     if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
   }
 
@@ -278,7 +312,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
       pm.Add("optimizer", [&](sir::Block& b) {
         return OptimizerSynthesizer(config_.optimizer.kind,
                                     config_.optimizer.clip_norm, accum,
-                                    config_.emit_optimizer)
+                                    config_.emit_optimizer, config_.fuse_clip)
             .Run(b, param_grads);
       });
     if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
@@ -427,6 +461,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   if (accum > 1 && config_.emit_optimizer) {
     auto is_step = [](const UpdateInstruction& ins) {
       const auto op = static_cast<OpCode>(ins.opcode);
+      // (kClipNorm precedes the step only with fuse_clip off.)
       return op == OpCode::kClipNorm || op == OpCode::kSgdStep ||
              op == OpCode::kAdamWStep;
     };
@@ -577,8 +612,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   // zero-copy instead of duplicating them.
   off = (off + kSeeuRodataAlignment - 1) & ~(kSeeuRodataAlignment - 1);
   header.rodata_offset = off;
-  header.rodata_size = binding->rodata.size();
-  off = AlignUp(off + binding->rodata.size());
+  header.rodata_size = binding->rodata_size;
+  off = AlignUp(off + binding->rodata_size);
   header.persist_init_offset = off;
   header.persist_init_size = persist_init.size();
   off = AlignUp(off + persist_init.size());
@@ -589,28 +624,61 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   // rounds its length up to whole pages, and those pages must be the plan's.
   off = (off + kSeeuRodataAlignment - 1) & ~(kSeeuRodataAlignment - 1);
 
+  // Assemble by APPENDING into one exact reservation (E2, #81). Sizing the
+  // blob first and copying sections into it zero-filled every byte of the
+  // plan — the frozen weights, overwhelmingly — immediately before
+  // overwriting them, on top of a rodata vector that was itself a full
+  // extra copy. Here each frozen weight is written exactly once, from the
+  // loaded model straight to its place in the plan; only alignment gaps
+  // (and the int8 / bf16 packs, which are computed in place) are zeroed.
   CompiledUpdate result;
-  result.plan.resize(off, 0);
-  auto put = [&](uint64_t at, const void* src, size_t n) {
-    std::memcpy(result.plan.data() + at, src, n);
+  result.plan.reserve(off);
+  auto pad_to = [&](uint64_t at) { result.plan.resize(at, 0); };
+  auto append = [&](uint64_t at, const void* src, size_t n) {
+    pad_to(at);
+    const auto* p = static_cast<const uint8_t*>(src);
+    result.plan.insert(result.plan.end(), p, p + n);
   };
-  put(0, &header, sizeof(header));
-  put(header.train_instr_offset, train_instrs->data(),
-      train_instrs->size() * sizeof(UpdateInstruction));
-  put(header.merge_instr_offset, merge_instrs->data(),
-      merge_instrs->size() * sizeof(UpdateInstruction));
-  put(header.eval_instr_offset, eval_instrs->data(),
-      eval_instrs->size() * sizeof(UpdateInstruction));
+  append(0, &header, sizeof(header));
+  append(header.train_instr_offset, train_instrs->data(),
+         train_instrs->size() * sizeof(UpdateInstruction));
+  append(header.merge_instr_offset, merge_instrs->data(),
+         merge_instrs->size() * sizeof(UpdateInstruction));
+  append(header.eval_instr_offset, eval_instrs->data(),
+         eval_instrs->size() * sizeof(UpdateInstruction));
   if (!step_instrs.empty())
-    put(header.step_instr_offset, step_instrs.data(),
-        step_instrs.size() * sizeof(UpdateInstruction));
-  if (!binding->rodata.empty())
-    put(header.rodata_offset, binding->rodata.data(), binding->rodata.size());
+    append(header.step_instr_offset, step_instrs.data(),
+           step_instrs.size() * sizeof(UpdateInstruction));
+
+  // A consuming compile releases each source payload after its last pack:
+  // resident weights stay ~one copy (the model shrinking as the plan
+  // grows) instead of two. Tied weights pack once per SIR value, so the
+  // release waits for the last of them.
+  std::unordered_map<const SmfTensor*, size_t> packs_left;
+  if (consume)
+    for (const RodataPack& pack : binding->rodata_packs)
+      ++packs_left[pack.source];
+  for (const RodataPack& pack : binding->rodata_packs) {
+    const uint64_t at = header.rodata_offset + pack.offset;
+    if (pack.storage == RodataPack::Storage::kF32) {
+      append(at, pack.source->data.data(), pack.bytes);
+    } else {
+      pad_to(at + pack.bytes);  // the (smaller) packed form, in place
+      PackRodata(pack, result.plan.data() + at);
+    }
+    if (consume && --packs_left[pack.source] == 0) {
+      // The rvalue overload owns these models: they are not const objects.
+      auto& payload = const_cast<SmfTensor*>(pack.source)->data;
+      SmfBytes().swap(payload);
+    }
+  }
   if (!persist_init.empty())
-    put(header.persist_init_offset, persist_init.data(), persist_init.size());
+    append(header.persist_init_offset, persist_init.data(),
+           persist_init.size());
   if (!emit_table.empty())
-    put(header.emit_table_offset, emit_table.data(),
-        emit_table.size() * sizeof(EmitEntry));
+    append(header.emit_table_offset, emit_table.data(),
+           emit_table.size() * sizeof(EmitEntry));
+  pad_to(off);
 
   // Integrity seal: hash the whole blob with the hash field zeroed (it is,
   // so far), then patch the result in. Initialize() re-derives and compares

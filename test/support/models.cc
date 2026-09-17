@@ -22,6 +22,12 @@ std::vector<uint8_t> AsBytes(const std::vector<float>& v) {
   return b;
 }
 
+update::SmfBytes AsPayload(const std::vector<float>& v) {
+  update::SmfBytes b(v.size() * sizeof(float));
+  std::memcpy(b.data(), v.data(), b.size());
+  return b;
+}
+
 std::vector<float> RandnVector(size_t n, uint64_t seed, float stddev) {
   std::mt19937_64 rng(seed);
   std::normal_distribution<float> dist(0.0f, stddev);
@@ -47,19 +53,19 @@ SmfModel MakeMlp(int64_t in_dim, int64_t hidden, int64_t out_dim,
   m.tensors.push_back({.name = "w1",
                        .dims = {in_dim, hidden},
                        .is_const = true,
-                       .data = AsBytes(randv(in_dim * hidden))});
+                       .data = AsPayload(randv(in_dim * hidden))});
   m.tensors.push_back({.name = "b1",
                        .dims = {hidden},
                        .is_const = true,
-                       .data = AsBytes(randv(hidden))});
+                       .data = AsPayload(randv(hidden))});
   m.tensors.push_back({.name = "w2",
                        .dims = {hidden, out_dim},
                        .is_const = true,
-                       .data = AsBytes(randv(hidden * out_dim))});
+                       .data = AsPayload(randv(hidden * out_dim))});
   m.tensors.push_back({.name = "b2",
                        .dims = {out_dim},
                        .is_const = true,
-                       .data = AsBytes(randv(out_dim))});
+                       .data = AsPayload(randv(out_dim))});
   for (auto& t : m.tensors)
     if (t.is_const) t.byte_size = t.data.size();
 
@@ -80,7 +86,7 @@ SmfModel MakeTiedMlp(int64_t dim, uint64_t seed) {
       {.name = "w",
        .dims = {dim, dim},
        .is_const = true,
-       .data = AsBytes(RandnVector(static_cast<size_t>(dim * dim), seed))});
+       .data = AsPayload(RandnVector(static_cast<size_t>(dim * dim), seed))});
   m.tensors.back().byte_size = m.tensors.back().data.size();
 
   m.ops.push_back({SmfOpKind::kMatMul, "mm1", {"x", "w"}, "z"});
@@ -108,7 +114,7 @@ SmfModel MakeGatedNet(int64_t in_dim, int64_t hidden, int64_t out_dim,
     m.tensors.push_back({.name = name,
                          .dims = std::move(dims),
                          .is_const = true,
-                         .data = AsBytes(data)});
+                         .data = AsPayload(data)});
     m.tensors.back().byte_size = m.tensors.back().data.size();
   };
   add_const("w1", {in_dim, hidden}, randv(in_dim * hidden));
@@ -157,11 +163,11 @@ SmfModel MakeMlpStack(int64_t in_dim, int64_t hidden, int64_t layers,
     m.tensors.push_back({.name = w,
                          .dims = {prev_dim, width},
                          .is_const = true,
-                         .data = AsBytes(randv(prev_dim * width))});
+                         .data = AsPayload(randv(prev_dim * width))});
     m.tensors.push_back({.name = b,
                          .dims = {width},
                          .is_const = true,
-                         .data = AsBytes(randv(width))});
+                         .data = AsPayload(randv(width))});
     m.ops.push_back({SmfOpKind::kMatMul, "mm" + std::to_string(idx),
                      {prev, w}, "z" + std::to_string(idx)});
     m.ops.push_back({SmfOpKind::kAddBias, "ab" + std::to_string(idx),
@@ -201,7 +207,7 @@ SmfModel MakeTinyDecoder(int64_t dim, int64_t heads, int64_t seq, int64_t ffn,
     m.tensors.push_back({.name = name,
                          .dims = std::move(dims),
                          .is_const = true,
-                         .data = AsBytes(data)});
+                         .data = AsPayload(data)});
     m.tensors.back().byte_size = m.tensors.back().data.size();
   };
   std::vector<float> g1(dim, 1.0f), g2(dim, 1.0f), gf(dim, 1.0f);
@@ -262,7 +268,7 @@ SmfModel MakeDecoderStack(int64_t dim, int64_t heads, int64_t seq,
     m.tensors.push_back({.name = name,
                          .dims = std::move(dims),
                          .is_const = true,
-                         .data = AsBytes(data)});
+                         .data = AsPayload(data)});
     m.tensors.back().byte_size = m.tensors.back().data.size();
   };
   auto gain = [&](int64_t n) {
@@ -332,7 +338,7 @@ SmfModel Tokenize(SmfModel m, int64_t vocab, int64_t dim, uint64_t seed) {
   m.tensors.push_back({.name = "emb",
                        .dims = {vocab, dim},
                        .is_const = true,
-                       .data = AsBytes(table)});
+                       .data = AsPayload(table)});
   m.tensors.back().byte_size = m.tensors.back().data.size();
   // The embedding replaces x at the front of the op list; every op that
   // read "x" as features now reads the gathered rows "e".

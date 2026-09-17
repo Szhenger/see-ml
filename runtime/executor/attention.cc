@@ -36,55 +36,89 @@ inline Unit UnitOf(size_t u, size_t H, size_t S) {
 
 }  // namespace
 
-void RopeFwd(const float* x, float* y, size_t B, size_t S, size_t H, size_t d,
-             float base) {
+namespace {
+
+// The rotation shared by RopeFwd (sign +1) and RopeBwd (sign -1, the
+// transpose). angle(s, c) = s * base^(-c/d) over the interleaved pair
+// (c, c+1). The per-pair frequency base^(-c/d) is a geometric sequence in
+// c, so one pow per call plus a multiplicative recurrence replaces d/2 pow
+// calls per unit. The recurrence is a pure function of (c, d) — never of
+// chunk or thread — so thread-count invariance holds by construction, and
+// both directions evaluate the identical expression, keeping the adjoint
+// exact.
+//
+// With a table (plan v12) the cos/sin come from RopeTable's [S, d/2, 2]
+// image instead of being recomputed by every (b, h) unit. RopeTable runs
+// this same recurrence through the same libm calls, so the two paths feed
+// the rotation identical floats: the table removes ~(1 - 1/(B*H)) of the
+// transcendental work and no bits.
+template <bool kBackward>
+void Rotate(const float* x, float* y, size_t B, size_t S, size_t H, size_t d,
+            float base, const float* table) {
   const size_t D = H * d;
-  // angle(s, c) = s * base^(-c/d) over the interleaved pair (c, c+1). The
-  // per-pair frequency base^(-c/d) is a geometric sequence in c, so one pow
-  // per call plus a multiplicative recurrence replaces d/2 pow calls per
-  // unit. The recurrence is a pure function of (c, d) — never of chunk or
-  // thread — so thread-count invariance holds by construction, and RopeBwd
-  // evaluates the identical expression, keeping the adjoint exact.
+  const size_t half = d / 2;
   const float step = std::pow(base, -2.0f / static_cast<float>(d));
-  up::ParallelFor(B * S * H, RowGrain(d, kGrainMath),
+  up::ParallelFor(B * S * H, RowGrain(d, table ? kGrainCheap : kGrainMath),
                   [&](size_t u0, size_t u1, size_t) {
     for (size_t u = u0; u < u1; ++u) {
       const size_t s = (u / H) % S;
       const float* xr = x + (u / H) * D + (u % H) * d;
       float* yr = y + (u / H) * D + (u % H) * d;
+      const float* row = table ? table + s * half * 2 : nullptr;
       float freq = 1.0f;
       for (size_t c = 0; c + 1 < d; c += 2) {
-        const float theta = static_cast<float>(s) * freq;
-        const float cs = std::cos(theta), sn = std::sin(theta);
+        float cs, sn;
+        if (row) {
+          cs = row[c];  // pair c/2 lives at [c, c + 1]
+          sn = row[c + 1];
+        } else {
+          const float theta = static_cast<float>(s) * freq;
+          cs = std::cos(theta);
+          sn = std::sin(theta);
+          freq *= step;
+        }
         const float a = xr[c], b2 = xr[c + 1];
-        yr[c] = a * cs - b2 * sn;
-        yr[c + 1] = a * sn + b2 * cs;
-        freq *= step;
+        if constexpr (kBackward) {
+          yr[c] = a * cs + b2 * sn;
+          yr[c + 1] = -a * sn + b2 * cs;
+        } else {
+          yr[c] = a * cs - b2 * sn;
+          yr[c + 1] = a * sn + b2 * cs;
+        }
       }
     }
   });
 }
 
+}  // namespace
+
+void RopeFwd(const float* x, float* y, size_t B, size_t S, size_t H, size_t d,
+             float base, const float* table) {
+  Rotate<false>(x, y, B, S, H, d, base, table);
+}
+
 void RopeBwd(const float* dy, float* dx, size_t B, size_t S, size_t H,
-             size_t d, float base) {
+             size_t d, float base, const float* table) {
   // The forward is an orthogonal per-pair rotation; its VJP is the rotation
-  // by the negated angle (the transpose). theta is computed with exactly
-  // RopeFwd's expression (same recurrence, same floats).
-  const size_t D = H * d;
+  // by the negated angle (the transpose).
+  Rotate<true>(dy, dx, B, S, H, d, base, table);
+}
+
+void RopeTable(float* table, size_t S, size_t d, float base) {
+  // One row per position, each running Rotate's recurrence from freq = 1:
+  // rows are independent, so the table parallelizes over s with no effect
+  // on any value.
+  const size_t half = d / 2;
   const float step = std::pow(base, -2.0f / static_cast<float>(d));
-  up::ParallelFor(B * S * H, RowGrain(d, kGrainMath),
-                  [&](size_t u0, size_t u1, size_t) {
-    for (size_t u = u0; u < u1; ++u) {
-      const size_t s = (u / H) % S;
-      const float* gr = dy + (u / H) * D + (u % H) * d;
-      float* dr = dx + (u / H) * D + (u % H) * d;
+  up::ParallelFor(S, RowGrain(half, kGrainMath),
+                  [&](size_t s0, size_t s1, size_t) {
+    for (size_t s = s0; s < s1; ++s) {
+      float* row = table + s * half * 2;
       float freq = 1.0f;
-      for (size_t c = 0; c + 1 < d; c += 2) {
+      for (size_t c = 0; c < half; ++c) {
         const float theta = static_cast<float>(s) * freq;
-        const float cs = std::cos(theta), sn = std::sin(theta);
-        const float a = gr[c], b2 = gr[c + 1];
-        dr[c] = a * cs + b2 * sn;
-        dr[c + 1] = -a * sn + b2 * cs;
+        row[2 * c] = std::cos(theta);
+        row[2 * c + 1] = std::sin(theta);
         freq *= step;
       }
     }

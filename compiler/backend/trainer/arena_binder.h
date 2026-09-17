@@ -47,6 +47,17 @@ struct ParamInit {
   uint64_t seed = 0;
 };
 
+/// One frozen weight's place in the rodata section: where it goes, how many
+/// bytes it takes there, and how its f32 source is stored.
+struct RodataPack {
+  enum class Storage : uint8_t { kF32, kInt8, kBf16 };
+  const SmfTensor* source = nullptr;  // the f32 payload in the loaded model
+  uint64_t offset = 0;                // within the rodata section
+  uint64_t bytes = 0;                 // at that offset
+  Storage storage = Storage::kF32;
+  float scale = 0.0f;                 // kInt8: the per-tensor dequant scale
+};
+
 struct ArenaBinding {
   // value -> ref word (MakeArenaRef / MakeRodataRef encoded).
   std::unordered_map<const seeml::sir::Value*, uint64_t> refs;
@@ -54,8 +65,22 @@ struct ArenaBinding {
   uint64_t io_end = 0;      // end of [persistent | io] prefix
   uint64_t arena_size = 0;  // total (after transient scan, both programs)
   std::vector<ParamInit> params;  // in allocation order
-  std::vector<uint8_t> rodata;    // packed frozen weights
+  // The rodata section as a LAYOUT, in offset order — its bytes do not
+  // exist until PackRodata writes them straight into the plan blob (E2,
+  // #81). Materializing the section here first kept a third copy of the
+  // weights alive through assembly (model, this, the plan) and grew it by
+  // repeated zero-filling resize.
+  std::vector<RodataPack> rodata_packs;
+  uint64_t rodata_size = 0;
 };
+
+/// Writes one pack's bytes to `dst` (`pack.bytes` long; gaps between packs
+/// are the caller's to zero). Byte-for-byte what BindArena used to
+/// materialize: the raw f32 payload, per-tensor symmetric int8
+/// (round-half-away of value/scale, clamped to +-127), or bfloat16
+/// (round-to-nearest-even). Chunked over ParallelFor with a fixed grain, so
+/// the bytes never depend on the worker count.
+void PackRodata(const RodataPack& pack, uint8_t* dst);
 
 /// Liveness-driven linear-scan allocation for transient values starting at
 /// `base`. Values in `already_bound` are skipped; values in `pinned` are
@@ -68,8 +93,8 @@ uint64_t LinearScanTransients(
     const std::unordered_set<const seeml::sir::Value*>& pinned,
     std::unordered_map<const seeml::sir::Value*, uint64_t>& refs_out);
 
-/// Binds the training block: persistent params, IO slots, rodata packing
-/// (quantizing weights in `quant_scales`), then the transient scan.
+/// Binds the training block: persistent params, IO slots, the rodata layout
+/// (int8 for weights in `quant_scales`), then the transient scan.
 /// `bf16_weights`: frozen weights packed as bfloat16 rodata (half of f32,
 /// round-to-nearest-even; roadmap 2c), disjoint from `quant_scales`.
 [[nodiscard]] std::expected<ArenaBinding, std::string> BindArena(

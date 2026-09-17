@@ -29,6 +29,10 @@ float BitsToF32(uint64_t bits) {
 // The KL temperature word packs (loss_scale bits << 32) | T bits. A zero
 // high word is a pre-v8 plan: no scale was ever written, and 1.0 selects
 // the pre-change behavior (schema.h, the additive-field rule).
+constexpr const char* kNonFiniteNorm =
+    "gradient norm is not finite — the step was refused with the parameters "
+    "and optimizer state untouched";
+
 float KlTemperatureOf(uint64_t word) { return BitsToF32(word & 0xFFFFFFFFu); }
 float KlLossScaleOf(uint64_t word) {
   const uint64_t hi = word >> 32;
@@ -209,15 +213,21 @@ std::expected<void, std::string> CpuBackend::Execute(
                       KlTemperatureOf(ins.out[1]),
                       KlLossScaleOf(ins.out[1]));
       break;
+    // v12: out[1] is the fused clip threshold (0 = none). The one kernel
+    // that can refuse: a non-finite gradient norm aborts the step with
+    // the parameters and the moments untouched.
     case up::OpCode::kSgdStep:
-      k::SgdStep(WritePtr(ins.in[0]), ReadPtr(ins.in[1]), ins.out[0],
-                 params.lr, params.weight_decay);
+      if (!k::SgdStep(WritePtr(ins.in[0]), ReadPtr(ins.in[1]), ins.out[0],
+                      params.lr, params.weight_decay, BitsToF32(ins.out[1])))
+        return std::unexpected(kNonFiniteNorm);
       break;
     case up::OpCode::kAdamWStep:
-      k::AdamWStep(WritePtr(ins.in[0]), ReadPtr(ins.in[1]),
-                   WritePtr(ins.in[2]), WritePtr(ins.in[3]), ins.out[0],
-                   params.lr, params.beta1, params.beta2, params.eps,
-                   params.weight_decay, params.step);
+      if (!k::AdamWStep(WritePtr(ins.in[0]), ReadPtr(ins.in[1]),
+                        WritePtr(ins.in[2]), WritePtr(ins.in[3]), ins.out[0],
+                        params.lr, params.beta1, params.beta2, params.eps,
+                        params.weight_decay, params.step,
+                        BitsToF32(ins.out[1])))
+        return std::unexpected(kNonFiniteNorm);
       break;
     case up::OpCode::kFill:
       k::Fill(WritePtr(ins.in[0]), BitsToF32(ins.in[1]), ins.out[0]);
@@ -251,15 +261,22 @@ std::expected<void, std::string> CpuBackend::Execute(
                     WritePtr(ins.in[3]), ins.out[1] >> 32,
                     ins.out[1] & 0xFFFFFFFFu);
       break;
+    // v12: in[2] names a kRopeTable result, or is kNullRef.
     case up::OpCode::kRopeFwd:
       k::RopeFwd(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), ins.out[0] >> 32,
                  ins.out[0] & 0xFFFFFFFFu, ins.out[1] >> 32,
-                 ins.out[1] & 0xFFFFFFFFu, BitsToF32(ins.out[2]));
+                 ins.out[1] & 0xFFFFFFFFu, BitsToF32(ins.out[2]),
+                 ins.in[2] == up::kNullRef ? nullptr : ReadPtr(ins.in[2]));
       break;
     case up::OpCode::kRopeBwd:
       k::RopeBwd(ReadPtr(ins.in[0]), WritePtr(ins.in[1]), ins.out[0] >> 32,
                  ins.out[0] & 0xFFFFFFFFu, ins.out[1] >> 32,
-                 ins.out[1] & 0xFFFFFFFFu, BitsToF32(ins.out[2]));
+                 ins.out[1] & 0xFFFFFFFFu, BitsToF32(ins.out[2]),
+                 ins.in[2] == up::kNullRef ? nullptr : ReadPtr(ins.in[2]));
+      break;
+    case up::OpCode::kRopeTable:
+      k::RopeTable(WritePtr(ins.in[0]), ins.out[0] >> 32,
+                   ins.out[0] & 0xFFFFFFFFu, BitsToF32(ins.out[1]));
       break;
     case up::OpCode::kAttnFwd:
       k::AttnFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), ReadPtr(ins.in[2]),

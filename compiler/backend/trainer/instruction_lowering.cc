@@ -236,6 +236,8 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
         set(m == "sc_high.rope" ? OpCode::kRopeFwd : OpCode::kRopeBwd);
         ins.in[0] = ref(op->operand(0));
         ins.in[1] = ref(op->result(0));
+        // v12: the hoisted angle table, when RopeTableHoister ran.
+        if (op->numOperands() > 1) ins.in[2] = ref(op->operand(1));
         ins.out[0] = bs;
         ins.out[1] = hd;
         // The parser always sets "base" (SMF v5 attr1, or the format
@@ -338,11 +340,21 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.out[1] = F32BitsPair(
           op->getAttrAs<float>("loss_scale").value_or(1.0f),
           op->getAttrAs<float>("temperature").value_or(1.0f));
+    } else if (m == "sc_low.rope_table") {
+      set(OpCode::kRopeTable);
+      ins.in[0] = ref(op->result(0));
+      ins.out[0] = pack32(op->getAttrAs<int64_t>("seq").value_or(0),
+                          op->getAttrAs<int64_t>("width").value_or(0));
+      ins.out[1] = F32Bits(
+          op->getAttrAs<float>("base").value_or(kSmfDefaultRopeBase));
     } else if (m == "sc_low.sgd_step") {
       set(OpCode::kSgdStep);
       ins.in[0] = ref(op->operand(0));
       ins.in[1] = ref(op->operand(1));
       ins.out[0] = vol(op->operand(0));
+      // v12: the fused per-tensor clip threshold (0 = none).
+      if (auto clip = op->getAttrAs<float>("clip_norm"))
+        ins.out[1] = F32Bits(*clip);
     } else if (m == "sc_low.adamw_step") {
       set(OpCode::kAdamWStep);
       ins.in[0] = ref(op->operand(0));
@@ -350,6 +362,8 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.in[2] = ref(op->operand(2));
       ins.in[3] = ref(op->operand(3));
       ins.out[0] = vol(op->operand(0));
+      if (auto clip = op->getAttrAs<float>("clip_norm"))
+        ins.out[1] = F32Bits(*clip);
     } else if (m == "sc_low.fill") {
       set(OpCode::kFill);
       ins.in[0] = ref(op->result(0));

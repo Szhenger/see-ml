@@ -578,14 +578,28 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
         const uint64_t real = real_samples * rows_per_sample;
         const float* probs = ReadPtr(eval_probs_ref_);
         const auto* labels = reinterpret_cast<const int32_t*>(label_slot);
-        for (uint64_t r = 0; r < real; ++r) {
-          const float* row = probs + r * eval_softmax_cols_;
-          uint64_t argmax = 0;
-          for (uint64_t c = 1; c < eval_softmax_cols_; ++c)
-            if (row[c] > row[argmax]) argmax = c;
-          if (labels[r] >= 0 && static_cast<uint64_t>(labels[r]) == argmax)
-            ++correct;
-        }
+        // The argmax runs over the standard chunk geometry (E3, #82): it
+        // was a serial scan of rows x classes — at a 49k vocabulary the
+        // dominant eval cost — behind a GEMM that had used every core.
+        // Per-chunk integer tallies summed afterwards: exact at any width.
+        const uint64_t cols = eval_softmax_cols_;
+        uint64_t tallies[up::kMaxParallelChunks] = {};
+        up::ParallelFor(
+            real, kernels::RowGrain(cols, kernels::kGrainCheap),
+            [&](size_t r0, size_t r1, size_t chunk) {
+              uint64_t hits = 0;
+              for (size_t r = r0; r < r1; ++r) {
+                const float* row = probs + r * cols;
+                uint64_t argmax = 0;
+                for (uint64_t c = 1; c < cols; ++c)
+                  if (row[c] > row[argmax]) argmax = c;
+                if (labels[r] >= 0 &&
+                    static_cast<uint64_t>(labels[r]) == argmax)
+                  ++hits;
+              }
+              tallies[chunk] = hits;
+            });
+        for (const uint64_t hits : tallies) correct += hits;
         counted += real;
       }
     }

@@ -109,4 +109,56 @@ TEST(ResourceAnalyzer, FrozenForwardEstimateChargesPeakNotSum) {
   EXPECT_TRUE(frozen.activation_bytes < train.activation_bytes);
 }
 
+// --- The merged-delta term of the step-0 gate (E2, #81 — finding #8) ---------
+
+TEST(ResourceAnalyzer, DeltaSegmentCountsExactlyWhatLoraWillAdapt) {
+  // MakeMlp(4, 8, 2): w1[4x8] and w2[8x2] are MatMul weights; the biases
+  // are consumed by AddBias and can never be adapted.
+  SmfModel model = MakeMlp(4, 8, 2, /*seed=*/1);
+  EXPECT_EQ(EstimateLoraDeltaBytes(model, {}),
+            (4 * 8 + 8 * 2) * sizeof(float));
+  const std::vector<std::string> only_w2 = {"w2"};
+  EXPECT_EQ(EstimateLoraDeltaBytes(model, only_w2), 8 * 2 * sizeof(float));
+  const std::vector<std::string> nothing = {"no-such-tensor"};
+  EXPECT_EQ(EstimateLoraDeltaBytes(model, nothing), 0u);
+
+  // The grafter's rule: a weight read any other way — here w2 doubling as
+  // a MatMul's LEFT operand — is not adapted, so it must not be charged.
+  SmfModel tied = model;
+  tied.ops.push_back({.kind = SmfOpKind::kMatMul,
+                      .name = "odd",
+                      .inputs = {"w2", "w2"},
+                      .output = "odd_out"});
+  EXPECT_EQ(EstimateLoraDeltaBytes(tied, {}), 4 * 8 * sizeof(float));
+}
+
+TEST(ResourceAnalyzer, TheEarlyGateSeesTheDeltasAQuantizedBaseHides) {
+  // Under --quantize-base the weights count at 1/4, but the merged deltas
+  // are full-size f32 — 4x the weights they patch. A budget between the
+  // two estimates used to pass step 0 and fail only at the final gate,
+  // after all the work; now it is refused up front, and names the term.
+  SmfModel model = MakeMlp(64, 256, 32, /*seed=*/2);
+  UpdateConfig config;
+  config.batch = kBatch;
+  config.quantize_base = true;
+  TrainingFootprint fp = EstimateTrainingFootprint(model, kBatch);
+  fp.weight_bytes /= 4;
+  const uint64_t without_deltas = fp.total_bytes();
+  fp.delta_bytes = EstimateLoraDeltaBytes(model, {});
+  ASSERT_GT(fp.delta_bytes, fp.weight_bytes);
+  EXPECT_EQ(fp.total_bytes(), without_deltas + fp.delta_bytes);
+
+  config.memory_budget_bytes = without_deltas + fp.delta_bytes / 2;
+  auto refused = UpdateCompiler(config).Compile(model);
+  EXPECT_ERROR_CONTAINS(refused, "too big to train locally");
+  EXPECT_ERROR_CONTAINS(refused, "merged LoRA deltas");
+  // A lower bound still: what it admits, the exact final gate may refuse,
+  // but it never refuses what fits.
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate roomy, [&] {
+    config.memory_budget_bytes = 64ull << 20;
+    return UpdateCompiler(config).Compile(model);
+  }());
+  EXPECT_LE(fp.total_bytes(), roomy.arena_size + roomy.plan.size());
+}
+
 }  // namespace

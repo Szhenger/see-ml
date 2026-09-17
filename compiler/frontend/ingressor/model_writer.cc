@@ -117,11 +117,15 @@ std::expected<void, std::string> SaveSmf(const std::string& path,
   Writer w;
   w.buf.reserve(cursor);
   serialize_meta(w);
-  w.buf.resize(cursor, 0);
+  // Append, don't resize-then-overwrite: only the alignment gaps are zero
+  // bytes; zero-filling the whole data section first wrote every payload
+  // byte twice (E2, #81). The reservation above means no append reallocates.
   for (const auto& t : model.tensors) {
     if (!t.is_const) continue;
-    std::memcpy(w.buf.data() + t.data_offset, t.data.data(), t.byte_size);
+    w.buf.resize(static_cast<size_t>(t.data_offset), 0);  // the gap only
+    w.buf.insert(w.buf.end(), t.data.begin(), t.data.end());
   }
+  w.buf.resize(static_cast<size_t>(cursor), 0);
 
   std::ofstream f(path, std::ios::binary | std::ios::trunc);
   if (!f) return tokenizing::FileError("cannot write", path);

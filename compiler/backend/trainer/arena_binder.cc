@@ -101,6 +101,41 @@ uint64_t LinearScanTransients(
   return high_water;
 }
 
+void PackRodata(const RodataPack& pack, uint8_t* dst) {
+  const auto* data = reinterpret_cast<const float*>(pack.source->data.data());
+  const size_t count = pack.source->byte_size / sizeof(float);
+  switch (pack.storage) {
+    case RodataPack::Storage::kF32:
+      std::memcpy(dst, pack.source->data.data(), pack.bytes);
+      return;
+    case RodataPack::Storage::kInt8: {
+      // Divide, don't multiply by a hoisted reciprocal: for a denormal
+      // scale 1/scale is +Inf, which clamps every nonzero element to +-127
+      // and turns zeros into clamp(NaN) — UB on the int8 cast. The
+      // quantizer refuses denormal scales, but the pack must not rely on
+      // that upstream discipline for memory safety.
+      auto* out = reinterpret_cast<int8_t*>(dst);
+      const float scale = pack.scale;
+      ParallelFor(count, kWeightSweepGrain, [&](size_t b, size_t e, size_t) {
+        for (size_t i = b; i < e; ++i) {
+          const float r = std::round(data[i] / scale);
+          out[i] = static_cast<int8_t>(std::clamp(r, -127.0f, 127.0f));
+        }
+      });
+      return;
+    }
+    case RodataPack::Storage::kBf16: {
+      // Round-to-nearest-even of the f32 bits, 2 bytes per element; the
+      // kernels widen exactly. Same chunk geometry as the int8 pack.
+      auto* out = reinterpret_cast<uint16_t*>(dst);
+      ParallelFor(count, kWeightSweepGrain, [&](size_t b, size_t e, size_t) {
+        for (size_t i = b; i < e; ++i) out[i] = Float32ToBf16Bits(data[i]);
+      });
+      return;
+    }
+  }
+}
+
 std::expected<ArenaBinding, std::string> BindArena(
     sir::Block& train_block, const GraphBuild& build,
     const std::unordered_set<const sir::Value*>& pinned,
@@ -134,52 +169,33 @@ std::expected<ArenaBinding, std::string> BindArena(
   }
   binding.io_end = cursor;
 
-  // --- RODATA: pack every frozen weight, dedup-free sequential layout.
-  // Weights selected for quantization pack as per-tensor symmetric int8
-  // (4x smaller); everything else as raw f32.
+  // --- RODATA: lay out every frozen weight, dedup-free and sequential.
+  // Weights selected for quantization take one int8 per element (4x
+  // smaller), bf16 weights two bytes; everything else raw f32. Layout
+  // only — PackRodata writes the bytes, once, into the plan.
+  uint64_t rodata_cursor = 0;
   train_block.walk([&](sir::Operation* op) {
     if (op->mnemonic() != "sc_mem.weight") return;
     const sir::Value* v = op->result(0);
     auto src = build.weight_sources.find(v);
     if (src == build.weight_sources.end()) return;  // caught below
-    const uint64_t offset = AlignUp(binding.rodata.size());
+    RodataPack pack{.source = src->second, .offset = AlignUp(rodata_cursor)};
+    const uint64_t count = src->second->byte_size / sizeof(float);
     if (auto q = quant_scales.find(v); q != quant_scales.end()) {
-      const auto* data =
-          reinterpret_cast<const float*>(src->second->data.data());
-      const size_t count = src->second->byte_size / sizeof(float);
-      binding.rodata.resize(offset + count, 0);
-      auto* dst = reinterpret_cast<int8_t*>(binding.rodata.data() + offset);
-      // Divide, don't multiply by a hoisted reciprocal: for a denormal
-      // scale 1/scale is +Inf, which clamps every nonzero element to ±127
-      // and turns zeros into clamp(NaN) — UB on the int8 cast. The
-      // quantizer refuses denormal scales, but the pack must not rely on
-      // that upstream discipline for memory safety.
-      const float scale = q->second;
-      ParallelFor(count, kWeightSweepGrain, [&](size_t b, size_t e, size_t) {
-        for (size_t i = b; i < e; ++i) {
-          const float r = std::round(data[i] / scale);
-          dst[i] = static_cast<int8_t>(std::clamp(r, -127.0f, 127.0f));
-        }
-      });
+      pack.storage = RodataPack::Storage::kInt8;
+      pack.scale = q->second;
+      pack.bytes = count;
     } else if (bf16_weights.contains(v)) {
-      // bf16 storage (2c): round-to-nearest-even of the f32 bits, 2 bytes
-      // per element; the kernels widen exactly. Same chunk geometry as the
-      // int8 pack, so the bytes are thread-count independent.
-      const auto* data =
-          reinterpret_cast<const float*>(src->second->data.data());
-      const size_t count = src->second->byte_size / sizeof(float);
-      binding.rodata.resize(offset + count * sizeof(uint16_t), 0);
-      auto* dst = reinterpret_cast<uint16_t*>(binding.rodata.data() + offset);
-      ParallelFor(count, kWeightSweepGrain, [&](size_t b, size_t e, size_t) {
-        for (size_t i = b; i < e; ++i) dst[i] = Float32ToBf16Bits(data[i]);
-      });
+      pack.storage = RodataPack::Storage::kBf16;
+      pack.bytes = count * sizeof(uint16_t);
     } else {
-      binding.rodata.resize(offset + src->second->byte_size, 0);
-      std::memcpy(binding.rodata.data() + offset, src->second->data.data(),
-                  src->second->byte_size);
+      pack.bytes = src->second->byte_size;
     }
-    binding.refs[v] = MakeRodataRef(offset);
+    rodata_cursor = pack.offset + pack.bytes;
+    binding.refs[v] = MakeRodataRef(pack.offset);
+    binding.rodata_packs.push_back(pack);
   });
+  binding.rodata_size = rodata_cursor;
 
   bool missing_source = false;
   train_block.walk([&](sir::Operation* op) {

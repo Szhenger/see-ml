@@ -143,6 +143,26 @@ std::expected<void, std::string> ValidateInstructionImpl(
     return diag::validating::Error(
         "accumulate opcode in a pre-v" +
         std::to_string(up::kSeeuGradAccumVersion) + " plan");
+  if (ins.opcode == static_cast<uint16_t>(up::OpCode::kRopeTable) &&
+      plan_version < up::kSeeuKernelBatchVersion)
+    return diag::validating::Error(
+        "rope_table opcode in a pre-v" +
+        std::to_string(up::kSeeuKernelBatchVersion) + " plan");
+  // The fused clip threshold on the optimizer steps (v12, out[1]): absent
+  // below v12 — a nonzero word there is corruption — and from v12 on either
+  // zero or a finite positive f32, since Execute() clips by it blindly.
+  auto clip_word_ok = [&](uint64_t word) -> std::expected<void, std::string> {
+    if (word == 0) return {};
+    if (plan_version < up::kSeeuKernelBatchVersion)
+      return diag::validating::Error(
+          "optimizer step carries a clip threshold in a pre-v" +
+          std::to_string(up::kSeeuKernelBatchVersion) + " plan");
+    const float clip = std::bit_cast<float>(static_cast<uint32_t>(word));
+    if ((word >> 32) != 0 || !std::isfinite(clip) || clip <= 0.0f)
+      return diag::validating::Error(
+          "optimizer step clip threshold must be a finite positive float");
+    return {};
+  };
   if (ins.opcode == static_cast<uint16_t>(up::OpCode::kEmbedFwd) &&
       plan_version < up::kSeeuTokenVersion)
     return diag::validating::Error(
@@ -282,6 +302,7 @@ std::expected<void, std::string> ValidateInstructionImpl(
       if (auto r = kl_scale_ok(d1); !r) return r;
       return disjoint();
     case up::OpCode::kSgdStep:
+      if (auto r = clip_word_ok(d1); !r) return r;
       if (!ref_ok(ins.in[0], d0, true) || !ref_ok(ins.in[1], d0, false))
         return fail();
       return disjoint();
@@ -290,6 +311,7 @@ std::expected<void, std::string> ValidateInstructionImpl(
         return fail();
       return disjoint();
     case up::OpCode::kAdamWStep:
+      if (auto r = clip_word_ok(d1); !r) return r;
       if (!ref_ok(ins.in[0], d0, true) || !ref_ok(ins.in[1], d0, false) ||
           !ref_ok(ins.in[2], d0, true) || !ref_ok(ins.in[3], d0, true))
         return fail();
@@ -329,6 +351,30 @@ std::expected<void, std::string> ValidateInstructionImpl(
         return fail();
       if (!ref_ok(ins.in[0], td, false) || !ref_ok(ins.in[1], td, true))
         return fail();
+      // The optional angle table (v12): [S, d/2, 2] = S*d floats, the
+      // extent kRopeTable writes for this geometry. Below v12 the slot is
+      // kNullRef by construction; anything else there is corruption.
+      if (ins.in[2] != up::kNullRef) {
+        if (plan_version < up::kSeeuKernelBatchVersion)
+          return diag::validating::Error(
+              "rope carries an angle table in a pre-v" +
+              std::to_string(up::kSeeuKernelBatchVersion) + " plan");
+        uint64_t table = 0;
+        if (!MulOk(d0 & 0xFFFFFFFFu, d1 & 0xFFFFFFFFu, &table) ||
+            !ref_ok(ins.in[2], table, false))
+          return fail();
+      }
+      return disjoint();
+    }
+    case up::OpCode::kRopeTable: {
+      // out[0] = S<<32|d, out[1] = base bits; the table is S*d floats.
+      const uint64_t S = d0 >> 32, d = d0 & 0xFFFFFFFFu;
+      const float base = std::bit_cast<float>(static_cast<uint32_t>(d1));
+      uint64_t table = 0;
+      if (S == 0 || d == 0 || d % 2 != 0 || (d1 >> 32) != 0 ||
+          !std::isfinite(base) || base <= 1.0f || !MulOk(S, d, &table))
+        return fail();
+      if (!ref_ok(ins.in[0], table, true)) return fail();
       return disjoint();
     }
     case up::OpCode::kAttnFwd: {

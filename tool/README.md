@@ -84,7 +84,7 @@ two-consecutive-red: a key's first regression warns, its second fails
 fourth Python-plane subsystem (P4): a build-host interpreter for the whole
 plan instruction set, written a second time from the documented mathematics
 rather than ported from the kernels. `diff` replays a plan against
-`seeml-plan-probe --trace` one instruction at a time — each opcode executes
+`seeml-plan-probe --trace` (the probe also times a section, `--time`, and attributes it per opcode and GEMM shape, `--profile`) one instruction at a time — each opcode executes
 on exactly the bytes the C++ runtime had and is judged on its own writes —
 so it catches the kernel bug a bit-exact self-comparison would reproduce
 faithfully, and names the instruction that owns it; it runs against the CPU

@@ -21,6 +21,7 @@ namespace {
 using namespace seeml::update;
 namespace sir = seeml::sir;
 using seeml::testing::AsBytes;
+using seeml::testing::AsPayload;
 using seeml::testing::MakeMlp;
 using seeml::testing::MakeTiedMlp;
 
@@ -132,7 +133,7 @@ TEST(ForwardBuilder, RejectsRank1MatMulOperand) {
   model.tensors.push_back({.name = "w",
                            .dims = {4},
                            .is_const = true,
-                           .data = AsBytes({1, 2, 3, 4})});
+                           .data = AsPayload({1, 2, 3, 4})});
   model.tensors.back().byte_size = model.tensors.back().data.size();
   model.ops.push_back({SmfOpKind::kMatMul, "mm", {"x", "w"}, "y"});
 
@@ -153,7 +154,7 @@ TEST(ForwardBuilder, RejectsInnerDimensionMismatch) {
       {.name = "w",
        .dims = {3, 2},
        .is_const = true,
-       .data = AsBytes({1, 2, 3, 4, 5, 6})});
+       .data = AsPayload({1, 2, 3, 4, 5, 6})});
   model.tensors.back().byte_size = model.tensors.back().data.size();
   model.ops.push_back({SmfOpKind::kMatMul, "mm", {"x", "w"}, "y"});
 
@@ -173,7 +174,7 @@ TEST(ForwardBuilder, RejectsBiasWidthMismatch) {
   model.tensors.push_back({.name = "b",
                            .dims = {3},  // input's last dim is 4
                            .is_const = true,
-                           .data = AsBytes({1, 2, 3})});
+                           .data = AsPayload({1, 2, 3})});
   model.tensors.back().byte_size = model.tensors.back().data.size();
   model.ops.push_back({SmfOpKind::kAddBias, "ab", {"x", "b"}, "y"});
 

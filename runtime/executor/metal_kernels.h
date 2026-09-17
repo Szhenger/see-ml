@@ -544,6 +544,34 @@ kernel void k_adamw(KSIG, uint g [[thread_position_in_grid]]) {
   const float v_hat = vi * inv_bc2;
   pp[g] -= lr * (m_hat / (sqrt(v_hat) + eps) + wd * pp[g]);
 }
+// The fused-clip steps (plan v12): g scaled by the factor k_clip_finish
+// left in scratch[256], never written back; g * s is a
+// product in a statement of its own, as the CPU kernels do.
+kernel void k_sgd_clip(KSIG, device float* scratch [[buffer(3)]],
+                       uint g [[thread_position_in_grid]]) {
+  if (g >= p.n) return;
+  device float* pp = WF(0);
+  const float gi = RF(1)[g] * scratch[256];
+  pp[g] -= p.f[0] * (gi + p.f[1] * pp[g]);
+}
+kernel void k_adamw_clip(KSIG, device float* scratch [[buffer(3)]],
+                         uint g [[thread_position_in_grid]]) {
+  if (g >= p.n) return;
+  device float* pp = WF(0);
+  device float* m = WF(2);
+  device float* v = WF(3);
+  const float lr = p.f[0], beta1 = p.f[1], beta2 = p.f[2], eps = p.f[3];
+  const float wd = p.f[4], inv_bc1 = p.f[5], inv_bc2 = p.f[6];
+  const float om_b1 = 1.0f - beta1, om_b2 = 1.0f - beta2;
+  const float gi = RF(1)[g] * scratch[256];
+  const float mi = beta1 * m[g] + om_b1 * gi;
+  const float vi = beta2 * v[g] + om_b2 * gi * gi;
+  m[g] = mi;
+  v[g] = vi;
+  const float m_hat = mi * inv_bc1;
+  const float v_hat = vi * inv_bc2;
+  pp[g] -= lr * (m_hat / (sqrt(v_hat) + eps) + wd * pp[g]);
+}
 
 // --- Row / column reductions (one thread per row or column) ----------------
 kernel void k_reduce_rows(KSIG, uint c [[thread_position_in_grid]]) {

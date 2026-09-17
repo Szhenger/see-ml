@@ -75,7 +75,18 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // run its defaults — a throughput difference, never a misread — but the
 // version gate rejects v11 plans there regardless, as always for a newer
 // format.
-inline constexpr uint32_t kSeeuVersion = 11;
+// v12: the bitwise-safe kernel batch (E3). One opcode, kRopeTable, plus an
+// optional third operand on kRopeFwd/kRopeBwd naming its result; and an
+// optional clip threshold in out[1] of kSgdStep/kAdamWStep that folds the
+// preceding kClipNorm into the step. Additive, in instruction words that
+// were kNullRef / zero in every earlier plan, so the header is unchanged
+// and the floor stays; the validator rejects all three below v12. Results
+// are bit-identical to the v11 programs they replace.
+inline constexpr uint32_t kSeeuVersion = 12;
+
+// The version that introduced kRopeTable, the RoPE table operand and the
+// fused clip word on the optimizer steps.
+inline constexpr uint32_t kSeeuKernelBatchVersion = 12;
 
 // The version that made the GEMM tile fields meaningful: below it they are
 // pad words and must be zero.

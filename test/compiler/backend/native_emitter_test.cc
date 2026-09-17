@@ -183,4 +183,36 @@ TEST(NativeEmitter, RejectsOutputDirBlockedByFile) {
   EXPECT_ERROR(EmitNativePackage(compiled.plan, bogus, RepoRoot()));
 }
 
+TEST(NativeEmitter, TheStreamedDecimalTUIsCharacterIdenticalAcrossWindows) {
+  // The TU is rendered in 16 MiB windows of 256 KiB chunks and written as
+  // it goes (E2, #81). The line breaks are keyed off the GLOBAL byte index,
+  // so a blob that is not a multiple of anything — chunk, window, or the
+  // 24-byte line — must come out exactly as a serial renderer writes it.
+  // (The emitter embeds bytes; it does not interpret them.)
+  const size_t n = (16u << 20) + (256u << 10) + 12345;
+  std::vector<uint8_t> blob(n);
+  uint64_t state = 0x9E3779B97F4A7C15ull;
+  for (uint8_t& b : blob) {
+    state = state * 6364136223846793005ull + 1442695040888963407ull;
+    b = static_cast<uint8_t>(state >> 56);
+  }
+  ScopedTempDir dir;
+  ASSERT_OK_AND_ASSIGN(EmitPaths paths,
+                       EmitNativePackage(blob, dir.path(), RepoRoot()));
+  std::ifstream f(paths.embedded_tu, std::ios::binary);
+  const std::string got((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+  const size_t body = got.find("= {\n");
+  ASSERT_TRUE(body != std::string::npos);
+  std::string want;
+  want.reserve(n * 4);
+  for (size_t i = 0; i < n; ++i) {
+    want += std::to_string(static_cast<unsigned>(blob[i]));
+    want += ',';
+    if ((i + 1) % 24 == 0) want += '\n';
+  }
+  want += "\n};\nconst size_t kSeemlUpdatePlanSize = sizeof(kSeemlUpdatePlan);\n";
+  EXPECT_TRUE(got.compare(body + 4, std::string::npos, want) == 0);
+}
+
 }  // namespace

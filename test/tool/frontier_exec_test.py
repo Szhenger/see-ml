@@ -75,7 +75,7 @@ class ReaderTest(unittest.TestCase):
         blob = assemble(64, train=[(19, 0, (0, fx.f32_bits(2.5), N, N),
                                     (4, 0, 0))], persistent=b"\1" * 8)
         plan = fx.Plan(blob)
-        self.assertEqual((plan.version, plan.arena_size), (11, 64))
+        self.assertEqual((plan.version, plan.arena_size), (12, 64))
         self.assertEqual(len(plan.sections["train"]), 1)
         self.assertEqual(plan.sections["train"][0].opcode, 19)
         self.assertEqual(plan.initial_arena()[:9], b"\1" * 8 + b"\0")
@@ -425,7 +425,8 @@ MATRIX = [
       "--min-lr-factor", "0.1", "--steps", "8"]),
     ("mlp_unfused", "mlp.smf", "class.sds", 8, ["--no-fuse-epilogue"]),
     ("mlp_mse_sgd", "mlp.smf", "dense.sds", 8,
-     ["--loss", "mse", "--optimizer", "sgd", "--weight-decay", "0.01"]),
+     ["--loss", "mse", "--optimizer", "sgd", "--weight-decay", "0.01",
+      "--clip-norm", "0.5"]),                       # the fused SGD clip
     ("mlp_kl", "mlp.smf", "none.sds", 8,
      ["--loss", "kl", "--teacher", "teacher.smf", "--temperature", "2"]),
     ("mlp_xent_kl", "mlp.smf", "class.sds", 8,
@@ -440,6 +441,10 @@ MATRIX = [
     ("dec_q8_accum", "decoder.smf", "decoder_corpus.sds", 12,
      ["--quantize-base", "--grad-accum", "2"]),
     ("dec_bf16", "decoder.smf", "decoder_corpus.sds", 12, ["--bf16-base"]),
+    # The v11 program shapes plan v12 replaces, still compiled on request:
+    # a standalone clip per tensor, RoPE angles recomputed in place.
+    ("dec_v11_shape", "decoder.smf", "decoder_corpus.sds", 12,
+     ["--clip-norm", "0.5", "--no-fuse-clip", "--no-rope-table"]),
 ]
 # Opcodes no seeml-update-compile invocation produces today: kNop is a
 # placeholder, kCopy a utility no pass selects, and kReduceRows the bias
@@ -546,6 +551,13 @@ class DifferentialSuite(unittest.TestCase):
         self.assertEqual(probe(*base, "--arena-out", out)[0], 0)
         self.assertTrue(os.path.isfile(out))
         self.assertFalse(os.path.exists(out + ".tmp"))  # staged, then renamed
+        done = subprocess.run([PROBE, *base, "--arena-out", out, "--profile",
+                               "2"], stdout=subprocess.PIPE, text=True,
+                              stderr=subprocess.DEVNULL, check=True)
+        profile = json.loads(done.stdout)
+        self.assertEqual(profile["executions"], 2)
+        self.assertTrue(any(row["key"].startswith("op4 M")  # gemm.acc_nn
+                            for row in profile["rows"]))
 
         for argv, code, message in (
                 ((*base, "--arena-out", out, "--bogus"), 2, "unknown argument"),
@@ -554,6 +566,10 @@ class DifferentialSuite(unittest.TestCase):
                 ((*base, "--arena-out", out, "--time", "0"), 2, "--time"),
                 ((*base, "--arena-out", out, "--time", "2", "--trace",
                   out + ".t"), 2, "mutually exclusive"),
+                ((*base, "--arena-out", out, "--profile", "2", "--time", "2"),
+                 2, "mutually exclusive"),
+                ((*base, "--arena-out", out, "--profile", "0"), 2,
+                 "--profile"),
                 (("--plan", work, "--section", "merge", "--arena-in", arena,
                   "--arena-out", out), 1, "not a regular file"),
                 ((*base, "--arena-out", os.path.join(work, "nowhere", "a")),

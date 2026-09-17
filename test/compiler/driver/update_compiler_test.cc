@@ -263,8 +263,13 @@ TEST(UpdateCompiler, GradientAccumulationSplitsTheStream) {
   std::vector<UpdateInstruction> step(ha.step_instr_count);
   std::memcpy(step.data(), accum.plan.data() + ha.step_instr_offset,
               step.size() * sizeof(UpdateInstruction));
-  EXPECT_EQ(CountOpcode(step, OpCode::kClipNorm), trainables);
+  // The clip rides the step (plan v12): no standalone pass over the
+  // accumulator, its threshold in every step's out[1].
+  EXPECT_EQ(CountOpcode(step, OpCode::kClipNorm), 0u);
   EXPECT_EQ(CountOpcode(step, OpCode::kAdamWStep), trainables);
+  for (const auto& ins : step)
+    if (ins.opcode == static_cast<uint16_t>(OpCode::kAdamWStep))
+      EXPECT_EQ(std::bit_cast<float>(static_cast<uint32_t>(ins.out[1])), 1.0f);
   EXPECT_EQ(CountOpcode(step, OpCode::kFill), trainables);  // the zeroes
   EXPECT_EQ(CountOpcode(step, OpCode::kAccumulate), 0u);
   // The seed carries 1/G: exactly one fill of 0.25 in the grad program.
@@ -286,28 +291,38 @@ TEST(UpdateCompiler, GradientAccumulationSplitsTheStream) {
 }
 
 TEST(UpdateCompiler, GradientAccumulationSplitsAnSgdStream) {
-  // SGD has no moments: per trainable the step program is clip + step +
-  // zero, and the grad program's folds precede the first clip.
+  // SGD has no moments: per trainable the step program is step + zero with
+  // the clip folded into the step (plan v12) — or, with fuse_clip off, the
+  // v11 shape clip + step + zero — and the grad program's folds precede it.
   SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 52);
   UpdateConfig config = BaseConfig(kBatch);
   config.optimizer.kind = OptimizerKind::kSgd;
   config.optimizer.clip_norm = 0.5f;
   config.grad_accum_steps = 2;
-  ASSERT_OK_AND_ASSIGN(CompiledUpdate c, UpdateCompiler(config).Compile(model));
-  const PlanHeader h = HeaderOf(c);
-  const size_t trainables = 2 * c.adapters.size();
-  std::vector<UpdateInstruction> step(h.step_instr_count);
-  std::memcpy(step.data(), c.plan.data() + h.step_instr_offset,
-              step.size() * sizeof(UpdateInstruction));
-  EXPECT_EQ(step.size(), 3 * trainables);
-  EXPECT_EQ(CountOpcode(step, OpCode::kClipNorm), trainables);
-  EXPECT_EQ(CountOpcode(step, OpCode::kSgdStep), trainables);
-  EXPECT_EQ(CountOpcode(step, OpCode::kFill), trainables);
-  EXPECT_EQ(static_cast<OpCode>(step[0].opcode), OpCode::kClipNorm);
-  const auto grad = TrainProgramOf(c);
-  EXPECT_EQ(CountOpcode(grad, OpCode::kAccumulate), trainables);
-  EXPECT_EQ(CountOpcode(grad, OpCode::kSgdStep), 0u);
-  EXPECT_EQ(CountOpcode(grad, OpCode::kClipNorm), 0u);
+  for (const bool fuse : {true, false}) {
+    config.fuse_clip = fuse;
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate c,
+                         UpdateCompiler(config).Compile(model));
+    const PlanHeader h = HeaderOf(c);
+    const size_t trainables = 2 * c.adapters.size();
+    std::vector<UpdateInstruction> step(h.step_instr_count);
+    std::memcpy(step.data(), c.plan.data() + h.step_instr_offset,
+                step.size() * sizeof(UpdateInstruction));
+    EXPECT_EQ(step.size(), (fuse ? 2 : 3) * trainables);
+    EXPECT_EQ(CountOpcode(step, OpCode::kClipNorm), fuse ? 0u : trainables);
+    EXPECT_EQ(CountOpcode(step, OpCode::kSgdStep), trainables);
+    EXPECT_EQ(CountOpcode(step, OpCode::kFill), trainables);
+    EXPECT_EQ(static_cast<OpCode>(step[0].opcode),
+              fuse ? OpCode::kSgdStep : OpCode::kClipNorm);
+    for (const auto& ins : step)
+      if (ins.opcode == static_cast<uint16_t>(OpCode::kSgdStep))
+        EXPECT_EQ(ins.out[1],
+                  fuse ? uint64_t{std::bit_cast<uint32_t>(0.5f)} : 0u);
+    const auto grad = TrainProgramOf(c);
+    EXPECT_EQ(CountOpcode(grad, OpCode::kAccumulate), trainables);
+    EXPECT_EQ(CountOpcode(grad, OpCode::kSgdStep), 0u);
+    EXPECT_EQ(CountOpcode(grad, OpCode::kClipNorm), 0u);
+  }
 }
 
 TEST(UpdateCompiler, Bf16BaseHalvesRodataAndLowersTheWideningGemms) {
@@ -527,6 +542,42 @@ TEST(UpdateCompiler, PlanBytesAreThreadCountInvariant) {
   ASSERT_OK(serial);
   ASSERT_OK(wide);
   EXPECT_TRUE(serial->plan == wide->plan);
+}
+
+// --- Single weight residency (E2, #81) ---------------------------------------
+
+TEST(UpdateCompiler, TheConsumingCompileIsTheSamePlanAndReleasesWhatItPacked) {
+  // Every storage form, a teacher, and the student/teacher split: the
+  // consuming overload must assemble the identical blob — it changes WHEN
+  // payloads die, nothing else — and leave no packed payload resident.
+  SmfModel student = MakeMlp(kInDim, kHidden, kOutDim, 71);
+  SmfModel teacher = MakeMlp(kInDim, 2 * kHidden, kOutDim, 72);
+  for (int storage = 0; storage < 3; ++storage) {
+    UpdateConfig config = BaseConfig(kBatch);
+    config.loss = LossKind::kXEntPlusKL;
+    config.quantize_base = storage == 1;
+    config.bf16_base = storage == 2;
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate kept,
+                         UpdateCompiler(config).Compile(student, &teacher));
+    SmfModel s = student, t = teacher;
+    const uint64_t hash = s.content_hash;
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate consumed,
+                         UpdateCompiler(config).Compile(std::move(s), &t));
+    EXPECT_TRUE(kept.plan == consumed.plan);
+    EXPECT_EQ(s.content_hash, hash);  // identity survives the release
+    for (const SmfModel* m : {&s, &t}) {
+      size_t released = 0;
+      for (const SmfTensor& tensor : m->tensors) {
+        if (!tensor.is_const) continue;
+        EXPECT_GT(tensor.byte_size, 0u);  // metadata is kept
+        if (tensor.data.empty()) ++released;
+      }
+      EXPECT_GT(released, 0u);
+    }
+    // The caller's originals were never touched.
+    for (const SmfTensor& tensor : student.tensors)
+      if (tensor.is_const) EXPECT_EQ(tensor.data.size(), tensor.byte_size);
+  }
 }
 
 }  // namespace
