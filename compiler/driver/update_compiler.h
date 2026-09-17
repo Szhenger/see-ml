@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 
+#include "compiler/analysis/updater/pass_manager.h"  // PassTiming
 #include "source/language/model_format.h"
 #include "source/plan/update_types.h"
 
@@ -70,7 +71,10 @@ struct AdapterDebugInfo {
 
 struct CompiledUpdate {
   std::vector<uint8_t> plan;  // the .seeu blob
-  std::string sir_dump;       // human-readable training program
+  std::string sir_dump;       // human-readable training program; empty
+                              // unless UpdateConfig::dump_sir
+  // Wall time of every pass and driver phase, in order (E5, #84).
+  std::vector<PassTiming> pass_timings;
   std::vector<ParamDebugInfo> params;
   std::vector<AdapterDebugInfo> adapters;
   uint64_t arena_size = 0;

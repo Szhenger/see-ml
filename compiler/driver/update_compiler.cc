@@ -1,5 +1,7 @@
 #include "compiler/driver/update_compiler.h"
 
+#include <chrono>
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -57,6 +59,19 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::Compile(
 
 std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
     const SmfModel& source, const SmfModel* teacher, bool consume) {
+  // Every pass (PassManager) and every driver phase between them, timed:
+  // the compile report carries these, so a compile-side performance claim
+  // is a measurement anyone can repeat (E5, #84).
+  using PhaseClock = std::chrono::steady_clock;
+  std::vector<PassTiming> timings;
+  auto phase_start = PhaseClock::now();
+  auto phase = [&](const char* name, size_t ops) {
+    const auto now = PhaseClock::now();
+    timings.push_back(
+        {name, ops,
+         std::chrono::duration<double, std::milli>(now - phase_start).count()});
+    phase_start = now;
+  };
   const bool wants_teacher = config_.loss == LossKind::kKLDistill ||
                              config_.loss == LossKind::kXEntPlusKL;
   if (wants_teacher && !teacher)
@@ -239,6 +254,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   // the pre-adapter (or freed) value and silently miss every rewrite.
   build.output = nullptr;
 
+  phase("frontend", block.numOps());
   // --- 3. Structural passes (phase A): convolution lowering, then LoRA
   // grafting — everything that must precede the primal snapshot. The pass
   // manager re-verifies the block after each pass, so a corrupting rewrite
@@ -271,6 +287,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
                return {};
              });
     if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
+    timings.insert(timings.end(), pm.timings().begin(), pm.timings().end());
+    phase_start = PhaseClock::now();  // passes are timed by their manager
   }
 
   std::vector<sir::Value*> trainables;
@@ -316,6 +334,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
             .Run(b, param_grads);
       });
     if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
+    timings.insert(timings.end(), pm.timings().begin(), pm.timings().end());
+    phase_start = PhaseClock::now();  // passes are timed by their manager
   }
 
   // --- 6. Merge program: Δ = (α/r)·A@B (commit adds Δ to the model file). ---
@@ -351,6 +371,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
                           " frozen weight(s) as bf16 rodata");
   }
 
+  phase("merge-and-review", block.numOps());
   // --- 7b. Optimization passes (phase C): epilogue fusion, then the DCE
   // sweep — after autodiff, so fusion legality is read off the use-lists
   // (an intermediate the backward program consumes carries that consumer
@@ -372,6 +393,26 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
                // Fuse-then-rebind: the primal snapshot is the eval program
                // and the DCE root set; the orphaned ops leave it here, so
                // eval lowers the fused GEMMs and the sweep may free them.
+               if (!fused->fused_away.empty()) {
+                 std::unordered_set<const sir::Operation*> dead(
+                     fused->fused_away.begin(), fused->fused_away.end());
+                 std::erase_if(primal_ops, [&](const sir::Operation* op) {
+                   return dead.contains(op);
+                 });
+               }
+               return {};
+             });
+    if (config_.fuse_elementwise)
+      pm.Add("fuse-elementwise",
+             [&](sir::Block& b) -> std::expected<void, std::string> {
+               std::unordered_set<const sir::Value*> protected_values;
+               protected_values.insert(loss);
+               for (const auto& [p, g] : param_grads)
+                 protected_values.insert(g);
+               auto fused = ElementwiseChainFuser().Run(b, protected_values);
+               if (!fused) return std::unexpected(fused.error());
+               // Fuse-then-rebind, as above: the folded ops leave the eval
+               // snapshot (their tail stays in it, now carrying the chain).
                if (!fused->fused_away.empty()) {
                  std::unordered_set<const sir::Operation*> dead(
                      fused->fused_away.begin(), fused->fused_away.end());
@@ -403,6 +444,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
       return {};
     });
     if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
+    timings.insert(timings.end(), pm.timings().begin(), pm.timings().end());
+    phase_start = PhaseClock::now();  // passes are timed by their manager
   }
 
   // --- 8. Segmented arena binding. -------------------------------------------
@@ -438,6 +481,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
       merge_bound);
   binding->arena_size = std::max(binding->arena_size, merge_high);
 
+  phase("bind-arena", block.numOps());
   // --- 9. Lowering: train, eval (primal prefix), and merge programs. ---------
   auto resolve_train =
       [&](const sir::Value* v) -> std::expected<uint64_t, std::string> {
@@ -497,6 +541,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   auto merge_instrs = LowerOps(merge_ops, resolve_merge, quant_scales, bf16_weights);
   if (!merge_instrs) return std::unexpected(merge_instrs.error());
 
+  phase("lower", block.numOps());
   // --- 10. Persistent-segment initial image (deterministic, seeded). --------
   // Every randn element is a pure function of (seed, element index):
   // counter-based splitmix64 (the same generator the feeder's shuffler
@@ -624,6 +669,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   // rounds its length up to whole pages, and those pages must be the plan's.
   off = (off + kSeeuRodataAlignment - 1) & ~(kSeeuRodataAlignment - 1);
 
+  phase("persist-init", block.numOps());
   // Assemble by APPENDING into one exact reservation (E2, #81). Sizing the
   // blob first and copying sections into it zero-filled every byte of the
   // plan — the frozen weights, overwhelmingly — immediately before
@@ -680,6 +726,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
            emit_table.size() * sizeof(EmitEntry));
   pad_to(off);
 
+  phase("assemble", block.numOps());
   // Integrity seal: hash the whole blob with the hash field zeroed (it is,
   // so far), then patch the result in. Initialize() re-derives and compares
   // via the same PlanSelfHash — one canonical function on both sides.
@@ -699,12 +746,21 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
       !fits)
     return std::unexpected(fits.error());
 
+  phase("seal", block.numOps());
   // --- 13. Debug hooks + report. ----------------------------------------------
-  std::ostringstream dump;
-  block.print(dump);
-  dump << "  --- merge program ---\n";
-  merge->block->print(dump);
-  result.sir_dump = dump.str();
+  // The SIR dump is debug output, produced only when asked for (E5, #84):
+  // streaming the whole graph through an ostringstream and retaining the
+  // string was the largest pure-CPU graph cost in the driver, paid by
+  // every compile for a string almost none of them read.
+  if (config_.dump_sir) {
+    std::ostringstream dump;
+    block.print(dump);
+    dump << "  --- merge program ---\n";
+    merge->block->print(dump);
+    result.sir_dump = dump.str();
+    phase("sir-dump", block.numOps());
+  }
+  result.pass_timings = std::move(timings);
 
   for (const auto& [p, g] : param_grads) {
     ParamDebugInfo info{.id = std::string(p->id()),

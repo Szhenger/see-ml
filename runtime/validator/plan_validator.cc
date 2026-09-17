@@ -143,6 +143,11 @@ std::expected<void, std::string> ValidateInstructionImpl(
     return diag::validating::Error(
         "accumulate opcode in a pre-v" +
         std::to_string(up::kSeeuGradAccumVersion) + " plan");
+  if (ins.opcode == static_cast<uint16_t>(up::OpCode::kFusedMap) &&
+      plan_version < up::kSeeuFusedMapVersion)
+    return diag::validating::Error(
+        "fused_map opcode in a pre-v" +
+        std::to_string(up::kSeeuFusedMapVersion) + " plan");
   if (ins.opcode == static_cast<uint16_t>(up::OpCode::kRopeTable) &&
       plan_version < up::kSeeuKernelBatchVersion)
     return diag::validating::Error(
@@ -364,6 +369,63 @@ std::expected<void, std::string> ValidateInstructionImpl(
             !ref_ok(ins.in[2], table, false))
           return fail();
       }
+      return disjoint();
+    }
+    case up::OpCode::kFusedMap: {
+      // The micro-program is proven like everything else: 1..4 known
+      // stages, zero-terminated with nothing after the terminator; every
+      // operand slot a stage names present and count floats long, every
+      // slot none names absent; every immediate a scale names finite.
+      if ((d1 >> 32) != 0) return fail();
+      bool uses_slot[3] = {false, false, false};
+      bool uses_imm[2] = {false, false};
+      size_t stages = 0;
+      for (; stages < up::kFusedMapMaxStages; ++stages) {
+        const auto stage = static_cast<uint8_t>(d1 >> (8 * stages));
+        const up::FusedStage kind = up::FusedStageKind(stage);
+        if (kind == up::FusedStage::kEnd) {
+          if (stage != 0) return fail();
+          break;
+        }
+        const uint8_t arg = up::FusedStageArg(stage);
+        const uint8_t known = static_cast<uint8_t>(
+            up::kFusedStageKindMask |
+            (up::kFusedStageArgMask << up::kFusedStageArgShift) |
+            up::kFusedStageRunIsRight);
+        if ((stage & ~known) != 0) return fail();
+        switch (kind) {
+          case up::FusedStage::kAdd:
+          case up::FusedStage::kMul:
+            if (arg != 1 && arg != 2) return fail();
+            uses_slot[arg] = true;
+            break;
+          case up::FusedStage::kScale:
+            if (arg > 1 || (stage & up::kFusedStageRunIsRight)) return fail();
+            uses_imm[arg] = true;
+            break;
+          case up::FusedStage::kRelu:
+          case up::FusedStage::kGelu:
+          case up::FusedStage::kSilu:
+            if ((stage & ~up::kFusedStageKindMask) != 0) return fail();
+            break;
+          default:
+            return fail();
+        }
+      }
+      if (stages == 0 || (d1 >> (8 * stages)) != 0) return fail();
+      for (int i = 0; i < 2; ++i) {
+        const float v = std::bit_cast<float>(
+            static_cast<uint32_t>(d2 >> (32 * i)));
+        if (uses_imm[i] ? !std::isfinite(v) : (d2 >> (32 * i) & 0xFFFFFFFFu))
+          return fail();
+      }
+      if (!ref_ok(ins.in[0], d0, false)) return fail();
+      for (int slot = 1; slot <= 2; ++slot) {
+        if (uses_slot[slot] ? !ref_ok(ins.in[slot], d0, false)
+                            : ins.in[slot] != up::kNullRef)
+          return fail();
+      }
+      if (!ref_ok(ins.in[3], d0, true)) return fail();
       return disjoint();
     }
     case up::OpCode::kRopeTable: {

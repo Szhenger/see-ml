@@ -16,8 +16,13 @@
 // .seeu Update Plan on-device.
 //
 // Lifecycle (the ML analog of an OS software update):
-//   Load       mmap-equivalent ingest of the plan; one aligned arena
-//              allocation — the *only* allocation of the whole update.
+//   Load       the plan is read whole into one heap buffer (LoadFromFile:
+//              a buffered read, not a mapping) or borrowed from the binary
+//              image (LoadFromMemory: the package's .incbin blob, which a
+//              GPU backend may wrap zero-copy); then one aligned arena
+//              allocation. A loaded update therefore holds the plan plus
+//              the arena — the figure the final memory gate and the field
+//              reports' RSS / (arena + plan) ratio both count.
 //   Train      N steps of {feed batch → execute instruction stream}; each
 //              step is forward + backward + optimizer, fully pre-compiled.
 //              Interruptible: the persistent segment checkpoints atomically.

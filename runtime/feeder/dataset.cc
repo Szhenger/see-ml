@@ -205,23 +205,39 @@ std::expected<Dataset, std::string> Dataset::LoadFromFile(
 std::expected<void, std::string> Dataset::ValidateClassLabels(
     uint64_t num_classes) const {
   if (label_kind_ != 1 || num_classes == 0) return {};
-  if (input_kind_ == 1) {
-    // Every token is both an embedding index and (via the shifted view) a
-    // class label, so the whole stream is bounded — the caller passes the
-    // narrowest of the vocab and softmax widths.
-    for (uint64_t i = 0; i < tokens_.size(); ++i)
-      if (tokens_[i] < 0 || static_cast<uint64_t>(tokens_[i]) >= num_classes)
-        return diag::feeding::Error(
-            "token id " + std::to_string(tokens_[i]) + " at position " +
-            std::to_string(i) + " outside [0, " + std::to_string(num_classes) +
-            ")");
-    return {};
+  // For a token corpus every token is both an embedding index and (via
+  // the shifted view) a class label, so the whole stream is bounded — the
+  // caller passes the narrowest of the vocab and softmax widths.
+  const int32_t* ids =
+      input_kind_ == 1 ? tokens_.data()
+                       : reinterpret_cast<const int32_t*>(labels_.data());
+  const uint64_t count = input_kind_ == 1 ? tokens_.size() : num_samples_;
+
+  // One scan ever: the extent of the ids answers every later question.
+  if (!labels_scanned_) {
+    int64_t lo = 0, hi = -1;
+    for (uint64_t i = 0; i < count; ++i) {
+      const int64_t v = ids[i];
+      if (i == 0 || v < lo) lo = v;
+      if (i == 0 || v > hi) hi = v;
+    }
+    proven_min_label_ = lo;
+    proven_max_label_ = hi;
+    labels_scanned_ = true;
   }
-  const auto* labels = reinterpret_cast<const int32_t*>(labels_.data());
-  for (uint64_t i = 0; i < num_samples_; ++i)
-    if (labels[i] < 0 || static_cast<uint64_t>(labels[i]) >= num_classes)
+  if (count == 0 ||
+      (proven_min_label_ >= 0 &&
+       static_cast<uint64_t>(proven_max_label_) < num_classes))
+    return {};
+
+  // Refused: find the first offender for the diagnostic (the error path
+  // may rescan; the success path never does).
+  for (uint64_t i = 0; i < count; ++i)
+    if (ids[i] < 0 || static_cast<uint64_t>(ids[i]) >= num_classes)
       return diag::feeding::Error(
-          "class label " + std::to_string(labels[i]) + " at sample " +
+          std::string(input_kind_ == 1 ? "token id " : "class label ") +
+          std::to_string(ids[i]) +
+          (input_kind_ == 1 ? " at position " : " at sample ") +
           std::to_string(i) + " outside [0, " + std::to_string(num_classes) +
           ")");
   return {};
@@ -447,6 +463,7 @@ std::expected<Dataset, std::string> Dataset::SplitValidation(double fraction) {
     tokens_.resize(train_n * rec_ids);
     num_samples_ = train_n;
     cursor_ = 0;
+    labels_scanned_ = false;  // the extent was the whole corpus's
     return val;
   }
   val.inputs_.assign(inputs_.begin() + static_cast<ptrdiff_t>(train_n * input_dim_),
@@ -458,6 +475,7 @@ std::expected<Dataset, std::string> Dataset::SplitValidation(double fraction) {
   labels_.resize(train_n * lbytes);
   num_samples_ = train_n;
   cursor_ = 0;
+  labels_scanned_ = false;  // the extent was the whole corpus's
   return val;
 }
 

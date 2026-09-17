@@ -87,6 +87,14 @@ struct UpdateConfig {
   // bit-for-bit. rope_table hoists the RoPE angles into one device-built
   // table per geometry; fuse_clip folds the per-tensor clip into the
   // optimizer step, removing a full read+write pass over every gradient.
+  // Debug: render the final SIR (training block + merge program) into
+  // CompiledUpdate::sir_dump. Off by default — it is the largest pure-CPU
+  // graph cost in the driver, and nothing but a debugger reads it.
+  bool dump_sir = false;
+  // Fold same-shape elementwise chains with single-reader intermediates
+  // into kFusedMap instructions (E4, roadmap Phase 1b, plan v13). Bitwise-
+  // neutral, and switchable for the same reason the epilogue pass is.
+  bool fuse_elementwise = true;
   bool rope_table = true;
   bool fuse_clip = true;
   // The CPU blocked-GEMM cache tiles written into the plan header (v11).

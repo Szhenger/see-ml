@@ -101,6 +101,8 @@ This is the heart of the compiler, and the most mathematical part of SeeML. Ever
 
 A **pass** is a named graph-to-graph transformation. `PassManager` (`analysis/updater/`) runs them in registration order, and after *every single pass* re-runs `Block::verify()`. Why so paranoid? Attribution. If a pass corrupts the graph, the error message names *that pass*, at the moment of the crime — not some innocent later stage that happened to trip over the wreckage. A pass's own error, meanwhile, propagates verbatim. (Cheap insurance: verification is linear in the graph, and graphs here are small.)
 
+The manager also **times every pass** (the pass plus its verify), and the driver times the phases between them — frontend, merge-and-review, arena binding, lowering, the persistent image, assembly, the seal. They travel in `CompiledUpdate::pass_timings` and in the compile report's `"passes"` array, so a compile-side performance claim is a measurement anyone can repeat (E5, #84). On an 800 MB decoder (Apple M5) the whole graph pipeline — 1,417 ops through eight passes — is under 4 ms; the compile is assembly (133 ms) and the seal's hash (32 ms), i.e. bytes, which is why E2 went after copies and not passes. Three companions from the same hygiene batch: **DCE marks, then compacts once** — a backward sweep over private use counts finds whole dead chains, and `Block::removeOps` unlinks them and compacts the op list in one pass, where one `removeOp` per dead op was O(removed × ops), a quadratic cliff the first time a pass dead-codes a real fraction of the graph; the **SIR dump is opt-in** (`UpdateConfig::dump_sir`, `--dump-sir out.txt`) instead of streamed and retained by every compile; and the dump changes no byte of the plan.
+
 ### Conv lowering: convolution is just matrix multiplication wearing a trench coat
 
 `ConvLowering` rewrites any `sc_high.conv2d` into the **im2col** form. The insight, which is worth internalizing once in your life: a convolution slides a small filter over an image, computing a dot product at each position. If you *unroll* every filter-sized patch of the input into a row of a big matrix (that's "im2col" — image to columns), and flatten the filters into a second matrix, then the entire convolution collapses into one matrix multiplication:
@@ -139,7 +141,7 @@ Note the order of operations: `(X@A)@B` costs `O(N·r·(K+M))`, whereas material
 
 Initialization is where the elegance shows. `A` is drawn from a Gaussian with standard deviation `1/√K` (mean 0, seeded deterministically per adapter as `seed + adapter_index`); `B` is **zeros**. Since `ΔW = (α/r)·A@B = 0` when `B = 0`, the grafted model at step 0 is *bit-identical* to the original. Training can only move it away from a known-good starting point. (The `1/√K` scale is the standard variance-preserving choice: a dot product of K terms, each with variance 1/K, has variance about 1.)
 
-One subtlety: a weight *tied* across several matmuls gets a separate adapter per site (with unique ids `w`, `w@1`, …), because each site may need a different correction.
+One subtlety: a weight *tied* across several matmuls gets **one** adapter pair, shared by every site. Per-site pairs would train fine and then commit wrongly: the file holds a single `W`, so commit would write `W + ΣΔᵢ` and every site would inherit every other site's correction. With a shared pair each site computes `xᵢ@(W + Δ)` during training, autodiff sums the pair's gradient across the sites (fan-out accumulation), the merge builder rejects a duplicate emit target outright, and the committed weight is exactly the function that was trained and gated. A weight consumed any other way than as a MatMul's right operand — an embedding table doubling as the lm-head, say — is not adapted at all, with a note, for the same reason: committing `W + Δ` would silently change the site that read it differently.
 
 ### Automatic differentiation: the chain rule, run in reverse, by a compiler
 
@@ -361,6 +363,18 @@ consumers of the compiler and the formats, not stages of compilation.
   segments, and (with `--instrs`) the decoded instruction streams.
 - **`export_model.py`** — the PyTorch exporter producing SMF models and
   SDS corpora; the accepted module set is listed in [usage.md](usage.md).
+- **The Python plane** — `pack_update.py` (the `.incbin` package
+  assembler), `autotune.py` (the offline kernel-policy tuner whose table
+  this compiler reads), `bench_compare.py` (the Tier A gate),
+  `frontier_exec.py` with `seeml_plan_probe.cc` (a second implementation of
+  the whole instruction set, compared against the runtime one instruction
+  at a time) and `certify_numerics.py` (the relaxed-reduction certificate).
+  They run on the build host and are described in
+  [tool/README.md](../tool/README.md). The division of labour is the
+  two-plane doctrine: the compiler, the runtime and every emitted package
+  are dependency-free C++; what the doctrine has no reason to constrain —
+  packaging, measurement, tuning, certification, reference execution — is
+  Python, and nothing Python ships on a device.
 
 ## Testing
 

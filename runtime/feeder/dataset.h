@@ -143,6 +143,17 @@ class Dataset {
   uint32_t input_kind_ = 0;
   uint64_t label_dim_ = 0;
   uint64_t cursor_ = 0;
+  // ValidateClassLabels' verdict, cached (E5, #84): the largest bound the
+  // labels have been proven under, 0 = not yet scanned. The engine
+  // validates on every Train and every Evaluate — up to four full-corpus
+  // scans per update of data that cannot change between them (the corpus
+  // is immutable once built; a split hands its tail to a NEW dataset,
+  // which starts unproven, and a subset of proven labels stays proven).
+  // The cache stores the exact extent, so a later call with a different
+  // class count is answered correctly without a rescan either.
+  mutable int64_t proven_min_label_ = 0;
+  mutable int64_t proven_max_label_ = -1;
+  mutable bool labels_scanned_ = false;
 
   // Shuffled serving order; empty when shuffling is disabled.
   std::vector<uint64_t> order_;

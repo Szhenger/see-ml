@@ -1380,4 +1380,63 @@ TEST(GemmRedesign, PackedInt8AndBf16WeightsWidenToTheSameBits) {
   }
 }
 
+// --- kFusedMap (E4, #83): a chain is the sequence it replaces, bit for bit ----
+
+TEST(FusedMap, EveryStageMatchesItsStandaloneKernelInSequence) {
+  namespace up = seeml::update;
+  using up::FusedStage;
+  using up::MakeFusedStage;
+  // Sizes around the 1024-float block and the parallel grain; values that
+  // exercise the activations' interesting ranges.
+  for (const size_t n : {size_t{1}, size_t{1023}, size_t{1024}, size_t{1025},
+                         size_t{70001}}) {
+    const auto x = RandnVector(n, 11, 2.0f);
+    const auto y = RandnVector(n, 12);
+    const auto z = RandnVector(n, 13);
+    const float a0 = 2.0f / 3.0f, a1 = -0.375f;
+    for (const size_t threads : {size_t{1}, size_t{8}}) {
+      ScopedThreads scoped(threads);
+      // silu(x) -> + y -> * a0 -> z * (.)   [four stages, the run on the
+      // right of the last product], against the four standalone kernels.
+      std::vector<float> t1(n), t2(n), t3(n), want(n), got(n, 9.0f);
+      k::SiluFwd(x.data(), t1.data(), n);
+      k::AddEW(t1.data(), y.data(), t2.data(), n);
+      k::Scale(t2.data(), t3.data(), a0, n);
+      k::MulEW(z.data(), t3.data(), want.data(), n);
+      const uint64_t prog =
+          uint64_t{MakeFusedStage(FusedStage::kSilu)} |
+          uint64_t{MakeFusedStage(FusedStage::kAdd, 1)} << 8 |
+          uint64_t{MakeFusedStage(FusedStage::kScale, 0)} << 16 |
+          uint64_t{MakeFusedStage(FusedStage::kMul, 2, true)} << 24;
+      const float* others[3] = {nullptr, y.data(), z.data()};
+      const float imm[2] = {a0, a1};
+      k::FusedMap(x.data(), others, got.data(), n, prog, imm);
+      EXPECT_BITWISE_EQ_F32(want, got);
+
+      // The LoRA forward chain, scale -> add: a multiply feeding an add is
+      // exactly where a contraction would change bits.
+      k::Scale(x.data(), t1.data(), a1, n);
+      k::AddEW(y.data(), t1.data(), want.data(), n);
+      const uint64_t lora =
+          uint64_t{MakeFusedStage(FusedStage::kScale, 1)} |
+          uint64_t{MakeFusedStage(FusedStage::kAdd, 1, true)} << 8;
+      std::fill(got.begin(), got.end(), 9.0f);
+      k::FusedMap(x.data(), others, got.data(), n, lora, imm);
+      EXPECT_BITWISE_EQ_F32(want, got);
+
+      // gelu -> relu -> mul, two unary stages back to back on the block.
+      k::GeluFwd(x.data(), t1.data(), n);
+      k::ReluFwd(t1.data(), t2.data(), n);
+      k::MulEW(t2.data(), z.data(), want.data(), n);
+      const uint64_t acts =
+          uint64_t{MakeFusedStage(FusedStage::kGelu)} |
+          uint64_t{MakeFusedStage(FusedStage::kRelu)} << 8 |
+          uint64_t{MakeFusedStage(FusedStage::kMul, 2)} << 16;
+      std::fill(got.begin(), got.end(), 9.0f);
+      k::FusedMap(x.data(), others, got.data(), n, acts, imm);
+      EXPECT_BITWISE_EQ_F32(want, got);
+    }
+  }
+}
+
 }  // namespace

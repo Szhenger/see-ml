@@ -103,6 +103,74 @@ TEST(PassManager, NamesThePassThatViolatesInvariants) {
   EXPECT_NE(r.error().find("duplicate value id"), std::string::npos);
 }
 
+TEST(DeadCodeElimination, CompactsALargeInterleavedGraphInOneSweep) {
+  // Mark-and-compact (E5, #84): thousands of dead chains interleaved with
+  // live ops, each dead chain a fan-in (its tail reads two dead values, so
+  // the private use counts must reach zero from both sides). One sweep
+  // removes all of them, the survivors keep their order, and the block
+  // still verifies — use-list symmetry included.
+  sir::Block block;
+  sir::Value* x = block.addArgument(sir::DataType::F32, sir::Shape{4});
+  std::unordered_set<const sir::Value*> roots;
+  std::vector<std::string> live_order;
+  const size_t groups = 3000;
+  for (size_t g = 0; g < groups; ++g) {
+    const std::string id = std::to_string(g);
+    sir::Operation* live = block.appendOp("sc_high.relu");
+    live->addOperand(x);
+    roots.insert(
+        live->addResult("live." + id, sir::DataType::F32, sir::Shape{4}));
+    live_order.push_back("live." + id);
+
+    sir::Operation* d0 = block.appendOp("sc_high.gelu");
+    d0->addOperand(x);
+    sir::Value* v0 =
+        d0->addResult("d0." + id, sir::DataType::F32, sir::Shape{4});
+    sir::Operation* d1 = block.appendOp("sc_high.silu");
+    d1->addOperand(v0);
+    sir::Value* v1 =
+        d1->addResult("d1." + id, sir::DataType::F32, sir::Shape{4});
+    sir::Operation* d2 = block.appendOp("sc_high.add");
+    d2->addOperand(v0);  // v0 has two dead users; v1 one
+    d2->addOperand(v1);
+    d2->addResult("d2." + id, sir::DataType::F32, sir::Shape{4});
+  }
+  ASSERT_OK_AND_ASSIGN(size_t removed,
+                       DeadCodeElimination().Run(block, roots));
+  EXPECT_EQ(removed, 3 * groups);
+  ASSERT_EQ(block.numOps(), groups);
+  size_t i = 0;
+  block.walk([&](sir::Operation* op) {
+    EXPECT_EQ(std::string(op->result(0)->id()), live_order[i++]);
+  });
+  EXPECT_EQ(x->users().size(), groups);  // the dead readers of x are gone
+  ASSERT_OK(block.verify());
+}
+
+TEST(PassManager, RecordsEveryCompletedPassWithItsWallTime) {
+  sir::Block block;
+  block.addArgument(sir::DataType::F32, sir::Shape{2});
+  PassManager pm;
+  pm.Add("first", [](sir::Block&) -> std::expected<void, std::string> {
+    return {};
+  });
+  pm.Add("second", [](sir::Block& b) -> std::expected<void, std::string> {
+    b.appendOp("sc_mem.param")
+        ->addResult("p", sir::DataType::F32, sir::Shape{2});
+    return {};
+  });
+  pm.Add("failing", [](sir::Block&) -> std::expected<void, std::string> {
+    return std::unexpected("boom");
+  });
+  EXPECT_ERROR_CONTAINS(pm.Run(block), "boom");
+  ASSERT_EQ(pm.timings().size(), 2u);  // the failing pass completed nothing
+  EXPECT_EQ(pm.timings()[0].name, "first");
+  EXPECT_EQ(pm.timings()[0].ops_after, 0u);
+  EXPECT_EQ(pm.timings()[1].name, "second");
+  EXPECT_EQ(pm.timings()[1].ops_after, 1u);
+  for (const PassTiming& t : pm.timings()) EXPECT_TRUE(t.ms >= 0.0);
+}
+
 // =============================================================================
 // ConvLowering
 // =============================================================================
