@@ -11,6 +11,52 @@ namespace up = seeml::update;
 
 namespace {
 
+/// Proves a kFusedMap micro-program (plan v13): 1..4 known stages,
+/// zero-terminated with nothing after the terminator; binary stages name
+/// operand slot 1 or 2 (recorded in `uses_slot`), scale stages immediate 0
+/// or 1, unary stages carry no argument; every immediate a scale names is
+/// finite and every one none names is zero.
+bool FusedProgramOk(uint64_t stages_word, uint64_t imm_word,
+                    bool uses_slot[3]) {
+  if ((stages_word >> 32) != 0) return false;
+  constexpr uint8_t kKnownBits = static_cast<uint8_t>(
+      up::kFusedStageKindMask |
+      (up::kFusedStageArgMask << up::kFusedStageArgShift) |
+      up::kFusedStageRunIsRight);
+  bool uses_imm[2] = {false, false};
+  size_t stages = 0;
+  for (; stages < up::kFusedMapMaxStages; ++stages) {
+    const auto stage = static_cast<uint8_t>(stages_word >> (8 * stages));
+    const up::FusedStage kind = up::FusedStageKind(stage);
+    if (kind == up::FusedStage::kEnd) {
+      if (stage != 0) return false;
+      break;
+    }
+    if ((stage & ~kKnownBits) != 0) return false;
+    const uint8_t arg = up::FusedStageArg(stage);
+    if (kind == up::FusedStage::kAdd || kind == up::FusedStage::kMul) {
+      if (arg != 1 && arg != 2) return false;
+      uses_slot[arg] = true;
+    } else if (kind == up::FusedStage::kScale) {
+      if (arg > 1 || (stage & up::kFusedStageRunIsRight)) return false;
+      uses_imm[arg] = true;
+    } else if (kind == up::FusedStage::kRelu ||
+               kind == up::FusedStage::kGelu ||
+               kind == up::FusedStage::kSilu) {
+      if ((stage & ~up::kFusedStageKindMask) != 0) return false;
+    } else {
+      return false;
+    }
+  }
+  if (stages == 0 || (stages_word >> (8 * stages)) != 0) return false;
+  for (int i = 0; i < 2; ++i) {
+    const uint32_t bits = static_cast<uint32_t>(imm_word >> (32 * i));
+    if (uses_imm[i] ? !std::isfinite(std::bit_cast<float>(bits)) : bits != 0)
+      return false;
+  }
+  return true;
+}
+
 std::expected<void, std::string> ValidateInstructionImpl(
     const up::UpdateInstruction& ins, uint64_t arena_size,
     uint64_t rodata_size, uint32_t plan_version,
@@ -372,53 +418,11 @@ std::expected<void, std::string> ValidateInstructionImpl(
       return disjoint();
     }
     case up::OpCode::kFusedMap: {
-      // The micro-program is proven like everything else: 1..4 known
-      // stages, zero-terminated with nothing after the terminator; every
-      // operand slot a stage names present and count floats long, every
-      // slot none names absent; every immediate a scale names finite.
-      if ((d1 >> 32) != 0) return fail();
+      // The micro-program is proven like everything else (FusedProgramOk);
+      // then every operand slot a stage names must be present and count
+      // floats long, and every slot none names absent.
       bool uses_slot[3] = {false, false, false};
-      bool uses_imm[2] = {false, false};
-      size_t stages = 0;
-      for (; stages < up::kFusedMapMaxStages; ++stages) {
-        const auto stage = static_cast<uint8_t>(d1 >> (8 * stages));
-        const up::FusedStage kind = up::FusedStageKind(stage);
-        if (kind == up::FusedStage::kEnd) {
-          if (stage != 0) return fail();
-          break;
-        }
-        const uint8_t arg = up::FusedStageArg(stage);
-        const uint8_t known = static_cast<uint8_t>(
-            up::kFusedStageKindMask |
-            (up::kFusedStageArgMask << up::kFusedStageArgShift) |
-            up::kFusedStageRunIsRight);
-        if ((stage & ~known) != 0) return fail();
-        switch (kind) {
-          case up::FusedStage::kAdd:
-          case up::FusedStage::kMul:
-            if (arg != 1 && arg != 2) return fail();
-            uses_slot[arg] = true;
-            break;
-          case up::FusedStage::kScale:
-            if (arg > 1 || (stage & up::kFusedStageRunIsRight)) return fail();
-            uses_imm[arg] = true;
-            break;
-          case up::FusedStage::kRelu:
-          case up::FusedStage::kGelu:
-          case up::FusedStage::kSilu:
-            if ((stage & ~up::kFusedStageKindMask) != 0) return fail();
-            break;
-          default:
-            return fail();
-        }
-      }
-      if (stages == 0 || (d1 >> (8 * stages)) != 0) return fail();
-      for (int i = 0; i < 2; ++i) {
-        const float v = std::bit_cast<float>(
-            static_cast<uint32_t>(d2 >> (32 * i)));
-        if (uses_imm[i] ? !std::isfinite(v) : (d2 >> (32 * i) & 0xFFFFFFFFu))
-          return fail();
-      }
+      if (!FusedProgramOk(d1, d2, uses_slot)) return fail();
       if (!ref_ok(ins.in[0], d0, false)) return fail();
       for (int slot = 1; slot <= 2; ++slot) {
         if (uses_slot[slot] ? !ref_ok(ins.in[slot], d0, false)
