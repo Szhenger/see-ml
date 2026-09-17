@@ -7,3 +7,7 @@ torch>=1.7    # nn.SiLU is the newest module the exporter touches
 numpy>=1.17   # np.random.Generator API used by --demo
 # Optional (tier 2), never needed to import or export: transformers for
 # --hf-parity, tokenizers for --text-corpus. `--hf` itself is NumPy only.
+# tool/frontier_exec.py (P4): NumPy alone runs the oracle (`diff`, `run`);
+# its torch / torch-mps backends use the torch above, and `mlx` is optional
+# (pip install mlx, Apple silicon only) — absent backends are reported as
+# unavailable, never failed.

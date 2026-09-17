@@ -291,6 +291,12 @@ jobs:
         run: python3 -W error tool/export_model.py --demo out/
       - name: Build the compiler
         run: sh build/build.sh
+      # The frontier executor's differential suite (P4, #78): a second,
+      # independent implementation of every opcode — NumPy in f64, and
+      # PyTorch — against the C++ kernels just built, instruction by
+      # instruction, over the whole fixture matrix.
+      - name: Frontier executor suite (differential oracle vs seeml-plan-probe)
+        run: python3 -m unittest discover -s test/tool -p 'frontier_exec_test.py' -v
       - name: Compile the plan and build the emitted package
         run: |
           ./build/seeml-update-compile --source out/model.smf --out out/pkg \
@@ -401,7 +407,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - name: Byte-compile every tool script
-        run: python -m py_compile tool/export_model.py tool/bench_compare.py tool/pack_update.py tool/autotune.py
+        run: python -m py_compile tool/export_model.py tool/bench_compare.py tool/pack_update.py tool/autotune.py tool/frontier_exec.py
       - name: Packer unit tests (assembles the stub with the runner's g++)
         run: python -m unittest discover -s test/tool -p '*_test.py' -v
 

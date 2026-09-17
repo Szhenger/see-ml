@@ -17,6 +17,8 @@ tool/
   seeml_bench.cc          the benchmark harness  ->  one JSON per run
   bench_compare.py        the nightly Tier A regression gate over two runs
   autotune.py             the offline tuner      ->  host-keyed kernel-policy table
+  frontier_exec.py        the frontier executor  ->  runs a .seeu through NumPy / PyTorch / MLX
+  seeml_plan_probe.cc     its C++ oracle half     (one plan section, every write traced)
 ```
 
 ## What each one is for
@@ -76,6 +78,24 @@ report carries the rate of a frozen calibration kernel, and the comparer
 divides the two runners' ratio out of every delta) and, with `--state`,
 two-consecutive-red: a key's first regression warns, its second fails
 (P5, #79). Standard library only.
+
+**`frontier_exec.py`** is the off-ramp to the frontier frameworks, the
+fourth Python-plane subsystem (P4): a build-host interpreter for the whole
+plan instruction set, written a second time from the documented mathematics
+rather than ported from the kernels. `diff` replays a plan against
+`seeml-plan-probe --trace` one instruction at a time — each opcode executes
+on exactly the bytes the C++ runtime had and is judged on its own writes —
+so it catches the kernel bug a bit-exact self-comparison would reproduce
+faithfully, and names the instruction that owns it; it runs against the CPU
+and the Metal backend alike. `price` answers "what would Accelerate/AMX or
+the GPU buy on THIS plan" in `seeml-bench`'s own fields (`step_ms`,
+`tokens_per_s`, `it_per_s`, `gemm_gflops`, `mfu`) beside the C++ numbers
+from `seeml-plan-probe --time`; `run` trains a plan with the feeder's exact
+split and shuffle. NumPy is the only requirement; `torch`, `torch-mps`,
+`mlx` and `mlx-tf32` are reported unavailable, not failed, where absent.
+The priced number is a floor on the frontier, not the frontier: the
+interpreter dispatches op by op, with no graph compile or fusion. Never
+shipped, never imported by the compiler or the runtime.
 
 **`autotune.py`** is the offline autotuner, the second Python-plane
 subsystem of the overhaul (P2): it sweeps CPU GEMM tile arms through
