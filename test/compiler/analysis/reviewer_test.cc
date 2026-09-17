@@ -21,6 +21,7 @@ namespace {
 using namespace seeml::update;
 namespace sir = seeml::sir;
 using seeml::testing::AsBytes;
+using seeml::testing::AsPayload;
 
 /// Declares one frozen weight in `block`, backed by `tensor` (whose data and
 /// byte_size are filled from `data`), and registers it in `build`.
@@ -30,7 +31,7 @@ sir::Value* AddWeight(sir::Block& block, GraphBuild& build, SmfTensor& tensor,
   tensor.name = name;
   tensor.dims = dims;
   tensor.is_const = true;
-  tensor.data = AsBytes(data);
+  tensor.data = AsPayload(data);
   tensor.byte_size = tensor.data.size();
   sir::Operation* op = block.appendOp("sc_mem.weight");
   sir::Value* v =

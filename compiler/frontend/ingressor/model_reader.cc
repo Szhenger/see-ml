@@ -3,9 +3,18 @@
 #include <algorithm>
 #include <cstring>
 #include <fstream>
+#include <memory>
+#include <optional>
+#include <string_view>
 #include <thread>
 #include <unordered_set>
 #include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include "compiler/diagnostics/tokenizing/error.h"
 #include "source/identity/hash.h"
@@ -20,6 +29,9 @@ namespace {
 // Constant-tensor payloads below this total stay on the serial copy path:
 // fanning a few KiB over the worker pool costs more than the copies.
 constexpr uint64_t kParallelCopyThreshold = 4u << 20;
+// One parallel copy chunk: large enough that a chunk is bandwidth-, not
+// dispatch-bound, small enough that the largest tensor spans many.
+constexpr size_t kParallelCopyGrain = 8u << 20;
 
 // Overflow-checked u64 multiply for validating file-supplied sizes.
 bool MulU64(uint64_t a, uint64_t b, uint64_t* out) {
@@ -60,24 +72,79 @@ struct Reader {
   }
 };
 
+/// The model file's bytes for the duration of one load. On POSIX hosts a
+/// private read-only mapping: the file is the largest artifact the compiler
+/// ingests, and reading it into a buffer made load peak at file + payloads
+/// with the buffer's pages still resident after it was freed (E2, #81). A
+/// mapping is file-backed — clean, evictable, never part of the anonymous
+/// footprint — and unmapping it is unconditional. Elsewhere (or if mmap
+/// refuses) a default-initialized heap buffer: no zero-fill before the read
+/// overwrites it, as a std::vector sized to the file would have done.
+class FileBytes {
+ public:
+  FileBytes() = default;
+  FileBytes(const FileBytes&) = delete;
+  FileBytes& operator=(const FileBytes&) = delete;
+  ~FileBytes() {
+#if SEEML_PAYLOAD_MMAP
+    if (mapped_) ::munmap(const_cast<uint8_t*>(data_), size_);
+#endif
+  }
+
+  /// nullopt on success, else the verb of the failure ("cannot open", ...).
+  std::optional<std::string_view> Open(const std::string& path) {
+#if SEEML_PAYLOAD_MMAP
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0) return "cannot open";
+    struct stat st {};
+    if (::fstat(fd, &st) != 0 || st.st_size < 0) {
+      ::close(fd);
+      return "cannot stat";
+    }
+    size_ = static_cast<size_t>(st.st_size);
+    if (size_ != 0) {
+      void* p = ::mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd, 0);
+      if (p != MAP_FAILED) {
+        ::close(fd);
+        data_ = static_cast<const uint8_t*>(p);
+        mapped_ = true;
+        return std::nullopt;
+      }
+    }
+    ::close(fd);
+    if (size_ == 0) return std::nullopt;
+#endif
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return "cannot open";
+    f.seekg(0, std::ios::end);
+    const std::streamoff end = f.tellg();
+    if (end < 0) return "cannot stat";
+    f.seekg(0);
+    size_ = static_cast<size_t>(end);
+    heap_.reset(new uint8_t[size_]);  // default-init: no zero-fill
+    if (size_ != 0 && !f.read(reinterpret_cast<char*>(heap_.get()),
+                              static_cast<std::streamsize>(size_)))
+      return "cannot read";
+    data_ = heap_.get();
+    return std::nullopt;
+  }
+
+  const uint8_t* data() const { return data_; }
+  size_t size() const { return size_; }
+
+ private:
+  const uint8_t* data_ = nullptr;
+  size_t size_ = 0;
+  bool mapped_ = false;
+  std::unique_ptr<uint8_t[]> heap_;
+};
+
 }  // namespace
 
 std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
-  std::ifstream f(path, std::ios::binary);
-  if (!f) return tokenizing::FileError("cannot open", path);
-  // Sized single read: stat, size the buffer once, one bulk transfer —
-  // model files are the largest artifact the compiler ingests, and the
-  // byte-at-a-time istreambuf_iterator form this replaces re-grew the
-  // vector all the way up.
-  f.seekg(0, std::ios::end);
-  const std::streamoff end = f.tellg();
-  if (end < 0) return tokenizing::FileError("cannot stat", path);
-  f.seekg(0);
-  std::vector<uint8_t> bytes(static_cast<size_t>(end));
-  if (!bytes.empty() &&
-      !f.read(reinterpret_cast<char*>(bytes.data()),
-              static_cast<std::streamsize>(bytes.size())))
-    return tokenizing::FileError("cannot read", path);
+  FileBytes bytes;
+  if (auto verb = bytes.Open(path))
+    return tokenizing::FileError(std::string(*verb), path);
 
   Reader r{bytes.data(), bytes.size()};
   if (r.Read<uint32_t>() != kSmfMagic)
@@ -206,24 +273,42 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
 
   if (!r.ok) return tokenizing::FileError("truncated file", path);
 
-  // Materialize the validated constant payloads. Each copy writes only its
-  // own tensor, so large models fan the copies out over ParallelFor
-  // (deterministic: chunk geometry never depends on the worker count);
-  // small ones stay serial.
-  auto copy_payload = [&](size_t idx) {
+  // Materialize the validated constant payloads. The copy is partitioned
+  // over the payload BYTES, not the tensor list (E2, #81): a model is
+  // typically dominated by one tensor — an embedding table — and a
+  // per-tensor split copied it on a single thread while the rest idled.
+  // Payloads are sized without a zero-fill (SmfBytes), so a chunk may land
+  // anywhere inside a tensor; every byte is written exactly once, by
+  // whichever chunk owns it, and the chunk geometry never depends on the
+  // worker count.
+  std::vector<uint64_t> starts;  // prefix sums over const_tensors
+  starts.reserve(const_tensors.size() + 1);
+  starts.push_back(0);
+  for (size_t idx : const_tensors) {
     SmfTensor& t = model.tensors[idx];
-    t.data.assign(bytes.begin() + static_cast<ptrdiff_t>(t.data_offset),
-                  bytes.begin() +
-                      static_cast<ptrdiff_t>(t.data_offset + t.byte_size));
+    t.data.resize(static_cast<size_t>(t.byte_size));
+    starts.push_back(starts.back() + t.byte_size);
+  }
+  auto copy_range = [&](uint64_t begin, uint64_t end) {
+    // First tensor whose span reaches past `begin`.
+    size_t i = static_cast<size_t>(
+        std::upper_bound(starts.begin(), starts.end(), begin) -
+        starts.begin() - 1);
+    for (; i < const_tensors.size() && starts[i] < end; ++i) {
+      SmfTensor& t = model.tensors[const_tensors[i]];
+      const uint64_t lo = std::max(begin, starts[i]) - starts[i];
+      const uint64_t hi = std::min(end, starts[i + 1]) - starts[i];
+      std::memcpy(t.data.data() + lo, bytes.data() + t.data_offset + lo,
+                  static_cast<size_t>(hi - lo));
+    }
   };
-  if (const_bytes >= kParallelCopyThreshold && const_tensors.size() > 1) {
-    ParallelFor(const_tensors.size(), 1,
+  if (const_bytes >= kParallelCopyThreshold) {
+    ParallelFor(static_cast<size_t>(const_bytes), kParallelCopyGrain,
                 [&](size_t begin, size_t end, size_t /*chunk*/) {
-                  for (size_t i = begin; i < end; ++i)
-                    copy_payload(const_tensors[i]);
+                  copy_range(begin, end);
                 });
   } else {
-    for (size_t idx : const_tensors) copy_payload(idx);
+    copy_range(0, const_bytes);
   }
 
   model.content_hash = ContentHash64(bytes.data(), bytes.size());

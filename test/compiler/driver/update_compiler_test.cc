@@ -544,4 +544,40 @@ TEST(UpdateCompiler, PlanBytesAreThreadCountInvariant) {
   EXPECT_TRUE(serial->plan == wide->plan);
 }
 
+// --- Single weight residency (E2, #81) ---------------------------------------
+
+TEST(UpdateCompiler, TheConsumingCompileIsTheSamePlanAndReleasesWhatItPacked) {
+  // Every storage form, a teacher, and the student/teacher split: the
+  // consuming overload must assemble the identical blob — it changes WHEN
+  // payloads die, nothing else — and leave no packed payload resident.
+  SmfModel student = MakeMlp(kInDim, kHidden, kOutDim, 71);
+  SmfModel teacher = MakeMlp(kInDim, 2 * kHidden, kOutDim, 72);
+  for (int storage = 0; storage < 3; ++storage) {
+    UpdateConfig config = BaseConfig(kBatch);
+    config.loss = LossKind::kXEntPlusKL;
+    config.quantize_base = storage == 1;
+    config.bf16_base = storage == 2;
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate kept,
+                         UpdateCompiler(config).Compile(student, &teacher));
+    SmfModel s = student, t = teacher;
+    const uint64_t hash = s.content_hash;
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate consumed,
+                         UpdateCompiler(config).Compile(std::move(s), &t));
+    EXPECT_TRUE(kept.plan == consumed.plan);
+    EXPECT_EQ(s.content_hash, hash);  // identity survives the release
+    for (const SmfModel* m : {&s, &t}) {
+      size_t released = 0;
+      for (const SmfTensor& tensor : m->tensors) {
+        if (!tensor.is_const) continue;
+        EXPECT_GT(tensor.byte_size, 0u);  // metadata is kept
+        if (tensor.data.empty()) ++released;
+      }
+      EXPECT_GT(released, 0u);
+    }
+    // The caller's originals were never touched.
+    for (const SmfTensor& tensor : student.tensors)
+      if (tensor.is_const) EXPECT_EQ(tensor.data.size(), tensor.byte_size);
+  }
+}
+
 }  // namespace

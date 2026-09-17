@@ -394,7 +394,7 @@ int main(int argc, char** argv) {
 
   SmfModel source_model = std::move((*models)[0]);
   SmfModel teacher_model;
-  const SmfModel* teacher = nullptr;
+  SmfModel* teacher = nullptr;
   if (teacher_path) {
     teacher_model = std::move((*models)[1]);
     teacher = &teacher_model;
@@ -402,7 +402,10 @@ int main(int argc, char** argv) {
 
   // --- Compile ----------------------------------------------------------------
   UpdateCompiler compiler(config);
-  auto compiled = compiler.Compile(source_model, teacher);
+  // The consuming compile: nothing below reads a weight again, so each
+  // payload is released as plan assembly packs it (one resident copy of
+  // the weights while the blob is built, not two).
+  auto compiled = compiler.Compile(std::move(source_model), teacher);
   if (!compiled) return Fail(compiled.error());
 
   std::fprintf(stderr,

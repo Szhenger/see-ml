@@ -36,12 +36,13 @@ std::string FormatMiB(uint64_t bytes) {
 }  // namespace
 
 uint64_t TrainingFootprint::total_bytes() const {
-  return SatAdd(weight_bytes, activation_bytes);
+  return SatAdd(SatAdd(weight_bytes, activation_bytes), delta_bytes);
 }
 
 TrainingFootprint& TrainingFootprint::operator+=(const TrainingFootprint& o) {
   weight_bytes = SatAdd(weight_bytes, o.weight_bytes);
   activation_bytes = SatAdd(activation_bytes, o.activation_bytes);
+  delta_bytes = SatAdd(delta_bytes, o.delta_bytes);
   return *this;
 }
 
@@ -161,6 +162,34 @@ TrainingFootprint EstimateFrozenForwardFootprint(const SmfModel& model,
   return EstimateFootprintImpl(model, batch, /*sum_activations=*/false);
 }
 
+uint64_t EstimateLoraDeltaBytes(const SmfModel& model,
+                                std::span<const std::string> target_filters) {
+  // Classify every tensor name by how the op list consumes it.
+  std::unordered_map<std::string_view, bool> weight_only;  // name -> eligible
+  for (const SmfOp& op : model.ops) {
+    const bool matmul = op.kind == SmfOpKind::kMatMul && op.inputs.size() == 2;
+    for (size_t i = 0; i < op.inputs.size(); ++i) {
+      const bool as_weight = matmul && i == 1 && op.inputs[0] != op.inputs[1];
+      auto [it, fresh] = weight_only.try_emplace(op.inputs[i], as_weight);
+      if (!fresh) it->second = it->second && as_weight;
+    }
+  }
+  uint64_t bytes = 0;
+  for (const SmfTensor& t : model.tensors) {
+    if (!t.is_const || t.dims.size() != 2) continue;
+    auto it = weight_only.find(t.name);
+    if (it == weight_only.end() || !it->second) continue;
+    if (!target_filters.empty()) {
+      bool matched = false;
+      for (const std::string& f : target_filters)
+        if (t.name.find(f) != std::string::npos) matched = true;
+      if (!matched) continue;
+    }
+    bytes = SatAdd(bytes, t.byte_size);  // the delta is f32, like the file
+  }
+  return bytes;
+}
+
 uint64_t DetectLocalMemoryBytes() {
 #if defined(__APPLE__)
   uint64_t mem = 0;
@@ -185,7 +214,8 @@ std::expected<void, std::string> CheckTrainableLocally(
   return seeml::diag::tokenizing::IngressError(
       "model is too big to train locally: weights " +
       FormatMiB(footprint.weight_bytes) + " + activations " +
-      FormatMiB(footprint.activation_bytes) + " need at least " +
+      FormatMiB(footprint.activation_bytes) + " + merged LoRA deltas " +
+      FormatMiB(footprint.delta_bytes) + " need at least " +
       FormatMiB(need) + ", but the local memory budget is " +
       FormatMiB(budget));
 }

@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <expected>
+#include <span>
 #include <string>
 
 #include "source/language/model_format.h"
@@ -29,6 +30,12 @@ namespace seeml::update {
 struct TrainingFootprint {
   uint64_t weight_bytes = 0;      // frozen const tensors, one resident copy
   uint64_t activation_bytes = 0;  // forward activations at the given batch
+  // The merged LoRA deltas (E2, #81 — audit finding #8): one full-size f32
+  // image of every adapted weight, pinned in the arena above the training
+  // high-water mark so RunMerge can hand commit W + delta. With a
+  // quantized base they are 4x the weights they patch — the largest term
+  // the early gate used to leave to the final one.
+  uint64_t delta_bytes = 0;
 
   /// Saturating sum of the components.
   uint64_t total_bytes() const;
@@ -43,6 +50,15 @@ struct TrainingFootprint {
 /// estimate a lower bound.
 TrainingFootprint EstimateTrainingFootprint(const SmfModel& model,
                                             int64_t batch);
+
+/// f32 bytes of the delta segment LoRA will need for `model`: every constant
+/// tensor the grafter would adapt — consumed only as the weight (second)
+/// operand of two-input MatMuls, and named by one of `target_filters`
+/// (empty = all). The same eligibility rule as LoraGrafter, read off the
+/// SMF op list; a tensor it cannot classify contributes zero, keeping the
+/// estimate a lower bound.
+uint64_t EstimateLoraDeltaBytes(const SmfModel& model,
+                                std::span<const std::string> target_filters);
 
 /// The frozen-forward variant, for teacher models under distillation: no
 /// backward pass consumes the activations, so they die at their single

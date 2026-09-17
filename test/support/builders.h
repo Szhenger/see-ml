@@ -26,6 +26,8 @@ namespace seeml::testing {
 
 /// Reinterprets a float vector as its raw little-endian bytes (SMF blobs).
 std::vector<uint8_t> AsBytes(const std::vector<float>& v);
+/// The same bytes as an SMF tensor payload (update::SmfBytes).
+seeml::update::SmfBytes AsPayload(const std::vector<float>& v);
 
 /// `n` samples from N(0, std), deterministic in `seed`.
 std::vector<float> RandnVector(size_t n, uint64_t seed, float stddev = 1.0f);

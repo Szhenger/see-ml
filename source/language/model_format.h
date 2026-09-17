@@ -2,10 +2,24 @@
 #define SEEML_SOURCE_LANGUAGE_MODEL_FORMAT_H_
 
 #include <bit>
+#include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
+
+// Anonymous mappings for large tensor payloads (see DefaultInitAllocator):
+// POSIX hosts only; elsewhere payloads stay on the heap.
+#if defined(__unix__) || defined(__APPLE__)
+#define SEEML_PAYLOAD_MMAP 1
+#include <new>
+#include <sys/mman.h>
+#else
+#define SEEML_PAYLOAD_MMAP 0
+#endif
 
 // =============================================================================
 // SMF — SeeML Model Format: the on-disk contract and its in-memory form.
@@ -90,6 +104,66 @@ inline constexpr uint8_t kSmfOpKindMaxV1 = 2;
 inline constexpr uint8_t kSmfOpKindMaxV2 = 6;
 inline constexpr uint8_t kSmfOpKindMaxV3 = 10;
 
+/// The allocator of a tensor payload: std::allocator, except that growing
+/// the buffer default-initializes the new bytes instead of zeroing them. A
+/// payload is always sized and then overwritten whole (the reader's copy,
+/// the writer's callers), and at model scale the zero-fill std::vector
+/// performs first is a full-bandwidth pass over gigabytes that the very
+/// next statement overwrites (E2, #81). Sizing without it also lets the
+/// reader split one tensor's copy across threads. Explicit value
+/// construction — resize(n, 0), assign, an initializer list — is untouched.
+///
+/// Large payloads are their own anonymous mappings rather than heap blocks.
+/// Releasing a payload must actually return its pages — the consuming
+/// compile frees each weight as plan assembly packs it, to keep about one
+/// copy of the model resident — and a general-purpose heap does not promise
+/// that: macOS malloc parks freed large blocks in a reuse cache, still
+/// resident (measured: an 800 MB model compiled at a 3.1x peak with every
+/// payload already "freed"). munmap is unconditional. Fresh anonymous pages
+/// also arrive lazily, so a sized-but-unwritten payload costs nothing.
+template <typename T>
+struct DefaultInitAllocator : std::allocator<T> {
+  template <typename U>
+  struct rebind {
+    using other = DefaultInitAllocator<U>;
+  };
+  using std::allocator<T>::allocator;
+
+  static constexpr size_t kMapThresholdBytes = size_t{1} << 20;
+
+  T* allocate(size_t n) {
+#if SEEML_PAYLOAD_MMAP
+    if (n >= kMapThresholdBytes / sizeof(T)) {
+      void* p = ::mmap(nullptr, n * sizeof(T), PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANON, -1, 0);
+      if (p == MAP_FAILED) throw std::bad_alloc();
+      return static_cast<T*>(p);
+    }
+#endif
+    return std::allocator<T>::allocate(n);
+  }
+  void deallocate(T* p, size_t n) noexcept {
+#if SEEML_PAYLOAD_MMAP
+    if (n >= kMapThresholdBytes / sizeof(T)) {
+      ::munmap(p, n * sizeof(T));
+      return;
+    }
+#endif
+    std::allocator<T>::deallocate(p, n);
+  }
+  template <typename U>
+  void construct(U* p) noexcept(std::is_nothrow_default_constructible_v<U>) {
+    ::new (static_cast<void*>(p)) U;  // default-init: no write for a byte
+  }
+  template <typename U, typename... Args>
+  void construct(U* p, Args&&... args) {
+    ::new (static_cast<void*>(p)) U(std::forward<Args>(args)...);
+  }
+};
+
+/// A tensor payload: a byte vector that does not zero-fill on resize.
+using SmfBytes = std::vector<uint8_t, DefaultInitAllocator<uint8_t>>;
+
 struct SmfTensor {
   std::string name;
   std::vector<int64_t> dims;
@@ -99,7 +173,7 @@ struct SmfTensor {
   // Populated for constant tensors on load. The `{}` matters: designated
   // initializers all over the tests omit this field, and GCC's -Wextra
   // flags an omitted field as missing unless it has a default initializer.
-  std::vector<uint8_t> data{};
+  SmfBytes data{};
 };
 
 struct SmfOp {
