@@ -141,7 +141,7 @@ Note the order of operations: `(X@A)@B` costs `O(N·r·(K+M))`, whereas material
 
 Initialization is where the elegance shows. `A` is drawn from a Gaussian with standard deviation `1/√K` (mean 0, seeded deterministically per adapter as `seed + adapter_index`); `B` is **zeros**. Since `ΔW = (α/r)·A@B = 0` when `B = 0`, the grafted model at step 0 is *bit-identical* to the original. Training can only move it away from a known-good starting point. (The `1/√K` scale is the standard variance-preserving choice: a dot product of K terms, each with variance 1/K, has variance about 1.)
 
-One subtlety: a weight *tied* across several matmuls gets a separate adapter per site (with unique ids `w`, `w@1`, …), because each site may need a different correction.
+One subtlety: a weight *tied* across several matmuls gets **one** adapter pair, shared by every site. Per-site pairs would train fine and then commit wrongly: the file holds a single `W`, so commit would write `W + ΣΔᵢ` and every site would inherit every other site's correction. With a shared pair each site computes `xᵢ@(W + Δ)` during training, autodiff sums the pair's gradient across the sites (fan-out accumulation), the merge builder rejects a duplicate emit target outright, and the committed weight is exactly the function that was trained and gated. A weight consumed any other way than as a MatMul's right operand — an embedding table doubling as the lm-head, say — is not adapted at all, with a note, for the same reason: committing `W + Δ` would silently change the site that read it differently.
 
 ### Automatic differentiation: the chain rule, run in reverse, by a compiler
 
@@ -363,6 +363,18 @@ consumers of the compiler and the formats, not stages of compilation.
   segments, and (with `--instrs`) the decoded instruction streams.
 - **`export_model.py`** — the PyTorch exporter producing SMF models and
   SDS corpora; the accepted module set is listed in [usage.md](usage.md).
+- **The Python plane** — `pack_update.py` (the `.incbin` package
+  assembler), `autotune.py` (the offline kernel-policy tuner whose table
+  this compiler reads), `bench_compare.py` (the Tier A gate),
+  `frontier_exec.py` with `seeml_plan_probe.cc` (a second implementation of
+  the whole instruction set, compared against the runtime one instruction
+  at a time) and `certify_numerics.py` (the relaxed-reduction certificate).
+  They run on the build host and are described in
+  [tool/README.md](../tool/README.md). The division of labour is the
+  two-plane doctrine: the compiler, the runtime and every emitted package
+  are dependency-free C++; what the doctrine has no reason to constrain —
+  packaging, measurement, tuning, certification, reference execution — is
+  Python, and nothing Python ships on a device.
 
 ## Testing
 
