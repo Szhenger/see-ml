@@ -11,6 +11,52 @@ namespace up = seeml::update;
 
 namespace {
 
+/// Proves a kFusedMap micro-program (plan v13): 1..4 known stages,
+/// zero-terminated with nothing after the terminator; binary stages name
+/// operand slot 1 or 2 (recorded in `uses_slot`), scale stages immediate 0
+/// or 1, unary stages carry no argument; every immediate a scale names is
+/// finite and every one none names is zero.
+bool FusedProgramOk(uint64_t stages_word, uint64_t imm_word,
+                    bool uses_slot[3]) {
+  if ((stages_word >> 32) != 0) return false;
+  constexpr uint8_t kKnownBits = static_cast<uint8_t>(
+      up::kFusedStageKindMask |
+      (up::kFusedStageArgMask << up::kFusedStageArgShift) |
+      up::kFusedStageRunIsRight);
+  bool uses_imm[2] = {false, false};
+  size_t stages = 0;
+  for (; stages < up::kFusedMapMaxStages; ++stages) {
+    const auto stage = static_cast<uint8_t>(stages_word >> (8 * stages));
+    const up::FusedStage kind = up::FusedStageKind(stage);
+    if (kind == up::FusedStage::kEnd) {
+      if (stage != 0) return false;
+      break;
+    }
+    if ((stage & ~kKnownBits) != 0) return false;
+    const uint8_t arg = up::FusedStageArg(stage);
+    if (kind == up::FusedStage::kAdd || kind == up::FusedStage::kMul) {
+      if (arg != 1 && arg != 2) return false;
+      uses_slot[arg] = true;
+    } else if (kind == up::FusedStage::kScale) {
+      if (arg > 1 || (stage & up::kFusedStageRunIsRight)) return false;
+      uses_imm[arg] = true;
+    } else if (kind == up::FusedStage::kRelu ||
+               kind == up::FusedStage::kGelu ||
+               kind == up::FusedStage::kSilu) {
+      if ((stage & ~up::kFusedStageKindMask) != 0) return false;
+    } else {
+      return false;
+    }
+  }
+  if (stages == 0 || (stages_word >> (8 * stages)) != 0) return false;
+  for (int i = 0; i < 2; ++i) {
+    const uint32_t bits = static_cast<uint32_t>(imm_word >> (32 * i));
+    if (uses_imm[i] ? !std::isfinite(std::bit_cast<float>(bits)) : bits != 0)
+      return false;
+  }
+  return true;
+}
+
 std::expected<void, std::string> ValidateInstructionImpl(
     const up::UpdateInstruction& ins, uint64_t arena_size,
     uint64_t rodata_size, uint32_t plan_version,
@@ -143,6 +189,11 @@ std::expected<void, std::string> ValidateInstructionImpl(
     return diag::validating::Error(
         "accumulate opcode in a pre-v" +
         std::to_string(up::kSeeuGradAccumVersion) + " plan");
+  if (ins.opcode == static_cast<uint16_t>(up::OpCode::kFusedMap) &&
+      plan_version < up::kSeeuFusedMapVersion)
+    return diag::validating::Error(
+        "fused_map opcode in a pre-v" +
+        std::to_string(up::kSeeuFusedMapVersion) + " plan");
   if (ins.opcode == static_cast<uint16_t>(up::OpCode::kRopeTable) &&
       plan_version < up::kSeeuKernelBatchVersion)
     return diag::validating::Error(
@@ -364,6 +415,21 @@ std::expected<void, std::string> ValidateInstructionImpl(
             !ref_ok(ins.in[2], table, false))
           return fail();
       }
+      return disjoint();
+    }
+    case up::OpCode::kFusedMap: {
+      // The micro-program is proven like everything else (FusedProgramOk);
+      // then every operand slot a stage names must be present and count
+      // floats long, and every slot none names absent.
+      bool uses_slot[3] = {false, false, false};
+      if (!FusedProgramOk(d1, d2, uses_slot)) return fail();
+      if (!ref_ok(ins.in[0], d0, false)) return fail();
+      for (int slot = 1; slot <= 2; ++slot) {
+        if (uses_slot[slot] ? !ref_ok(ins.in[slot], d0, false)
+                            : ins.in[slot] != up::kNullRef)
+          return fail();
+      }
+      if (!ref_ok(ins.in[3], d0, true)) return fail();
       return disjoint();
     }
     case up::OpCode::kRopeTable: {

@@ -79,6 +79,40 @@ std::unique_ptr<Operation> Block::removeOp(Operation* op) {
     return owned;
 }
 
+std::vector<std::unique_ptr<Operation>> Block::removeOps(
+    const std::vector<Operation*>& dead) {
+    std::vector<std::unique_ptr<Operation>> removed;
+    if (dead.empty()) return removed;
+    std::unordered_set<const Operation*> doomed;
+    doomed.reserve(dead.size());
+    for (Operation* op : dead) {
+        assert(op->parentBlock() == this && "removeOps: foreign operation");
+#ifndef NDEBUG
+        for (const auto& res : op->results())
+            assert(res->hasNoUses() &&
+                   "removeOps: results are still in use — list consumers "
+                   "before the producers they read");
+#endif
+        for (size_t i = 0; i < op->numOperands(); ++i)
+            op->operand(i)->removeUser(op);
+        doomed.insert(op);
+    }
+    removed.reserve(doomed.size());
+    // One stable compaction: survivors keep their relative order.
+    auto keep = ops_.begin();
+    for (auto it = ops_.begin(); it != ops_.end(); ++it) {
+        if (doomed.contains(it->get())) {
+            (*it)->setParentBlock(nullptr);
+            removed.push_back(std::move(*it));
+        } else {
+            if (keep != it) *keep = std::move(*it);
+            ++keep;
+        }
+    }
+    ops_.erase(keep, ops_.end());
+    return removed;
+}
+
 std::expected<void, std::string> Block::verify() const {
     std::unordered_set<const Value*> defined;
     std::unordered_set<std::string_view> ids;

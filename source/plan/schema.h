@@ -82,7 +82,13 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // were kNullRef / zero in every earlier plan, so the header is unchanged
 // and the floor stays; the validator rejects all three below v12. Results
 // are bit-identical to the v11 programs they replace.
-inline constexpr uint32_t kSeeuVersion = 12;
+// v13: kFusedMap (E4, roadmap Phase 1b) — a chain of elementwise
+// instructions as one. Additive, one opcode, rejected below v13;
+// bit-identical to the sequence it replaces.
+inline constexpr uint32_t kSeeuVersion = 13;
+
+// The version that introduced kFusedMap.
+inline constexpr uint32_t kSeeuFusedMapVersion = 13;
 
 // The version that introduced kRopeTable, the RoPE table operand and the
 // fused clip word on the optimizer steps.

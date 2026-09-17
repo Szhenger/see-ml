@@ -274,6 +274,17 @@ std::expected<void, std::string> CpuBackend::Execute(
                  ins.out[1] & 0xFFFFFFFFu, BitsToF32(ins.out[2]),
                  ins.in[2] == up::kNullRef ? nullptr : ReadPtr(ins.in[2]));
       break;
+    case up::OpCode::kFusedMap: {
+      // in[1..2] are kNullRef when no stage names them; never dereferenced.
+      const float* others[3] = {
+          nullptr,
+          ins.in[1] == up::kNullRef ? nullptr : ReadPtr(ins.in[1]),
+          ins.in[2] == up::kNullRef ? nullptr : ReadPtr(ins.in[2])};
+      const float imm[2] = {BitsToF32(ins.out[2]), BitsToF32(ins.out[2] >> 32)};
+      k::FusedMap(ReadPtr(ins.in[0]), others, WritePtr(ins.in[3]), ins.out[0],
+                  ins.out[1], imm);
+      break;
+    }
     case up::OpCode::kRopeTable:
       k::RopeTable(WritePtr(ins.in[0]), ins.out[0] >> 32,
                    ins.out[0] & 0xFFFFFFFFu, BitsToF32(ins.out[1]));

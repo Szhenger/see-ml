@@ -17,9 +17,11 @@ It turns out the answer is a compiler.
   earlier Clangs don't define `__cpp_concepts >= 202002L`, so libstdc++'s
   `<expected>` header hides the template from them. CMake is supported
   but optional — `build/build.sh` drives a full build with `sh` alone.
-- **Model export only:** Python 3 with PyTorch and NumPy
-  (`tool/export_model.py`); `pip install -r tool/requirements.txt` installs
-  both.
+- **Build host, optional:** Python 3 — the Python plane. PyTorch and NumPy
+  for model export (`tool/export_model.py`; `pip install -r
+  tool/requirements.txt`), NumPy for the plan interpreter and numerics
+  certifier, nothing at all for the packer, tuner and bench gate. None of
+  it reaches a package.
 - **On-device:** nothing. The runtime is zero-dependency and vendored into
   every emitted package; the package builds with no access to this
   repository.

@@ -55,6 +55,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -87,8 +88,9 @@ void PrintUsage() {
                "  [--min-lr-factor F] [--quantize-base | --bf16-base]\n"
                "  [--steps N]\n"
                "  [--grad-accum G]\n"
-               "  [--no-fuse-epilogue] [--no-rope-table] [--no-fuse-clip]\n"
-               "  [--report out.json]\n"
+               "  [--no-fuse-epilogue] [--no-fuse-elementwise] [--no-rope-table]\n"
+               "  [--no-fuse-clip]\n"
+               "  [--report out.json] [--dump-sir out.txt]\n"
                "  [--kernel-policy table.json] [--target-host KEY]\n"
                "  [--gemm-tiles K,N]\n"
                "  [--no-embed] [--build] [--version]\n");
@@ -336,6 +338,10 @@ int main(int argc, char** argv) {
     return Fail("--quantize-base and --bf16-base are mutually exclusive "
                 "(one storage precision per weight)");
   config.fuse_epilogues = !args.Take("--no-fuse-epilogue");
+  // Debug: the final SIR, rendered only when a destination is named.
+  const auto dump_sir_path = args.TakeValue("--dump-sir");
+  config.dump_sir = dump_sir_path.has_value();
+  config.fuse_elementwise = !args.Take("--no-fuse-elementwise");
   config.rope_table = !args.Take("--no-rope-table");
   config.fuse_clip = !args.Take("--no-fuse-clip");
 
@@ -438,6 +444,13 @@ int main(int argc, char** argv) {
                  " python3 tool/pack_update.py %s --build\n",
                  out_dir->c_str());
 
+  if (dump_sir_path) {
+    std::ofstream f(*dump_sir_path, std::ios::binary | std::ios::trunc);
+    f << compiled->sir_dump;
+    f.close();
+    if (f.fail()) return Fail("short write to '" + *dump_sir_path + "'");
+  }
+
   // --- Machine-readable report -------------------------------------------------
   if (report_path) {
     std::FILE* f = std::fopen(report_path->c_str(), "w");
@@ -486,6 +499,15 @@ int main(int argc, char** argv) {
                    ", \"scale\": %g, \"quant_scale\": %g, \"bf16\": %s}",
                    i ? "," : "", JsonEscape(a.weight_name).c_str(), a.k, a.m,
                    a.r, a.scale, a.quant_scale, a.bf16 ? "true" : "false");
+    }
+    // Every pass and driver phase, in order, with its wall time: the
+    // measurement behind any compile-side performance claim (E5, #84).
+    std::fprintf(f, "\n  ],\n  \"passes\": [");
+    for (size_t i = 0; i < compiled->pass_timings.size(); ++i) {
+      const auto& t = compiled->pass_timings[i];
+      std::fprintf(f, "%s\n    {\"name\": \"%s\", \"ops\": %zu, \"ms\": %.3f}",
+                   i ? "," : "", JsonEscape(t.name).c_str(), t.ops_after,
+                   t.ms);
     }
     std::fprintf(f, "\n  ]\n}\n");
     // ferror catches any failed fprintf above; fclose catches the final

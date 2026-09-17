@@ -72,12 +72,19 @@ which uses POSIX `${VAR-default}` expansion for the tile-flag override).
 
 ### Python 3
 
-Build host only, in two dependency tiers. `tool/export_model.py` (model
-export) imports `torch`/`numpy` function-locally so it byte-compiles
-without them; `tool/pack_update.py` (the package assembler),
-`tool/autotune.py` (the offline kernel-policy tuner) and
-`tool/bench_compare.py` (the bench gate) are standard-library only and run
-under a bare interpreter. The Python plane is developed and gated on the
+Build host only — the **Python plane** of the two-plane design
+(`docs/next-project/README.md`): the emitted package and the runtime are
+dependency-free C++ under the full doctrine, and the build host carries
+Python for what that doctrine has no reason to constrain — export,
+packaging, measurement, autotuning, certification, reference execution.
+Three dependency tiers. Standard library only, under a bare interpreter:
+`tool/pack_update.py` (the package assembler), `tool/autotune.py` (the
+offline kernel-policy tuner), `tool/bench_compare.py` (the bench gate) and
+`certify_numerics.py verify`. NumPy: `tool/frontier_exec.py` (the plan
+interpreter and differential oracle), `tool/certify_numerics.py certify`,
+and `export_model.py --hf` / `--demo-decoder`. torch (and optionally MLX):
+`tool/export_model.py`'s `nn.Module` path and the frontier backends, all
+imported function-locally so every tool byte-compiles without them. The Python plane is developed and gated on the
 pinned stack in `tool/requirements-pinned.txt` — **CPython 3.14.7, torch
 2.14.0, NumPy 2.5.3** — and stays runnable down to the floors in
 `tool/requirements.txt` (Python 3.9, NumPy 1.17, torch 1.7): no 3.10+
@@ -101,7 +108,7 @@ Apple framework header. There is no vendored third-party code, no
 machine that has never seen this repository, so the runtime's dependency
 surface is the C++23 standard library plus POSIX file I/O.
 
-### Python: two packages, export-only
+### Python: two required packages, build host only
 
 `tool/requirements.txt` states the floors: `torch>=1.7` (bound set by
 `nn.SiLU`) and `numpy>=1.17` (bound set by `np.random.Generator`).
@@ -126,7 +133,12 @@ digests (`test/tool/demo_digests.json`).
 | `std::aligned_alloc(64, …)` | `runtime/engine/update_engine.cc` | The single arena allocation. (Unavailable on MSVC — one reason Windows is untested.) |
 | `isatty(1)`, `localtime_r`/`localtime_s` | test runner, logger | Color gating, timestamps. |
 
-Notably absent: no `mmap` (plans are read with `std::ifstream`); ISA detection
+`mmap` appears on the build host only: the compiler maps the source model
+read-only (`compiler/frontend/ingressor/model_reader.cc`) and gives large
+tensor payloads their own anonymous mappings (`source/language/model_format.h`)
+so that releasing one really returns its pages; both fall back to the heap
+off POSIX. The device runtime maps nothing — a plan file is read whole into
+one heap buffer, or borrowed from the binary image. ISA detection
 is compile-time (`__aarch64__`, `__AVX2__`, `__AVX512F__`, `__FMA__` macros),
 not runtime CPUID.
 

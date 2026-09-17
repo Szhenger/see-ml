@@ -20,6 +20,15 @@
 namespace seeml::update {
 
 /// One named SIR-to-SIR pass: mutates the block or reports why it cannot.
+/// One completed pass: what the compile report and every compile-side
+/// performance claim are measured with (E5, #84). `ms` covers the pass and
+/// its post-pass verify.
+struct PassTiming {
+  std::string name;
+  size_t ops_after = 0;
+  double ms = 0.0;
+};
+
 struct Pass {
   std::string name;
   std::function<std::expected<void, std::string>(seeml::sir::Block&)> run;
@@ -38,7 +47,11 @@ class PassManager {
   /// is returned naming the offending pass.
   [[nodiscard]] std::expected<void, std::string> Run(seeml::sir::Block& block);
 
+  /// The passes that completed, in order, with their wall time.
+  const std::vector<PassTiming>& timings() const { return timings_; }
+
  private:
+  std::vector<PassTiming> timings_;
   std::vector<Pass> passes_;
 };
 

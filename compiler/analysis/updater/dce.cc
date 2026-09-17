@@ -1,5 +1,6 @@
 #include "compiler/analysis/updater/dce.h"
 
+#include <unordered_map>
 #include <vector>
 
 namespace seeml::update {
@@ -25,24 +26,35 @@ std::expected<size_t, std::string> DeadCodeElimination::Run(
   ops.reserve(block.numOps());
   block.walk([&](sir::Operation* op) { ops.push_back(op); });
 
-  size_t removed = 0;
-  // Backward sweep: removing a dead consumer drops its operands' use-list
-  // entries first, so a chain of dead ops disappears in one pass and
-  // removeOp's no-remaining-uses contract holds at every step.
+  // Mark, then compact once (E5, #84). The backward sweep decides
+  // liveness on a private use count — a dead consumer releases its
+  // operands' counts, so a whole dead chain is found in one pass — and the
+  // doomed ops leave the block together (Block::removeOps). Removing them
+  // one removeOp at a time was O(removed x ops): free while DCE only swept
+  // fusion orphans, a quadratic cliff the first time a pass dead-codes a
+  // real fraction of the graph.
+  std::unordered_map<const sir::Value*, size_t> uses;
+  auto uses_of = [&](const sir::Value* v) -> size_t& {
+    auto [it, fresh] = uses.try_emplace(v, 0);
+    if (fresh) it->second = v->users().size();
+    return it->second;
+  };
+  std::vector<sir::Operation*> dead;  // consumers before producers
   for (auto it = ops.rbegin(); it != ops.rend(); ++it) {
     sir::Operation* op = *it;
     if (IsEffectful(*op)) continue;
     bool live = false;
     for (const auto& r : op->results())
-      if (!r->hasNoUses() || roots.contains(r.get())) {
+      if (uses_of(r.get()) != 0 || roots.contains(r.get())) {
         live = true;
         break;
       }
     if (live) continue;
-    block.removeOp(op);
-    ++removed;
+    for (size_t i = 0; i < op->numOperands(); ++i) --uses_of(op->operand(i));
+    dead.push_back(op);
   }
-  return removed;
+  block.removeOps(dead);
+  return dead.size();
 }
 
 }  // namespace seeml::update

@@ -14,9 +14,14 @@
 // family (gemm / elementwise / activation / normalization / loss /
 // optimizer), all sharing the decomposition policy of kernel_policy.h.
 //
-// These are the portable reference implementations; architecture-tuned
-// variants (AVX-512 / NEON, informed by compiler/backend/architecture/) are
-// swapped in at link time. Every kernel is allocation-free and operates on
+// These are the only implementations: portable C++ with no intrinsics and
+// no per-ISA variants anywhere in the tree — the compiler's vectorizer
+// targets whatever the package is built for, and the blocked cores are
+// written (register blocks, packed panels, fixed reduction lanes) so that
+// it can. A hand-written SIMD variant would be a new translation unit
+// behind these same signatures; none exists, and docs/benchmarks.md
+// (Tier B, the GEMM row) records why none is currently worth writing.
+// Every kernel is allocation-free and operates on
 // caller-provided arena/rodata pointers — the zero-allocation contract of
 // the update runtime.
 //
@@ -94,6 +99,12 @@ void GeluBwd(const float* dy, const float* x, float* dx, size_t n);
 void SiluFwd(const float* x, float* out, size_t n);   // x * sigmoid(x)
 void SiluBwd(const float* dy, const float* x, float* dx, size_t n);
 void Scale(const float* x, float* out, float alpha, size_t n);
+// A fused elementwise chain (plan v13): `stages` is kFusedMap's out[1]
+// word, `others[1..2]` the operand slots binary stages name (others[0] is
+// unused), `imm` the two scale immediates. Bit-identical to running the
+// standalone kernels in sequence.
+void FusedMap(const float* x, const float* const others[3], float* out,
+              size_t n, uint64_t stages, const float imm[2]);
 void ReduceRows(const float* dy, float* db, size_t rows, size_t cols);
 
 // --- LayerNorm over the last dim of x[N,D], affine gamma/beta[D] --------------

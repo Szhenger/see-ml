@@ -63,8 +63,26 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
     UpdateInstruction ins;
     auto set = [&](OpCode oc) { ins.opcode = static_cast<uint16_t>(oc); };
 
-    if (m == "sc_high.matmul" || m == "sc_low.matmul_nt" ||
-        m == "sc_low.matmul_tn") {
+    if (const auto stages = op->getAttrAs<int64_t>("fused_stages")) {
+      // An elementwise chain folded into its tail (ElementwiseChainFuser,
+      // plan v13): operands are [x, other tensors...], whatever the tail's
+      // own mnemonic was.
+      if (op->numOperands() < 1 || op->numOperands() > 3) {
+        error = "fused elementwise chain with " +
+                std::to_string(op->numOperands()) + " operands";
+        break;
+      }
+      set(OpCode::kFusedMap);
+      for (size_t i = 0; i < op->numOperands(); ++i)
+        ins.in[i] = ref(op->operand(i));
+      ins.in[3] = ref(op->result(0));
+      ins.out[0] = vol(op->result(0));
+      ins.out[1] = static_cast<uint64_t>(*stages);
+      ins.out[2] =
+          F32Bits(op->getAttrAs<float>("fused_imm0").value_or(0.0f)) |
+          (F32Bits(op->getAttrAs<float>("fused_imm1").value_or(0.0f)) << 32);
+    } else if (m == "sc_high.matmul" || m == "sc_low.matmul_nt" ||
+               m == "sc_low.matmul_tn") {
       const sir::Value* a = op->operand(0);
       const sir::Value* c = op->result(0);
       // GEMMs whose B operand is a quantized frozen weight take the q8
