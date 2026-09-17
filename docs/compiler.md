@@ -311,7 +311,7 @@ Two emitters close out the backend. The plan itself is assembled by the driver (
 - **The decimal TU streams** in 16 MiB windows of parallel-rendered chunks, character-identical to the concatenated form.
 - **The step-0 memory gate counts the merged deltas** (`EstimateLoraDeltaBytes`, the grafter's eligibility rule read off the SMF op list): they are full-size f32 whatever the base is stored as — 4× the weights under `--quantize-base` — and used to be left for the final gate to discover after all the work.
 
-Measured on an 800 MB decoder (Apple M5, peak memory footprint ÷ model size): `--no-embed` 4.54× → **1.20×**, `--quantize-base` 2.93× → **1.20×**, with the decimal TU 10.34× → **1.20×**; wall time 2.8 → 1.5 s and 11.9 → 7.9 s; every `.seeu`, embedded TU and `build.sh` byte-identical across a ten-plan fixture set (every loss, storage precision, teacher and accumulation form).
+Measured on an 800 MB decoder (Apple M5, peak memory footprint ÷ model size): `--no-embed` 4.54× → **1.20×**, `--quantize-base` 2.93× → **1.20×**, with the decimal TU 10.34× → **1.20×**; wall time 2.8 → 1.2 s, 0.9 → 0.6 s and 11.9 → 7.6 s; every `.seeu`, embedded TU and `build.sh` byte-identical across a ten-plan fixture set (every loss, storage precision, teacher and accumulation form).
 
 `kernel_emitter.cc` generates Metal GEMM kernel *source* (forward, both backward transposes, and the merge's scaled accumulate) from a `GpuTiling` clamped out of the host tiling into `{8, 16, 24, 32}` per dimension. Each kernel stages A- and B-tiles cooperatively into threadgroup memory, barriers, and accumulates with `fma` — the GPU expression of exactly the same blocking idea as above. It is text generation only, compiled by whoever integrates it.
 
