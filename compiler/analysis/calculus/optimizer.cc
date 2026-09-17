@@ -46,13 +46,17 @@ std::expected<void, std::string> OptimizerSynthesizer::Run(
     sir::Value* g = accumulate ? accs[i] : ordered[i].second;
     // Per-tensor L2 clipping precedes the step: one bad batch must not be
     // able to blow up the parameters (or poison AdamW's moment state).
-    if (clip_norm_ > 0.0f) {
+    // Fused (v12) it rides the step op: the step consumes the clipped
+    // gradient without a separate pass rewriting it in place.
+    const bool fused = fuse_clip_ && clip_norm_ > 0.0f;
+    if (clip_norm_ > 0.0f && !fused) {
       sir::Operation* clip = block.appendOp("sc_low.clip_norm");
       clip->setAttribute("max_norm", clip_norm_);
       clip->addOperand(g);
     }
     if (kind_ == OptimizerKind::kSgd) {
       sir::Operation* step = block.appendOp("sc_low.sgd_step");
+      if (fused) step->setAttribute("clip_norm", clip_norm_);
       step->addOperand(p);
       step->addOperand(g);
       if (accumulate) block.appendOp("sc_low.zero")->addOperand(g);
@@ -73,6 +77,7 @@ std::expected<void, std::string> OptimizerSynthesizer::Run(
                                     sir::DataType::F32, p->shape());
 
     sir::Operation* step = block.appendOp("sc_low.adamw_step");
+    if (fused) step->setAttribute("clip_norm", clip_norm_);
     step->addOperand(p);
     step->addOperand(g);
     step->addOperand(m);

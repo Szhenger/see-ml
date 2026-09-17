@@ -62,12 +62,25 @@ void ReduceRows(const float* dy, float* db, size_t rows, size_t cols) {
   // Partitioned over db's columns: each chunk owns a column slice and walks
   // the rows in order, so per-column accumulation order — and therefore the
   // result — is bit-identical to the serial loop.
+  //
+  // The sums accumulate in a chunk-local tile and reach db once, when the
+  // tile is done (E3, #82). Accumulating in db itself made every row a
+  // read-modify-write of the slice's boundary cache lines, which the
+  // neighbouring chunk's thread was rewriting at the same cadence — false
+  // sharing once per row. A column's additions are the same floats in the
+  // same order whether the running sum lives in db or on this stack, so
+  // the tile changes memory traffic, never bits.
+  constexpr size_t kTile = 256;  // 1 KiB of L1, and no allocation
   up::ParallelFor(cols, RowGrain(rows, kGrainCheap),
                   [&](size_t c0, size_t c1, size_t) {
-                    std::memset(db + c0, 0, (c1 - c0) * sizeof(float));
-                    for (size_t r = 0; r < rows; ++r) {
-                      const float* SEEML_RESTRICT row = dy + r * cols;
-                      for (size_t c = c0; c < c1; ++c) db[c] += row[c];
+                    for (size_t t0 = c0; t0 < c1; t0 += kTile) {
+                      const size_t width = MinZ(kTile, c1 - t0);
+                      float acc[kTile] = {};
+                      for (size_t r = 0; r < rows; ++r) {
+                        const float* SEEML_RESTRICT row = dy + r * cols + t0;
+                        for (size_t c = 0; c < width; ++c) acc[c] += row[c];
+                      }
+                      std::memcpy(db + t0, acc, width * sizeof(float));
                     }
                   });
 }

@@ -38,6 +38,7 @@
 #include "runtime/engine/update_engine.h"
 #include "compiler/frontend/ingressor/model_reader.h"
 #include "compiler/frontend/ingressor/model_writer.h"
+#include "source/parallel/parallel_for.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 #include "test/support/scoped_temp_dir.h"
@@ -1000,6 +1001,99 @@ TEST(UpdateSystem, NonFiniteLossAbortsTheUpdate) {
       Dataset data, Dataset::FromMemory(std::move(inputs), std::move(labels),
                                         64, in_dim, 1, 0));
   EXPECT_ERROR_CONTAINS(engine.Train(data, 50, Quiet()), "non-finite");
+}
+
+// =============================================================================
+// The bitwise-safe kernel batch (E3, #82): RoPE angle table, fused clip
+// =============================================================================
+
+TEST(UpdateSystem, KernelBatchChangesNoTrainingBits) {
+  // Plan v12's two compiler-visible items, each switchable so this can be
+  // said exactly: with or without the hoisted RoPE table, with or without
+  // the clip folded into the optimizer step, at one thread or eight, under
+  // accumulation or not — the same losses, the same validation loss and
+  // the same persistent segment (adapters, AdamW moments, accumulators),
+  // byte for byte.
+  const int64_t vocab = 16, dim = 8, heads = 2, seq = 4, ffn = 16, batch = 16;
+  SmfModel model =
+      seeml::testing::MakeTinyTokenDecoder(vocab, dim, heads, seq, ffn, 41);
+  for (const uint32_t accum : {1u, 2u}) {
+    std::vector<float> want_curve;
+    std::vector<uint8_t> want_state;
+    float want_val = 0.0f;
+    for (int variant = 0; variant < 8; ++variant) {
+      UpdateConfig config = BaseConfig(batch);
+      config.optimizer.lr = 5e-3f;
+      config.optimizer.kind = OptimizerKind::kAdamW;
+      config.optimizer.clip_norm = 0.05f;  // small enough to clip every step
+      config.grad_accum_steps = accum;
+      config.rope_table = (variant & 1) != 0;
+      config.fuse_clip = (variant & 2) != 0;
+      seeml::update::SetParallelThreadCount((variant & 4) ? 8 : 1);
+      ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                           UpdateCompiler(config).Compile(model));
+      const PlanHeader h = HeaderOf(compiled);
+      UpdateEngine engine;
+      ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(),
+                                      compiled.plan.size()));
+      ASSERT_OK_AND_ASSIGN(Dataset data,
+                           seeml::testing::MakeTokenCorpus(128, 4, vocab, 43));
+      data.EnableShuffle(9);
+      TrainOptions options = Quiet();
+      options.record_loss_curve = true;
+      ASSERT_OK_AND_ASSIGN(auto report, engine.Train(data, 25, options));
+      ASSERT_OK_AND_ASSIGN(float val, engine.Evaluate(data));
+      std::vector<uint8_t> state(engine.arena(),
+                                 engine.arena() + h.persistent_size);
+      if (variant == 0) {
+        want_curve = report.loss_curve;
+        want_state = state;
+        want_val = val;
+        continue;
+      }
+      EXPECT_EQ(val, want_val);
+      ASSERT_EQ(report.loss_curve.size(), want_curve.size());
+      for (size_t i = 0; i < want_curve.size(); ++i)
+        EXPECT_EQ(report.loss_curve[i], want_curve[i]);
+      EXPECT_TRUE(state == want_state);
+    }
+  }
+  seeml::update::SetParallelThreadCount(0);
+}
+
+TEST(UpdateSystem, ANonFiniteGradientNormAbortsTheStep) {
+  // The fused clip is the one kernel that can refuse (E3): an overflowed
+  // gradient used to be scaled by 0 * inf = NaN into the adapters and the
+  // AdamW moments, surfacing only as the NEXT step's non-finite loss —
+  // after a checkpoint could have persisted the poison.
+  const int64_t in_dim = 4, batch = 8;
+  SmfModel model = MakeMlp(in_dim, 8, 3, 61);
+  UpdateConfig config = BaseConfig(batch);
+  config.optimizer.clip_norm = 1.0f;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+  const PlanHeader h = HeaderOf(compiled);
+  // Inputs near FLT_MAX: finite logits are impossible, so the backward
+  // pass hands the step a gradient whose norm is not finite.
+  std::vector<float> inputs(64 * in_dim, 3e38f);
+  std::vector<uint8_t> labels(64 * sizeof(int32_t), 0);
+  ASSERT_OK_AND_ASSIGN(
+      Dataset data, Dataset::FromMemory(std::move(inputs), std::move(labels),
+                                        64, in_dim, 1, 0));
+  auto trained = engine.Train(data, 5, Quiet());
+  ASSERT_FALSE(trained.has_value());
+  const bool named = trained.error().find("not finite") != std::string::npos ||
+                     trained.error().find("non-finite") != std::string::npos;
+  EXPECT_TRUE(named);
+  // Whichever guard fired first, no tensor stepped on the poison: tensors
+  // whose own norm was finite may have stepped before the refusal (a
+  // failed Train ends the engine's usable state, and checkpoints are only
+  // written after a whole step), but nothing persistent is non-finite.
+  const auto* state = reinterpret_cast<const float*>(engine.arena());
+  for (uint64_t i = 0; i < h.persistent_size / sizeof(float); ++i)
+    ASSERT_TRUE(std::isfinite(state[i]));
 }
 
 }  // namespace

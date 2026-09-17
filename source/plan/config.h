@@ -82,6 +82,13 @@ struct UpdateConfig {
   // exposed so a fused and an unfused compilation of the same model can be
   // compared bit-for-bit.
   bool fuse_epilogues = true;
+  // The bitwise-safe kernel batch (E3, plan v12), each exposed for the same
+  // reason: so a compilation with and without it can be compared
+  // bit-for-bit. rope_table hoists the RoPE angles into one device-built
+  // table per geometry; fuse_clip folds the per-tensor clip into the
+  // optimizer step, removing a full read+write pass over every gradient.
+  bool rope_table = true;
+  bool fuse_clip = true;
   // The CPU blocked-GEMM cache tiles written into the plan header (v11).
   // 0 = the runtime's compiled-in default for that dimension. A throughput
   // knob only — no result bit depends on it — decided on the build host

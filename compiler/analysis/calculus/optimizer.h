@@ -18,7 +18,9 @@
 // The synthesizer shapes the program; it does not carry hyperparameters.
 // It consumes exactly the two spec fields that change the program's
 // structure — the optimizer kind (which step op, what moment state) and
-// clip_norm (whether a clip op precedes the steps) — so the constructor
+// clip_norm (whether the steps clip: folded into the step op as its
+// "clip_norm" attribute (plan v12), or, with fuse_clip false, as the
+// standalone clip op that preceded them through v11) — so the constructor
 // takes exactly those. Numeric hyperparameters (lr, betas, eps, weight
 // decay, the LR schedule) are a PlanHeader concern: the runtime reads them
 // from the header at dispatch, and baking them here as well would create a
@@ -37,11 +39,13 @@ namespace seeml::update {
 class OptimizerSynthesizer {
  public:
   OptimizerSynthesizer(OptimizerKind kind, float clip_norm,
-                       uint32_t grad_accum_steps = 1, bool emit_step = true)
+                       uint32_t grad_accum_steps = 1, bool emit_step = true,
+                       bool fuse_clip = true)
       : kind_(kind),
         clip_norm_(clip_norm),
         grad_accum_steps_(grad_accum_steps),
-        emit_step_(emit_step) {}
+        emit_step_(emit_step),
+        fuse_clip_(fuse_clip) {}
 
   [[nodiscard]] std::expected<void, std::string> Run(
       seeml::sir::Block& block,
@@ -53,6 +57,7 @@ class OptimizerSynthesizer {
   float clip_norm_;
   uint32_t grad_accum_steps_;
   bool emit_step_;
+  bool fuse_clip_;
 };
 
 }  // namespace seeml::update

@@ -121,10 +121,15 @@ void RmsNormBwd(const float* dy, const float* x, const float* gamma,
 // Rotary position embedding on interleaved pairs (2c, 2c+1) within each
 // head; angle(s, c) = s * base^(-2c/d), d even. `backward` rotates by the
 // negated angle — the exact transpose of the forward rotation.
+// `table` (plan v12) is a RopeTable result for the same (S, d, base), or
+// nullptr to compute the angles in place; both give identical bits.
 void RopeFwd(const float* x, float* y, size_t B, size_t S, size_t H, size_t d,
-             float base);
+             float base, const float* table = nullptr);
 void RopeBwd(const float* dy, float* dx, size_t B, size_t S, size_t H,
-             size_t d, float base);
+             size_t d, float base, const float* table = nullptr);
+// table[(s * (d/2) + c) * 2 + {0, 1}] = cos, sin of s * base^(-2c/d), by
+// the recurrence above.
+void RopeTable(float* table, size_t S, size_t d, float base);
 
 // Causal scaled-dot-product attention forward: per (b, h),
 //   P = softmax_rows(mask(Q K^T / sqrt(d))),  O = P V
@@ -184,10 +189,17 @@ void KLDistillBwd(const float* p_s, const float* p_t, const float* seed,
 void ClipNorm(float* g, size_t n, float max_norm);
 
 // --- Optimizers (in-place) ---------------------------------------------------
-void SgdStep(float* p, const float* g, size_t n, float lr, float weight_decay);
-void AdamWStep(float* p, const float* g, float* m, float* v, size_t n,
-               float lr, float beta1, float beta2, float eps,
-               float weight_decay, uint64_t step);
+// `clip_norm` > 0 (plan v12) folds ClipNorm into the step: it consumes
+// g * min(1, clip_norm / ||g||_2) — the exact floats ClipNorm would have
+// stored — and never writes g. Returns false, touching nothing, when that
+// norm is not finite: the gradient is already poisoned, and stepping on it
+// would poison the parameters and AdamW's moments with it.
+[[nodiscard]] bool SgdStep(float* p, const float* g, size_t n, float lr,
+                           float weight_decay, float clip_norm = 0.0f);
+[[nodiscard]] bool AdamWStep(float* p, const float* g, float* m, float* v,
+                             size_t n, float lr, float beta1, float beta2,
+                             float eps, float weight_decay, uint64_t step,
+                             float clip_norm = 0.0f);
 
 // --- Gradient accumulation (plan v9): dst += src, in place -------------------
 void Accumulate(float* dst, const float* src, size_t n);

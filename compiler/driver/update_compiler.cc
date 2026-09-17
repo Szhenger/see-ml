@@ -236,6 +236,21 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
              adapters = std::move(*grafted);
              return {};
            });
+    // The RoPE angle table (E3, plan v12): before the snapshot, so the
+    // eval program builds and reads it too, and before autodiff, which
+    // hands the same table to every backward rotation.
+    if (config_.rope_table)
+      pm.Add("rope-table",
+             [](sir::Block& b) -> std::expected<void, std::string> {
+               auto tables = RopeTableHoister().Run(b);
+               if (!tables) return std::unexpected(tables.error());
+               if (*tables != 0)
+                 seeml::diag::Note(generating::kDriver,
+                                   "hoisted the RoPE angles into " +
+                                       std::to_string(*tables) +
+                                       " table(s)");
+               return {};
+             });
     if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
   }
 
@@ -278,7 +293,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
       pm.Add("optimizer", [&](sir::Block& b) {
         return OptimizerSynthesizer(config_.optimizer.kind,
                                     config_.optimizer.clip_norm, accum,
-                                    config_.emit_optimizer)
+                                    config_.emit_optimizer, config_.fuse_clip)
             .Run(b, param_grads);
       });
     if (auto ok = pm.Run(block); !ok) return std::unexpected(ok.error());
@@ -427,6 +442,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   if (accum > 1 && config_.emit_optimizer) {
     auto is_step = [](const UpdateInstruction& ins) {
       const auto op = static_cast<OpCode>(ins.opcode);
+      // (kClipNorm precedes the step only with fuse_clip off.)
       return op == OpCode::kClipNorm || op == OpCode::kSgdStep ||
              op == OpCode::kAdamWStep;
     };

@@ -84,7 +84,16 @@ SITES = {
     28: "clip_norm", 31: "rms_norm.fwd", 32: "rms_norm.bwd",
     35: "attn.fwd", 36: "attn.dp", 38: "softmax_rows.bwd",
 }
+# The optimizer steps reduce only when they carry a fused clip (plan v12,
+# threshold bits in out[1]): then the gradient norm is theirs.
+FUSED_CLIP_SITES = {17: "sgd.step", 18: "adamw.step"}
+SITES.update(FUSED_CLIP_SITES)
 assert all(fx.OPCODES[k] == v for k, v in SITES.items())
+
+
+def is_site(ins):
+    return ins.opcode in SITES and (ins.opcode not in FUSED_CLIP_SITES or
+                                    ins.out[1] != 0)
 
 
 def gamma(n):
@@ -184,7 +193,7 @@ class RelaxedExecutor(fx.Executor):
     def execute(self, section, scalars=None, on_instruction=None):
         scalars = scalars or self.step_scalars()
         for index, ins in enumerate(self.plan.sections[section]):
-            x = self.lane if ins.opcode in SITES else self.x
+            x = self.lane if is_site(ins) else self.x
             fx.INTERPRETER[ins.opcode](self.mem, x, ins, scalars)
             if on_instruction:
                 on_instruction(index, ins)
@@ -203,7 +212,7 @@ class LockstepExecutor(fx.Executor):
         scalars = scalars or self.step_scalars()
         for ins in self.plan.sections[section]:
             op = fx.INTERPRETER[ins.opcode]
-            if ins.opcode not in SITES:
+            if not is_site(ins):
                 op(self.mem, self.x, ins, scalars)
                 continue
             dry = DryMemory(self.mem)

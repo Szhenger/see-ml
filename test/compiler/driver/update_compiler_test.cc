@@ -263,8 +263,13 @@ TEST(UpdateCompiler, GradientAccumulationSplitsTheStream) {
   std::vector<UpdateInstruction> step(ha.step_instr_count);
   std::memcpy(step.data(), accum.plan.data() + ha.step_instr_offset,
               step.size() * sizeof(UpdateInstruction));
-  EXPECT_EQ(CountOpcode(step, OpCode::kClipNorm), trainables);
+  // The clip rides the step (plan v12): no standalone pass over the
+  // accumulator, its threshold in every step's out[1].
+  EXPECT_EQ(CountOpcode(step, OpCode::kClipNorm), 0u);
   EXPECT_EQ(CountOpcode(step, OpCode::kAdamWStep), trainables);
+  for (const auto& ins : step)
+    if (ins.opcode == static_cast<uint16_t>(OpCode::kAdamWStep))
+      EXPECT_EQ(std::bit_cast<float>(static_cast<uint32_t>(ins.out[1])), 1.0f);
   EXPECT_EQ(CountOpcode(step, OpCode::kFill), trainables);  // the zeroes
   EXPECT_EQ(CountOpcode(step, OpCode::kAccumulate), 0u);
   // The seed carries 1/G: exactly one fill of 0.25 in the grad program.
@@ -286,28 +291,38 @@ TEST(UpdateCompiler, GradientAccumulationSplitsTheStream) {
 }
 
 TEST(UpdateCompiler, GradientAccumulationSplitsAnSgdStream) {
-  // SGD has no moments: per trainable the step program is clip + step +
-  // zero, and the grad program's folds precede the first clip.
+  // SGD has no moments: per trainable the step program is step + zero with
+  // the clip folded into the step (plan v12) — or, with fuse_clip off, the
+  // v11 shape clip + step + zero — and the grad program's folds precede it.
   SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 52);
   UpdateConfig config = BaseConfig(kBatch);
   config.optimizer.kind = OptimizerKind::kSgd;
   config.optimizer.clip_norm = 0.5f;
   config.grad_accum_steps = 2;
-  ASSERT_OK_AND_ASSIGN(CompiledUpdate c, UpdateCompiler(config).Compile(model));
-  const PlanHeader h = HeaderOf(c);
-  const size_t trainables = 2 * c.adapters.size();
-  std::vector<UpdateInstruction> step(h.step_instr_count);
-  std::memcpy(step.data(), c.plan.data() + h.step_instr_offset,
-              step.size() * sizeof(UpdateInstruction));
-  EXPECT_EQ(step.size(), 3 * trainables);
-  EXPECT_EQ(CountOpcode(step, OpCode::kClipNorm), trainables);
-  EXPECT_EQ(CountOpcode(step, OpCode::kSgdStep), trainables);
-  EXPECT_EQ(CountOpcode(step, OpCode::kFill), trainables);
-  EXPECT_EQ(static_cast<OpCode>(step[0].opcode), OpCode::kClipNorm);
-  const auto grad = TrainProgramOf(c);
-  EXPECT_EQ(CountOpcode(grad, OpCode::kAccumulate), trainables);
-  EXPECT_EQ(CountOpcode(grad, OpCode::kSgdStep), 0u);
-  EXPECT_EQ(CountOpcode(grad, OpCode::kClipNorm), 0u);
+  for (const bool fuse : {true, false}) {
+    config.fuse_clip = fuse;
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate c,
+                         UpdateCompiler(config).Compile(model));
+    const PlanHeader h = HeaderOf(c);
+    const size_t trainables = 2 * c.adapters.size();
+    std::vector<UpdateInstruction> step(h.step_instr_count);
+    std::memcpy(step.data(), c.plan.data() + h.step_instr_offset,
+                step.size() * sizeof(UpdateInstruction));
+    EXPECT_EQ(step.size(), (fuse ? 2 : 3) * trainables);
+    EXPECT_EQ(CountOpcode(step, OpCode::kClipNorm), fuse ? 0u : trainables);
+    EXPECT_EQ(CountOpcode(step, OpCode::kSgdStep), trainables);
+    EXPECT_EQ(CountOpcode(step, OpCode::kFill), trainables);
+    EXPECT_EQ(static_cast<OpCode>(step[0].opcode),
+              fuse ? OpCode::kSgdStep : OpCode::kClipNorm);
+    for (const auto& ins : step)
+      if (ins.opcode == static_cast<uint16_t>(OpCode::kSgdStep))
+        EXPECT_EQ(ins.out[1],
+                  fuse ? uint64_t{std::bit_cast<uint32_t>(0.5f)} : 0u);
+    const auto grad = TrainProgramOf(c);
+    EXPECT_EQ(CountOpcode(grad, OpCode::kAccumulate), trainables);
+    EXPECT_EQ(CountOpcode(grad, OpCode::kSgdStep), 0u);
+    EXPECT_EQ(CountOpcode(grad, OpCode::kClipNorm), 0u);
+  }
 }
 
 TEST(UpdateCompiler, Bf16BaseHalvesRodataAndLowersTheWideningGemms) {

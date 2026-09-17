@@ -50,8 +50,13 @@ enum class OpCode : uint16_t {
   kKLDistillBwd = 16,  // in: p_s, p_t, seed, dlogits; out[0]=N<<32|C,
                        // out[1]=loss_scale bits<<32 | temperature f32 bits
   // Optimizers (in-place; hyperparameters live in the PlanHeader).
-  kSgdStep = 17,    // in: p, g;             out[0] = count
-  kAdamWStep = 18,  // in: p, g, m, v;       out[0] = count
+  // v12: out[1] may carry a per-tensor clip threshold as f32 bits (0 = no
+  // clip, every pre-v12 plan): the step then consumes g * min(1,
+  // max/||g||_2) without ever writing g — kClipNorm folded into the step,
+  // one full read+write pass over the gradient gone. A non-finite norm
+  // aborts the step before p, m or v is touched.
+  kSgdStep = 17,    // in: p, g;             out[0] = count, out[1] = clip bits
+  kAdamWStep = 18,  // in: p, g, m, v;       out[0] = count, out[1] = clip bits
   // Utility.
   kFill = 19,  // in: dst, f32 value bits;   out[0] = count
   kCopy = 20,  // in: src, dst;              out[0] = count (floats)
@@ -83,8 +88,10 @@ enum class OpCode : uint16_t {
   kRmsNormBwd = 32,  // in: dy, x, gamma, dx; out[0]=rstd ref, out[1]=N<<32|D
   // Rotary position embedding on interleaved pairs within each head;
   // requires d even. Backward is the transpose rotation (angle negated).
-  kRopeFwd = 33,  // in: x, y;   out[0]=B<<32|S, out[1]=H<<32|d, out[2]=base bits
-  kRopeBwd = 34,  // in: dy, dx; out[0]=B<<32|S, out[1]=H<<32|d, out[2]=base bits
+  // v12: in[2] may name a kRopeTable result for the same (S, d, base);
+  // kNullRef (every pre-v12 plan) computes the angles in place.
+  kRopeFwd = 33,  // in: x, y[, table];   out[0]=B<<32|S, out[1]=H<<32|d, out[2]=base bits
+  kRopeBwd = 34,  // in: dy, dx[, table]; out[0]=B<<32|S, out[1]=H<<32|d, out[2]=base bits
   // Causal scaled-dot-product attention. Forward computes, per (b, h):
   //   P = softmax_rows(mask(Q K^T / sqrt(d))), O = P V
   // caching P for the backward primitives.
@@ -116,6 +123,14 @@ enum class OpCode : uint16_t {
   // is free for the bias ref), kGemmNTBF16 none.
   kGemmNNBF16 = 43,  // C = A @ widen(B);    in: A, Bbf16, C[, bias]; out=M,N,K
   kGemmNTBF16 = 44,  // C = A @ widen(B)^T;  in: A, Bbf16, C;         out=M,N,K
+  // --- RoPE angle table (plan v12, E3). --------------------------------------
+  // table[s, c, 0..1] = cos, sin of angle(s, c) = s * base^(-2c/d), built
+  // with the very fp32 recurrence kRopeFwd/kRopeBwd run (freq *= step), so
+  // a rotation through the table is bit-identical to one that recomputes.
+  // The angles depend on (s, c) alone; without the table every (b, h) unit
+  // of every RoPE instruction recomputes them. Built on the device, never
+  // by the compiler: its sin/cos are the device libm's, as before.
+  kRopeTable = 45,  // in: table([S, d/2, 2]); out[0]=S<<32|d, out[1]=base bits
 };
 
 // --- Instruction flags (plan v5): fused GEMM epilogues. ----------------------

@@ -87,7 +87,8 @@ void PrintUsage() {
                "  [--min-lr-factor F] [--quantize-base | --bf16-base]\n"
                "  [--steps N]\n"
                "  [--grad-accum G]\n"
-               "  [--no-fuse-epilogue] [--report out.json]\n"
+               "  [--no-fuse-epilogue] [--no-rope-table] [--no-fuse-clip]\n"
+               "  [--report out.json]\n"
                "  [--kernel-policy table.json] [--target-host KEY]\n"
                "  [--gemm-tiles K,N]\n"
                "  [--no-embed] [--build] [--version]\n");
@@ -335,6 +336,8 @@ int main(int argc, char** argv) {
     return Fail("--quantize-base and --bf16-base are mutually exclusive "
                 "(one storage precision per weight)");
   config.fuse_epilogues = !args.Take("--no-fuse-epilogue");
+  config.rope_table = !args.Take("--no-rope-table");
+  config.fuse_clip = !args.Take("--no-fuse-clip");
 
   // --- Kernel policy: explicit tiles, the tuner's table, or the defaults.
   KernelPolicyRequest policy_request;

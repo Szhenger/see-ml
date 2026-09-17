@@ -75,7 +75,7 @@ import time
 # --- The .seeu container (source/plan/schema.h, instruction.h) ---------------
 
 SEEU_MAGIC = 0x55454553
-SEEU_OLDEST, SEEU_NEWEST = 4, 11
+SEEU_OLDEST, SEEU_NEWEST = 4, 12
 RODATA_BIT = 1 << 63
 NULL_REF = (1 << 64) - 1
 
@@ -108,7 +108,7 @@ OPCODES = {
     32: "rms_norm.bwd", 33: "rope.fwd", 34: "rope.bwd", 35: "attn.fwd",
     36: "attn.dp", 37: "attn.dv", 38: "softmax_rows.bwd", 39: "attn.dq",
     40: "attn.dk", 41: "embed.fwd", 42: "accumulate", 43: "gemm.nn_bf16",
-    44: "gemm.nt_bf16",
+    44: "gemm.nt_bf16", 45: "rope.table",
 }
 GEMM_OPCODES = (1, 2, 3, 4, 29, 30, 43, 44)
 SECTIONS = ("train", "step", "eval", "merge")
@@ -1035,13 +1035,13 @@ def _kl_bwd(m, x, ins, step):
 
 def _sgd(m, x, ins, step):
     n = (ins.out[0],)
-    p, g = m.read(ins.src[0], n), m.read(ins.src[1], n)
+    p, g = m.read(ins.src[0], n), _step_gradient(m, x, ins)
     m.write(ins.src[0], p - step["lr"] * (g + step["weight_decay"] * p))
 
 
 def _adamw(m, x, ins, step):
     n = (ins.out[0],)
-    p, g = m.read(ins.src[0], n), m.read(ins.src[1], n)
+    p, g = m.read(ins.src[0], n), _step_gradient(m, x, ins)
     b1, b2, t = step["beta1"], step["beta2"], step["step"]
     mom = b1 * m.read(ins.src[2], n) + (1.0 - b1) * g
     var = b2 * m.read(ins.src[3], n) + (1.0 - b2) * g * g
@@ -1065,15 +1065,25 @@ def _accumulate(m, x, ins, step):
     m.write(ins.src[0], m.read(ins.src[0], n) + m.read(ins.src[1], n))
 
 
+def _clip_factor(x, g, limit):
+    """min(1, limit/||g||_2), spelled without a host round-trip: exactly 1
+    where the norm is already inside the ball (or is zero)."""
+    norm = x.sqrt(x.sum(g * g, 0))
+    return x.where(norm > limit, limit / x.maximum(norm, 1e-30),
+                   1.0 + 0.0 * norm)
+
+
 def _clip(m, x, ins, step):
     g = m.read(ins.src[0], (ins.out[0],))
-    limit = bits_f32(ins.src[1])
-    norm = x.sqrt(x.sum(g * g, 0))
-    # g *= min(1, max/||g||), spelled without a host round-trip: the factor
-    # is exactly 1 where the norm is already inside the ball (or is zero).
-    factor = x.where(norm > limit, limit / x.maximum(norm, 1e-30),
-                     1.0 + 0.0 * norm)
-    m.write(ins.src[0], g * factor)
+    m.write(ins.src[0], g * _clip_factor(x, g, bits_f32(ins.src[1])))
+
+
+def _step_gradient(m, x, ins):
+    """The gradient an optimizer step consumes: under a fused clip (plan
+    v12, threshold bits in out[1]) the clipped gradient, which is never
+    written back."""
+    g = m.read(ins.src[1], (ins.out[0],))
+    return g * _clip_factor(x, g, bits_f32(ins.out[1])) if ins.out[1] else g
 
 
 def _layer_norm_fwd(m, x, ins, step):
@@ -1123,6 +1133,18 @@ def _rope_op(sign):
         m.write(ins.src[1], _rope(x, t, b, s, h, d, bits_f32(ins.out[2]),
                                   sign))
     return op
+
+
+def _rope_table(m, x, ins, step):
+    # [S, d/2, 2] = cos, sin of s * base^(-2c/d). kRopeFwd/kRopeBwd may read
+    # it (in[2]); this interpreter derives its rotations from the formula
+    # either way, so the table is checked as a value, not trusted as one.
+    s, d = hi_lo(ins.out[0])
+    freq = x.exp(x.positions(d // 2) * (-2.0 / d * math.log(
+        bits_f32(ins.out[1]))))
+    theta = x.positions(s).reshape((s, 1)) * freq.reshape((1, d // 2))
+    m.write(ins.src[0], x.stack_last(x.cos(theta), x.sin(theta)).reshape(
+        (s * d,)))
 
 
 def _attn_fwd(m, x, ins, step):
@@ -1199,7 +1221,7 @@ INTERPRETER = {
     32: _rms_norm_bwd, 33: _rope_op(1.0), 34: _rope_op(-1.0), 35: _attn_fwd,
     36: _attn_dp, 37: _attn_dv, 38: _softmax_rows_bwd, 39: _attn_dqk(False),
     40: _attn_dqk(True), 41: _embed, 42: _accumulate,
-    43: _gemm_nn("<u2"), 44: _gemm_nt("<u2"),
+    43: _gemm_nn("<u2"), 44: _gemm_nt("<u2"), 45: _rope_table,
 }
 assert sorted(INTERPRETER) == sorted(OPCODES)
 

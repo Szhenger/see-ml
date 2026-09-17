@@ -34,6 +34,7 @@
 // =============================================================================
 
 #include "compiler/analysis/algebra/epilogue_fuser.h" // IWYU pragma: export
+#include "compiler/analysis/algebra/rope_table.h"     // IWYU pragma: export
 #include "compiler/analysis/algebra/lora_grafter.h"   // IWYU pragma: export
 #include "compiler/analysis/algebra/merge_builder.h"  // IWYU pragma: export
 #include "compiler/analysis/calculus/autodiff.h"      // IWYU pragma: export
