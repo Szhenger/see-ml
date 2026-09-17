@@ -121,11 +121,14 @@ jobs:
           if-no-files-found: ignore
 
   # The Tier A regression gate of docs/benchmarks.md: run the harness, diff
-  # against the previous night's numbers (carried by the actions cache, the
-  # fuzz-corpus trust model), fail on a >10% rows/s regression, then store
-  # this run as the next baseline. Per-commit trend on one host class — a
-  # cloud runner is noisy, which is why the gate is 10%, medians-of-3, and
-  # nightly rather than per-diff.
+  # against the last green night's numbers (carried by the actions cache,
+  # the fuzz-corpus trust model). Cloud runners of one class differ by
+  # 15-35% on identical work, so the gate is calibration-normalized and
+  # two-consecutive-red (P5, #79): seeml-bench times a frozen reference
+  # kernel, bench_compare.py divides the runner out of every delta, a key's
+  # first >10% regression is a warning and its second consecutive one fails
+  # the job. bench_compare.py --promote owns the baseline roll: only a fully
+  # green gate replaces it, so a warned night is never the next reference.
   bench:
     name: bench (Tier A regression gate)
     runs-on: ubuntu-latest
@@ -161,12 +164,14 @@ jobs:
       # The pinned epoch: a fixed cache key is saved once and never
       # overwritten, so the gate also diffs against a reference that does
       # not roll forward (a <10%/night drift cannot compound past it).
-      # Bump the key suffix to start a new epoch deliberately.
+      # Bump the key suffix to start a new epoch deliberately (v2: the
+      # first epoch that carries a calibration block — v1 was an
+      # un-normalizable high-water mark from one fast runner).
       - name: Restore epoch baseline
         uses: actions/cache@v4
         with:
           path: bench-epoch
-          key: bench-epoch-v1
+          key: bench-epoch-v2
       - name: Configure
         run: >
           cmake -S . -B build-bench
@@ -176,27 +181,26 @@ jobs:
         run: cmake --build build-bench -j "$(nproc)" --target seeml-bench
       - name: Bench
         run: ./build-bench/seeml-bench --out bench.json --threads 1,2,4
+      # A reseed drops the rolling baseline and the pending reds, never the
+      # epoch (bump its key instead); the gate step then seeds from this run.
+      - name: Drop the baseline (reseed only)
+        if: ${{ inputs.reseed_baseline }}
+        run: rm -f bench-baseline/bench.json bench-baseline/gate_state.json
       - name: Gate against baseline
-        if: ${{ !inputs.reseed_baseline }}
-        run: >
-          python3 tool/bench_compare.py bench-baseline/bench.json bench.json
-          --epoch-baseline bench-epoch/bench.json
-      - name: Store as next baseline
-        run: mkdir -p bench-baseline && cp bench.json bench-baseline/bench.json
-      # Seeded from the first GREEN night (actions/cache saves only when the
-      # job succeeds, and the seed step does not run after a failed gate),
-      # so the drift reference is never a run that already regressed. A
-      # reseed run never touches it; bump the key suffix to start an epoch.
-      - name: Seed the epoch baseline (first green night only)
-        if: ${{ !inputs.reseed_baseline }}
         run: |
-          if [ ! -f bench-epoch/bench.json ]; then
-            mkdir -p bench-epoch && cp bench.json bench-epoch/bench.json
-          fi
+          epoch="--epoch-baseline bench-epoch/bench.json"
+          if [ "${{ inputs.reseed_baseline }}" = "true" ]; then epoch=""; fi
+          python3 tool/bench_compare.py bench-baseline/bench.json bench.json \
+            $epoch --state bench-baseline/gate_state.json --promote \
+            | tee bench-gate.log
+          exit "${PIPESTATUS[0]}"
       - name: Upload run
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: nightly-bench
-          path: bench.json
+          path: |
+            bench.json
+            bench-gate.log
+            bench-baseline/gate_state.json
           if-no-files-found: ignore

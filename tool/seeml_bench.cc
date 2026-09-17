@@ -40,6 +40,11 @@
 //   peak_rss_bytes                MLX-LM "Peak mem" (OS-observed, process-
 //                                 cumulative, so it rises monotonically
 //                                 across fixtures);
+//   calibration                   the runner's own speed (schema 4, P5 #79):
+//                                 a frozen single-threaded reference kernel
+//                                 timed before and after the fixtures, so
+//                                 tool/bench_compare.py can divide a slow
+//                                 or fast runner out of every Tier A delta;
 //   mfu                           PaLM/Megatron model-FLOPs utilization —
 //                                 achieved GEMM FLOP/s over the host peak
 //                                 given by --peak-gflops (omitted otherwise:
@@ -132,6 +137,62 @@ double Median(std::vector<double> v) {
   // EVEN --repeats by an older binary is not comparable to this one —
   // re-seed it (nightly: workflow_dispatch with reseed_baseline=true).
   return n % 2 == 1 ? v[n / 2] : 0.5 * (v[n / 2 - 1] + v[n / 2]);
+}
+
+// --- The calibration workload (P5, #79) --------------------------------------
+// The nightly gate compares runs from DIFFERENT machines of one runner
+// class, and those differ by 15-35% on identical work. This kernel measures
+// the machine, not SeeML: a naive single-threaded f32 i-k-j matrix product
+// over three 64 KiB matrices, deliberately sharing no code with
+// runtime/executor — a regression in a SeeML kernel must never slow the
+// yardstick it is measured against. bench_compare.py scales each Tier A
+// delta by the ratio of two runs' calibration rates.
+//
+// FROZEN: the name below is the kernel's identity and travels in the
+// report; any change to the loop, the size or the element type must bump
+// it, and the gate refuses to normalize across two different names.
+constexpr const char* kCalibKernel = "sgemm_ikj_128_f32_v1";
+constexpr size_t kCalibN = 128;
+constexpr double kCalibSampleMs = 120.0;
+constexpr size_t kCalibSamples = 5;  // per side: before and after
+
+/// One timed sample: whole passes until kCalibSampleMs elapsed; returns
+/// output rows per wall second. `sink` keeps the product observable.
+double CalibrationSample(std::vector<float>& a, std::vector<float>& b,
+                         std::vector<float>& c, volatile float* sink) {
+  const size_t n = kCalibN;
+  uint64_t passes = 0;
+  const auto t0 = Clock::now();
+  double ms = 0.0;
+  do {
+    for (int rep = 0; rep < 4; ++rep, ++passes) {
+      std::fill(c.begin(), c.end(), 0.0f);
+      for (size_t i = 0; i < n; ++i)
+        for (size_t k = 0; k < n; ++k) {
+          const float aik = a[i * n + k];
+          const float* bk = &b[k * n];
+          float* ci = &c[i * n];
+          for (size_t j = 0; j < n; ++j) ci[j] += aik * bk[j];
+        }
+      *sink = *sink + c[(passes * 131u) % (n * n)];
+    }
+    ms = MsSince(t0);
+  } while (ms < kCalibSampleMs);
+  return static_cast<double>(passes * n) / (ms / 1000.0);
+}
+
+/// kCalibSamples samples appended to `rates`. Operands are a fixed
+/// pattern (no RNG: the yardstick depends on nothing else in the tree).
+void Calibrate(std::vector<double>& rates) {
+  const size_t nn = kCalibN * kCalibN;
+  std::vector<float> a(nn), b(nn), c(nn);
+  for (size_t i = 0; i < nn; ++i) {
+    a[i] = static_cast<float>((i * 7u) % 13u) * 0.125f - 0.75f;
+    b[i] = static_cast<float>((i * 5u) % 11u) * 0.25f - 1.25f;
+  }
+  volatile float sink = 0.0f;
+  for (size_t s = 0; s < kCalibSamples; ++s)
+    rates.push_back(CalibrationSample(a, b, c, &sink));
 }
 
 // --- The standard fixture set -----------------------------------------------
@@ -429,8 +490,14 @@ int main(int argc, char** argv) {
   // Schema 3 adds the kernel policy and the host identity it is keyed on;
   // every schema-2 key is unchanged, so stored baselines stay comparable
   // (bench_compare.py refuses to compare runs whose policies differ).
+  // Schema 4 adds the calibration block (P5, #79) at the end of the report;
+  // every schema-3 key is unchanged. A schema-4 report without it is one
+  // the gate refuses.
+  std::vector<double> calib_pre, calib_post;
+  std::fprintf(stderr, "seeml-bench: calibrating (%s)\n", kCalibKernel);
+  Calibrate(calib_pre);
   std::fprintf(out,
-               "{\n  \"seeml_version\": \"%s\",\n  \"schema\": 3,\n"
+               "{\n  \"seeml_version\": \"%s\",\n  \"schema\": 4,\n"
                "  \"host\": \"%s\",\n  \"backend\": \"%s\",\n"
                "  \"host_key\": \"%s\",\n"
                "  \"host_arch\": {\"isa\": \"%s\", \"cpu_model\": \"%s\", "
@@ -624,7 +691,23 @@ int main(int argc, char** argv) {
                                : 0.0);
   }
 
-  std::fprintf(out, "\n  }\n}\n");
+  // The second calibration bracket: a runner whose speed moved during the
+  // sweep shows up as pre != post and as `spread`, and the headline rate is
+  // the median of both sides.
+  Calibrate(calib_post);
+  std::vector<double> calib_all = calib_pre;
+  calib_all.insert(calib_all.end(), calib_post.begin(), calib_post.end());
+  const double calib = Median(calib_all);
+  const auto [calib_min, calib_max] =
+      std::minmax_element(calib_all.begin(), calib_all.end());
+  std::fprintf(out,
+               "\n  },\n  \"calibration\": {\"kernel\": \"%s\", "
+               "\"calib_rows_per_s\": %.1f, \"pre_rows_per_s\": %.1f, "
+               "\"post_rows_per_s\": %.1f, \"samples\": %zu, "
+               "\"spread\": %.4f}\n}\n",
+               kCalibKernel, calib, Median(calib_pre), Median(calib_post),
+               calib_all.size(),
+               calib > 0.0 ? (*calib_max - *calib_min) / calib : 0.0);
   // A truncated report must not exit 0 — same discipline as --report in
   // seeml-update-compile.
   const bool write_failed = std::ferror(out) != 0;
