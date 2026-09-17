@@ -38,7 +38,9 @@ struct EmitPaths {
   // Every runtime source vendored into the package, relative to its root,
   // in emission order — what a packer or an auditor needs to know the
   // package's exact contents without listing the directory (P6, #86).
-  std::vector<std::string> vendored_sources;
+  // The `{}` matters: designated initializers omit this field, and -Wextra
+  // flags an omitted field unless it has a default initializer.
+  std::vector<std::string> vendored_sources{};
 };
 
 struct EmitOptions {
