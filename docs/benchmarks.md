@@ -234,8 +234,9 @@ All three pieces of this program exist:
    `--peak-gflops` names the host peak). Medians of `--repeats`
    (default 3); seeds and thread widths pinned. The CLI is strict, like
    the other tools: an unknown flag or a flag that cannot parse is exit 2,
-   never a default. Report schema is 2; every schema-1 key is unchanged,
-   so stored baselines stay comparable.
+   never a default. Report schema is 4 (2 added the external-standard
+   fields, 3 the kernel policy, 4 the calibration block); every earlier
+   key is unchanged, so stored baselines stay comparable.
 
 2. **The nightly `bench` CI job** restores the previous night's numbers
    from the actions cache (the fuzz-corpus trust model), runs the harness,
@@ -245,9 +246,40 @@ All three pieces of this program exist:
    a fixture can't fail the night it lands. Two fail-closed rules keep the
    gate honest: a comparison with **zero overlapping keys is an error**
    (a renamed metric must re-seed deliberately, not pass silently), and a
-   **pinned epoch baseline** (`--epoch-baseline`, cache key `bench-epoch-v1`,
+   **pinned epoch baseline** (`--epoch-baseline`, cache key `bench-epoch-v2`,
    saved once and never rolled forward) is diffed at a 15% threshold so a
    sub-10%/night drift cannot compound unnoticed.
+
+   Cloud runners of one class differ by 15–35% on identical work, and a
+   rolling baseline that only a green night replaces turns that into a
+   high-water trap: one fast runner sets it and every ordinary runner
+   fails until an equally fast one lands (Nightly #20–#23; 09-13/09-14 on
+   the commit that was green on 09-12). Two mechanisms (P5, #79) keep the
+   10% threshold meaningful across machines:
+
+   - **Calibration.** `seeml-bench` (report schema 4) times a frozen,
+     single-threaded reference kernel — a naive f32 i-k-j product over
+     64 KiB matrices that shares no code with `runtime/executor`, so a
+     SeeML kernel regression cannot slow its own yardstick — before and
+     after the fixtures, and records `calibration.calib_rows_per_s` (the
+     median of both brackets), the two sides, and their `spread`.
+     `bench_compare.py` divides the current run's rows/s by the ratio of
+     the two calibration rates before applying the thresholds. A reference
+     that predates schema 4 compares un-normalized with a note; a schema-4
+     report without the block, two different calibration kernels, or a
+     ratio outside [⅓, 3] are errors. The kernel's name
+     (`sgemm_ikj_128_f32_v1`) is its identity: changing the loop bumps it.
+   - **Two consecutive reds.** With `--state` a key's first regression is
+     a warning (a `::warning::` annotation and the uploaded
+     `bench-gate.log`); the job fails when the same key regresses against
+     the same reference on the next run too. `--promote` makes the comparer
+     the one that rolls the baseline (and seeds a missing epoch): only a
+     fully green gate does, so a warned run is never the next reference.
+
+   The epoch key is `bench-epoch-v2`, the first epoch that carries a
+   calibration block. `test/tool/bench_compare_test.py` replays both
+   incidents (all green) and an injected regression (warned, then failed),
+   and shows the un-calibrated replay reproducing the four red nights.
 
 3. **The step-latency instrumentation** lives in the engine behind
    `-DSEEML_STEP_TIMING` (set by `-DSEEML_BENCH=ON` / `SEEML_BENCH=1`):

@@ -71,7 +71,11 @@ steps-regression at every requested thread width (with the engine's
 fwd/bwd/optimizer split when built with `-DSEEML_BENCH=ON` or
 `SEEML_BENCH=1 sh build/build.sh`), and emits one JSON per run.
 `bench_compare.py` diffs two such runs and fails on a >10% Tier A
-regression — the nightly `bench` job's gate.
+regression — the nightly `bench` job's gate. It is runner-normalized (each
+report carries the rate of a frozen calibration kernel, and the comparer
+divides the two runners' ratio out of every delta) and, with `--state`,
+two-consecutive-red: a key's first regression warns, its second fails
+(P5, #79). Standard library only.
 
 **`autotune.py`** is the offline autotuner, the second Python-plane
 subsystem of the overhaul (P2): it sweeps CPU GEMM tile arms through
