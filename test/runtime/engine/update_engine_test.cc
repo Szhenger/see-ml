@@ -8,12 +8,14 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <random>
 #include <string>
 #include <vector>
 
 #include "compiler/driver/update_compiler.h"
 #include "source/plan/update_types.h"
 #include "runtime/feeder/dataset.h"
+#include "runtime/custodian/checkpoint.h"
 #include "runtime/engine/update_engine.h"
 #include "source/identity/hash.h"
 #include "source/parallel/parallel_for.h"
@@ -1246,7 +1248,7 @@ TEST(UpdateEngineLr, V3CheckpointsStillResume) {
                           std::istreambuf_iterator<char>());
   const uint32_t version3 = 3;
   std::memcpy(bytes.data() + 4, &version3, sizeof(version3));
-  bytes.erase(bytes.begin() + 40, bytes.begin() + 48);  // the v4 tail
+  bytes.erase(bytes.begin() + 40, bytes.begin() + 112);  // the v4 + v5 tails
   std::ofstream(v3, std::ios::binary).write(bytes.data(),
                                             static_cast<std::streamsize>(
                                                 bytes.size()));
@@ -1260,6 +1262,379 @@ TEST(UpdateEngineLr, V3CheckpointsStillResume) {
   const std::vector<uint8_t> b(old.arena(),
                                old.arena() + old.header().persistent_size);
   EXPECT_TRUE(a == b);
+}
+
+// =============================================================================
+// The best evaluated state (E9, #92)
+// =============================================================================
+
+namespace best_state {
+
+std::vector<uint8_t> Persistent(UpdateEngine& e) {
+  return std::vector<uint8_t>(e.arena(),
+                              e.arena() + e.header().persistent_size);
+}
+
+/// A classification set drawn PORTABLY: mt19937_64's raw output is fixed by
+/// the standard, and the floats are derived from it here by plain
+/// arithmetic — std::normal_distribution is implementation-defined, and
+/// gave libstdc++ and libc++ different corpora (and so different training
+/// curves) for one seed. Every sample shares one rule, w_true from `rule`.
+Dataset PortableSet(uint64_t n, uint64_t sample_seed, uint64_t rule) {
+  auto unit = [](std::mt19937_64& g) {  // [-1, 1), exact in f32
+    return static_cast<float>(static_cast<double>(g() >> 40) /
+                                  static_cast<double>(1ull << 23) -
+                              1.0);
+  };
+  std::mt19937_64 wr(rule), xr(sample_seed);
+  std::vector<float> w(kInDim), x(n * kInDim);
+  for (float& v : w) v = unit(wr);
+  std::vector<uint8_t> labels(n * sizeof(int32_t));
+  auto* lab = reinterpret_cast<int32_t*>(labels.data());
+  for (uint64_t i = 0; i < n; ++i) {
+    float dot = 0.0f;
+    for (int64_t c = 0; c < kInDim; ++c) {
+      x[i * kInDim + c] = unit(xr);
+      const float prod = x[i * kInDim + c] * w[c];
+      dot += prod;
+    }
+    lab[i] = dot > 0.0f ? 1 : 0;
+  }
+  auto d = Dataset::FromMemory(std::move(x), std::move(labels), n, kInDim,
+                               /*label_kind=*/1, /*label_dim=*/0);
+  if (!d) std::abort();
+  return std::move(*d);
+}
+
+/// A tiny training set and a held-out set drawn from one rule, at a
+/// learning rate where the held-out loss dips and then climbs — the
+/// small-corpus shape the issue describes.
+Dataset TrainSet() {
+  Dataset d = PortableSet(8, 101, 7);
+  d.EnableShuffle(3);
+  return d;
+}
+Dataset ValSet() { return PortableSet(96, 202, 7); }
+std::vector<uint8_t> OverfitPlan() {
+  UpdateConfig config = BaseConfig(kBatch);
+  config.optimizer.lr = 0.02f;
+  return CompilePlan(config, 4);
+}
+
+}  // namespace best_state
+
+TEST(UpdateEngineBest, PeriodicEvaluationChangesNoTrainingBits) {
+  using namespace best_state;
+  const std::vector<uint8_t> plan = OverfitPlan();
+  ASSERT_FALSE(plan.empty());
+  ScopedTempDir tmp;
+  const std::string ckpt = tmp.File("last.ckpt");
+
+  UpdateEngine plain;
+  ASSERT_OK(plain.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d1 = TrainSet(), v1 = ValSet();
+  TrainOptions popt = Quiet();
+  popt.validation = &v1;
+  popt.record_loss_curve = true;
+  ASSERT_OK_AND_ASSIGN(auto untracked, plain.Train(d1, 24, popt));
+  EXPECT_FALSE(untracked.best_tracked);
+  const std::vector<uint8_t> last = Persistent(plain);
+
+  UpdateEngine tracked;
+  ASSERT_OK(tracked.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d2 = TrainSet(), v2 = ValSet();
+  TrainOptions topt = Quiet();
+  topt.validation = &v2;
+  topt.record_loss_curve = true;
+  topt.eval_every = 3;
+  topt.checkpoint_path = ckpt;
+  topt.checkpoint_every = 24;  // the last state, saved before the restore
+  ASSERT_OK_AND_ASSIGN(auto best, tracked.Train(d2, 24, topt));
+  EXPECT_TRUE(best.best_tracked);
+  EXPECT_EQ(best.eval_every, 3u);
+  EXPECT_EQ(best.evaluations, 7u);  // steps 3..21; 24 is the bracket
+  ASSERT_EQ(best.loss_curve.size(), untracked.loss_curve.size());
+  for (size_t i = 0; i < best.loss_curve.size(); ++i)
+    EXPECT_EQ(best.loss_curve[i], untracked.loss_curve[i]);
+  EXPECT_EQ(best.val_initial_loss, untracked.val_initial_loss);
+  EXPECT_EQ(best.val_last_loss, untracked.val_final_loss);
+  // The endpoint the tracked run reached is the untracked run's, byte for
+  // byte: the checkpoint written at step 24 holds it.
+  UpdateEngine peek;
+  ASSERT_OK(peek.LoadFromMemory(plan.data(), plan.size()));
+  ASSERT_OK(peek.LoadCheckpoint(ckpt));
+  EXPECT_TRUE(Persistent(peek) == last);
+}
+
+TEST(UpdateEngineBest, CommitsTheBestEvaluatedStateNotTheLast) {
+  using namespace best_state;
+  const std::vector<uint8_t> plan = OverfitPlan();
+  ASSERT_FALSE(plan.empty());
+  const uint64_t steps = 11;
+
+  // The oracle: the held-out loss of every state from step 0 on, from an
+  // untracked run stepped one at a time (each Train call evaluates its
+  // endpoint).
+  std::vector<float> curve;
+  {
+    UpdateEngine e;
+    ASSERT_OK(e.LoadFromMemory(plan.data(), plan.size()));
+    Dataset d = TrainSet(), v = ValSet();
+    TrainOptions o = Quiet();
+    o.validation = &v;
+    for (uint64_t s = 0; s < steps; ++s) {
+      ASSERT_OK_AND_ASSIGN(auto r, e.Train(d, 1, o));
+      if (s == 0) curve.push_back(r.val_initial_loss);
+      curve.push_back(r.val_final_loss);
+    }
+  }
+  size_t best_step = 0;
+  for (size_t i = 1; i < curve.size(); ++i)
+    if (curve[i] < curve[best_step]) best_step = i;
+  // The scenario the issue describes: the endpoint is past the minimum,
+  // yet still below step 0 — the old gate committed it.
+  ASSERT_GT(best_step, 0u);
+  ASSERT_LT(best_step, steps);
+  ASSERT_LT(curve[best_step], curve.back());
+  ASSERT_LT(curve.back(), curve[0]);
+
+  UpdateEngine tracked;
+  ASSERT_OK(tracked.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d = TrainSet(), v = ValSet();
+  TrainOptions o = Quiet();
+  o.validation = &v;
+  o.eval_every = 1;
+  ASSERT_OK_AND_ASSIGN(auto report, tracked.Train(d, steps, o));
+  EXPECT_EQ(report.steps, steps);
+  EXPECT_EQ(report.best_step, best_step);
+  EXPECT_EQ(report.val_final_loss, curve[best_step]);
+  EXPECT_EQ(report.val_last_loss, curve.back());
+  EXPECT_TRUE(report.improved());
+  EXPECT_LT(report.val_final_loss, report.val_last_loss);
+
+  // What the arena holds is the state of step best_step, bit for bit: a
+  // fresh run of exactly that many steps produces it.
+  UpdateEngine fresh;
+  ASSERT_OK(fresh.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d2 = TrainSet();
+  ASSERT_OK(fresh.Train(d2, best_step, Quiet()));
+  EXPECT_TRUE(Persistent(tracked) == Persistent(fresh));
+  // And the step counter still says where the run ended.
+  EXPECT_EQ(tracked.step(), steps);
+}
+
+TEST(UpdateEngineBest, ResumeKeepsTheSourceModelScoreAndTheBest) {
+  using namespace best_state;
+  const std::vector<uint8_t> plan = OverfitPlan();
+  ASSERT_FALSE(plan.empty());
+  ScopedTempDir tmp;
+  const std::string ckpt = tmp.File("best.ckpt");
+
+  UpdateEngine straight;
+  ASSERT_OK(straight.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d1 = TrainSet(), v1 = ValSet();
+  TrainOptions o = Quiet();
+  o.validation = &v1;
+  o.eval_every = 2;
+  ASSERT_OK_AND_ASSIGN(auto whole, straight.Train(d1, 11, o));
+  // The best comes after the interruption below, at an even step: a
+  // resume that keyed the cadence on its own step count (evaluating at 5,
+  // 7, 9 instead of 4, 6, 8, 10) would keep a different best (#124 CI).
+  ASSERT_GT(whole.best_step, 3u);
+  const std::vector<uint8_t> want = Persistent(straight);
+
+  UpdateEngine first;
+  ASSERT_OK(first.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d2 = TrainSet(), v2 = ValSet();
+  TrainOptions cut = o;
+  cut.validation = &v2;
+  cut.checkpoint_path = ckpt;
+  cut.checkpoint_every = 1;
+  uint64_t polls = 0;
+  cut.should_stop = [&] { return polls++ == 3; };
+  ASSERT_OK_AND_ASSIGN(auto head, first.Train(d2, 11, cut));
+  EXPECT_TRUE(head.stopped_early);
+  EXPECT_EQ(first.step(), 3u);
+
+  UpdateEngine resumed;
+  ASSERT_OK(resumed.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d3 = TrainSet(), v3 = ValSet();
+  TrainOptions ropt = o;
+  ropt.validation = &v3;
+  ropt.checkpoint_path = ckpt;
+  ropt.resume = true;
+  ASSERT_OK_AND_ASSIGN(auto rest, resumed.Train(d3, 0, ropt));
+  EXPECT_EQ(rest.steps, 8u);
+  // The gate's "before" is still the source model's score, not the
+  // resumed adapter's; the best and the committed bytes are the whole
+  // run's.
+  EXPECT_EQ(rest.val_initial_loss, whole.val_initial_loss);
+  EXPECT_EQ(rest.best_step, whole.best_step);
+  EXPECT_EQ(rest.val_final_loss, whole.val_final_loss);
+  EXPECT_EQ(rest.val_last_loss, whole.val_last_loss);
+  EXPECT_TRUE(Persistent(resumed) == want);
+}
+
+TEST(UpdateEngineBest, AResumedStartIsScoredAsItselfNotAsTheSource) {
+  // The first run evaluates but does not track (eval_every 0), so its
+  // checkpoint carries the source model's score and no best state. It is
+  // interrupted at step 7 — this corpus's best — and the resume tracks.
+  // Every later state is worse than step 7 yet better than the source, so
+  // a resume that labelled its starting segment with the SOURCE score
+  // would let step 8 displace it (ultrareview on #125). The start must be
+  // scored as itself, and what the run reports must be what it holds.
+  using namespace best_state;
+  const std::vector<uint8_t> plan = OverfitPlan();
+  ASSERT_FALSE(plan.empty());
+  ScopedTempDir tmp;
+  const std::string ckpt = tmp.File("untracked.ckpt");
+  UpdateEngine first;
+  ASSERT_OK(first.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d1 = TrainSet(), v1 = ValSet();
+  TrainOptions cut = Quiet();
+  cut.validation = &v1;
+  cut.checkpoint_path = ckpt;
+  cut.checkpoint_every = 1;
+  uint64_t polls = 0;
+  cut.should_stop = [&] { return polls++ == 7; };
+  ASSERT_OK_AND_ASSIGN(auto head, first.Train(d1, 11, cut));
+  ASSERT_TRUE(head.stopped_early);
+  ASSERT_FALSE(head.best_tracked);
+  ASSERT_EQ(first.step(), 7u);
+
+  UpdateEngine resumed;
+  ASSERT_OK(resumed.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d2 = TrainSet(), v2 = ValSet();
+  TrainOptions ropt = Quiet();
+  ropt.validation = &v2;
+  ropt.checkpoint_path = ckpt;
+  ropt.resume = true;
+  ropt.eval_every = 1;
+  ASSERT_OK_AND_ASSIGN(auto rest, resumed.Train(d2, 0, ropt));
+  EXPECT_EQ(rest.steps, 4u);
+  EXPECT_EQ(rest.val_initial_loss, head.val_initial_loss);  // the source's
+  EXPECT_EQ(rest.best_step, 7u);
+  EXPECT_LT(rest.val_final_loss, rest.val_last_loss);
+  // The reported score is the held state's score.
+  Dataset v3 = ValSet();
+  ASSERT_OK_AND_ASSIGN(float held, resumed.Evaluate(v3));
+  EXPECT_EQ(held, rest.val_final_loss);
+  // And the held state is step 7's, byte for byte.
+  UpdateEngine fresh;
+  ASSERT_OK(fresh.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d3 = TrainSet();
+  ASSERT_OK(fresh.Train(d3, 7, Quiet()));
+  EXPECT_TRUE(Persistent(resumed) == Persistent(fresh));
+}
+
+TEST(UpdateEngineBest, ResumeRefusesADifferentSeedOrSplit) {
+  using namespace best_state;
+  const std::vector<uint8_t> plan = OverfitPlan();
+  ASSERT_FALSE(plan.empty());
+  ScopedTempDir tmp;
+  const std::string ckpt = tmp.File("bound.ckpt");
+  {
+    UpdateEngine e;
+    ASSERT_OK(e.LoadFromMemory(plan.data(), plan.size()));
+    Dataset d = TrainSet(), v = ValSet();
+    TrainOptions o = Quiet();
+    o.validation = &v;
+    o.checkpoint_path = ckpt;
+    o.checkpoint_every = 4;
+    ASSERT_OK(e.Train(d, 8, o));
+  }
+  TrainOptions ropt = Quiet();
+  ropt.checkpoint_path = ckpt;
+  ropt.resume = true;
+
+  // Another shuffle seed.
+  UpdateEngine seed;
+  ASSERT_OK(seed.LoadFromMemory(plan.data(), plan.size()));
+  ASSERT_OK_AND_ASSIGN(Dataset d1, MakeClassificationData(8, kInDim, 21));
+  d1.EnableShuffle(4);
+  Dataset v1 = ValSet();
+  ropt.validation = &v1;
+  EXPECT_ERROR_CONTAINS(seed.Train(d1, 0, ropt), "resume refused");
+
+  // Another split: a validation set of a different size.
+  UpdateEngine split;
+  ASSERT_OK(split.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d2 = TrainSet();
+  ASSERT_OK_AND_ASSIGN(Dataset v2, MakeClassificationData(40, kInDim, 21));
+  ropt.validation = &v2;
+  EXPECT_ERROR_CONTAINS(split.Train(d2, 0, ropt), "resume refused");
+
+  // No validation set at all, where the run had one.
+  UpdateEngine none;
+  ASSERT_OK(none.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d3 = TrainSet();
+  ropt.validation = nullptr;
+  EXPECT_ERROR_CONTAINS(none.Train(d3, 0, ropt), "resume refused");
+
+  // The driver's pre-check reads the same binding without touching state.
+  ASSERT_OK_AND_ASSIGN(auto peek,
+                       seeml::update_rt::PeekCheckpointRecord(ckpt));
+  EXPECT_TRUE(peek.has_binding);
+  EXPECT_EQ(peek.train_samples, 8u);
+  EXPECT_EQ(peek.val_samples, 96u);
+  EXPECT_EQ(peek.shuffle_origin, TrainSet().shuffle_origin());
+  EXPECT_NE(peek.shuffle_origin, d1.shuffle_origin());
+
+  // The first run's seed and split resume.
+  UpdateEngine ok;
+  ASSERT_OK(ok.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d4 = TrainSet(), v4 = ValSet();
+  ropt.validation = &v4;
+  ASSERT_OK(ok.Train(d4, 0, ropt));
+}
+
+TEST(UpdateEngineBest, PatienceStopsARunThatStoppedImproving) {
+  using namespace best_state;
+  const std::vector<uint8_t> plan = OverfitPlan();
+  ASSERT_FALSE(plan.empty());
+  UpdateEngine e;
+  ASSERT_OK(e.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d = TrainSet(), v = ValSet();
+  TrainOptions o = Quiet();
+  o.validation = &v;
+  o.eval_every = 1;
+  o.patience = 3;
+  ASSERT_OK_AND_ASSIGN(auto report, e.Train(d, 200, o));
+  EXPECT_TRUE(report.stopped_by_patience);
+  EXPECT_FALSE(report.stopped_early);
+  EXPECT_LT(report.steps, 200u);
+  EXPECT_EQ(report.patience, 3u);
+  // Three evaluations past the best, none better: the run ends three
+  // steps after the best state, which is what it holds.
+  EXPECT_EQ(report.steps, report.best_step + 3);
+  UpdateEngine fresh;
+  ASSERT_OK(fresh.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d2 = TrainSet();
+  ASSERT_OK(fresh.Train(d2, report.best_step, Quiet()));
+  EXPECT_TRUE(Persistent(e) == Persistent(fresh));
+}
+
+TEST(UpdateEngineBest, AutoEvaluatesEveryTenthOfTheRun) {
+  using namespace best_state;
+  const std::vector<uint8_t> plan = OverfitPlan();
+  ASSERT_FALSE(plan.empty());
+  UpdateEngine e;
+  ASSERT_OK(e.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d = TrainSet(), v = ValSet();
+  TrainOptions o = Quiet();
+  o.validation = &v;
+  o.eval_every = TrainOptions::kEvalEveryAuto;
+  ASSERT_OK_AND_ASSIGN(auto report, e.Train(d, 25, o));
+  EXPECT_EQ(report.eval_every, 2u);  // 25 / 10
+  EXPECT_EQ(report.evaluations, 12u);  // steps 2..24
+  // Without a validation set there is nothing to evaluate: no tracking.
+  UpdateEngine bare;
+  ASSERT_OK(bare.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d2 = TrainSet();
+  o.validation = nullptr;
+  ASSERT_OK_AND_ASSIGN(auto none, bare.Train(d2, 25, o));
+  EXPECT_FALSE(none.best_tracked);
+  EXPECT_EQ(none.eval_every, 0u);
 }
 
 }  // namespace

@@ -74,7 +74,8 @@
     }
   },
   "sekp": {
-    "magic": 1347110227, "version": 4, "oldest_readable": 3,
+    "magic": 1347110227, "version": 5, "oldest_readable": 3,
+    "flags": {"has_val_initial": 1, "has_accuracy": 2, "has_best_payload": 4, "has_best": 8},
     "structs": {
       "CkptHeader": {"size": 40, "fields": [
         {"name": "magic", "offset": 0, "size": 4},
@@ -86,6 +87,19 @@
       ]},
       "CkptHeaderV4Tail": {"size": 8, "fields": [
         {"name": "horizon_steps", "offset": 0, "size": 8}
+      ]},
+      "CkptHeaderV5Tail": {"size": 64, "fields": [
+        {"name": "shuffle_origin", "offset": 0, "size": 8},
+        {"name": "train_samples", "offset": 8, "size": 8},
+        {"name": "val_samples", "offset": 16, "size": 8},
+        {"name": "best_step", "offset": 24, "size": 8},
+        {"name": "best_payload_hash", "offset": 32, "size": 8},
+        {"name": "flags", "offset": 40, "size": 4},
+        {"name": "val_initial_loss_bits", "offset": 44, "size": 4},
+        {"name": "val_initial_accuracy_bits", "offset": 48, "size": 4},
+        {"name": "best_loss_bits", "offset": 52, "size": 4},
+        {"name": "best_accuracy_bits", "offset": 56, "size": 4},
+        {"name": "stale_evals", "offset": 60, "size": 4}
       ]}
     }
   },

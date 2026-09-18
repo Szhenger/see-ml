@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <expected>
 #include <initializer_list>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,8 @@ struct ByteSpan {
 /// concatenated blob.
 [[nodiscard]] std::expected<void, std::string> WriteFileDurable(
     const std::string& path, std::initializer_list<ByteSpan> parts);
+[[nodiscard]] std::expected<void, std::string> WriteFileDurable(
+    const std::string& path, std::span<const ByteSpan> parts);
 
 [[nodiscard]] std::expected<void, std::string> WriteFileDurable(
     const std::string& path, const uint8_t* data, size_t size);

@@ -5,6 +5,7 @@
 // fire before a byte reaches the arena).
 // =============================================================================
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <numeric>
@@ -240,6 +241,96 @@ TEST(Checkpoint, RejectsBitFlippedAndTruncatedFiles) {
   }
   EXPECT_ERROR(LoadCheckpointFile(dir.File("short.ckpt"), kPlanHash, kBytes,
                                   dst.data()));
+}
+
+TEST(Checkpoint, TheV5RecordRoundTripsWithItsBestPayload) {
+  // SEKP v5 (E9, #92): the run binding, the source model's score and the
+  // best state travel with the segment; the best payload is hashed and
+  // verified like the main one, and a peek reads the binding alone.
+  ScopedTempDir dir;
+  const std::vector<uint8_t> seg = Segment();
+  std::vector<uint8_t> best = seg;
+  for (auto& b : best) b ^= 0x5A;
+  CheckpointRecord record;
+  record.step = 12;
+  record.horizon_steps = 30;
+  record.shuffle_origin = 0x1234;
+  record.train_samples = 100;
+  record.val_samples = 11;
+  record.has_val_initial = true;
+  record.has_accuracy = true;
+  record.val_initial_loss = 0.75f;
+  record.val_initial_accuracy = 0.5f;
+  record.has_best = true;
+  record.best_step = 9;
+  record.best_loss = 0.25f;
+  record.best_accuracy = 0.875f;
+  record.stale_evals = 3;
+  record.best_payload = best;
+  ASSERT_OK(SaveCheckpointRecord(dir.File("v5.ckpt"), kPlanHash, record,
+                                 seg.data(), kBytes));
+
+  std::vector<uint8_t> dst(kBytes, 0xFF);
+  ASSERT_OK_AND_ASSIGN(
+      CheckpointRecord got,
+      LoadCheckpointRecord(dir.File("v5.ckpt"), kPlanHash, kBytes, dst.data()));
+  EXPECT_TRUE(dst == seg);
+  EXPECT_EQ(got.step, 12u);
+  EXPECT_EQ(got.horizon_steps, 30u);
+  EXPECT_TRUE(got.has_binding);
+  EXPECT_EQ(got.shuffle_origin, 0x1234u);
+  EXPECT_EQ(got.train_samples, 100u);
+  EXPECT_EQ(got.val_samples, 11u);
+  EXPECT_TRUE(got.has_val_initial);
+  EXPECT_TRUE(got.has_accuracy);
+  EXPECT_EQ(got.val_initial_loss, 0.75f);
+  EXPECT_EQ(got.val_initial_accuracy, 0.5f);
+  EXPECT_TRUE(got.has_best);
+  EXPECT_EQ(got.best_step, 9u);
+  EXPECT_EQ(got.best_loss, 0.25f);
+  EXPECT_EQ(got.best_accuracy, 0.875f);
+  EXPECT_EQ(got.stale_evals, 3u);
+  EXPECT_TRUE(got.best_payload == best);
+
+  ASSERT_OK_AND_ASSIGN(CheckpointRecord peek,
+                       PeekCheckpointRecord(dir.File("v5.ckpt")));
+  EXPECT_TRUE(peek.has_binding);
+  EXPECT_EQ(peek.shuffle_origin, 0x1234u);
+  EXPECT_EQ(peek.train_samples, 100u);
+  EXPECT_EQ(peek.val_samples, 11u);
+  EXPECT_EQ(peek.step, 12u);
+
+  // A flipped byte in the BEST payload is corruption too — and it is
+  // caught before the main payload reaches the arena.
+  ASSERT_OK_AND_ASSIGN(std::vector<uint8_t> raw,
+                       ReadFileBytes(dir.File("v5.ckpt")));
+  EXPECT_EQ(raw.size(), 40u + 8 + 64 + 2 * kBytes);
+  raw.back() ^= 0x01;
+  {
+    std::ofstream f(dir.File("bad-best.ckpt"), std::ios::binary);
+    f.write(reinterpret_cast<const char*>(raw.data()),
+            static_cast<std::streamsize>(raw.size()));
+  }
+  std::fill(dst.begin(), dst.end(), 0xFF);
+  EXPECT_ERROR(LoadCheckpointRecord(dir.File("bad-best.ckpt"), kPlanHash,
+                                    kBytes, dst.data()));
+  EXPECT_TRUE(std::all_of(dst.begin(), dst.end(),
+                          [](uint8_t b) { return b == 0xFF; }));
+
+  // Without a best payload the file is header + one segment, and the
+  // v3/v4-shaped call reads it (step and horizon) as before.
+  record.best_payload.clear();
+  ASSERT_OK(SaveCheckpointRecord(dir.File("lean.ckpt"), kPlanHash, record,
+                                 seg.data(), kBytes));
+  ASSERT_OK_AND_ASSIGN(raw, ReadFileBytes(dir.File("lean.ckpt")));
+  EXPECT_EQ(raw.size(), 40u + 8 + 64 + kBytes);
+  uint64_t horizon = 0;
+  ASSERT_OK_AND_ASSIGN(uint64_t step,
+                       LoadCheckpointFile(dir.File("lean.ckpt"), kPlanHash,
+                                          kBytes, dst.data(), &horizon));
+  EXPECT_EQ(step, 12u);
+  EXPECT_EQ(horizon, 30u);
+  EXPECT_TRUE(dst == seg);
 }
 
 }  // namespace

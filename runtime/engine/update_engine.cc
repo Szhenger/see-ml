@@ -370,6 +370,14 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   step_ = 0;
   horizon_ = 0;
   merged_ = false;
+  binding_ = {};
+  has_val_initial_ = val_initial_has_accuracy_ = false;
+  val_initial_loss_ = val_initial_accuracy_ = 0.0f;
+  has_best_ = false;
+  best_step_ = 0;
+  best_loss_ = best_accuracy_ = 0.0f;
+  stale_evals_ = 0;
+  best_state_.clear();
   return {};
 }
 
@@ -644,6 +652,24 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
       std::fprintf(stderr, "seeml-update: no checkpoint resumed (%s)\n",
                    r.error().c_str());
     } else if (step_ > 0) {
+      // The run binding (v5): the checkpoint's segment was trained on ONE
+      // shuffle stream over ONE train/validation split. A different seed
+      // or split would silently move the boundary — training on the first
+      // run's validation rows — so it is refused, not adjusted.
+      if (binding_.bound) {
+        const uint64_t val_n =
+            options.validation ? options.validation->num_samples() : 0;
+        if (binding_.shuffle_origin != data.shuffle_origin() ||
+            binding_.train_samples != data.num_samples() ||
+            binding_.val_samples != val_n)
+          return diag::executing::Error(
+              "resume refused: the checkpoint was written on a different "
+              "shuffle seed or train/validation split (" +
+              std::to_string(binding_.train_samples) + " train / " +
+              std::to_string(binding_.val_samples) +
+              " validation samples); resume with the first run's --seed "
+              "and --val-frac");
+      }
       // Replay the feeder to where the interrupted run stood: step_ batches
       // of header_.batch rows each. Without this, a resumed process serves
       // the permutation from the top, and its batch order — hence its
@@ -691,14 +717,74 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
         " steps) ends before the run does (step " +
         std::to_string(step_ + steps) + ")");
 
+  // The run binding every checkpoint of this run will carry.
+  binding_.bound = true;
+  binding_.shuffle_origin = data.shuffle_origin();
+  binding_.train_samples = data.num_samples();
+  binding_.val_samples =
+      options.validation ? options.validation->num_samples() : 0;
+
+  // Periodic evaluation (E9): "auto" resolves against the RUN — its
+  // horizon, already decided above — never against this call's step count,
+  // so a resumed run evaluates on the cadence the uninterrupted one did.
+  const uint64_t eval_every =
+      !options.validation ? 0
+      : options.eval_every == TrainOptions::kEvalEveryAuto
+          ? std::max<uint64_t>(1, horizon_ / 10)
+          : options.eval_every;
+  const bool track_best = options.validation && eval_every > 0;
+
   TrainReport report;
+  report.eval_every = eval_every;
+  report.patience = track_best ? options.patience : 0;
   if (options.validation) {
-    auto v = EvaluateMetrics(*options.validation);
-    if (!v) return std::unexpected(v.error());
     report.has_validation = true;
-    report.val_initial_loss = v->loss;
-    report.has_val_accuracy = v->has_accuracy;
-    report.val_initial_accuracy = v->accuracy;
+    if (resumed && has_val_initial_) {
+      // The gate's "before" is the SOURCE model's score, which only the
+      // first run could measure: a resumed run that re-measured would score
+      // the resumed adapter as its baseline and reject an update that
+      // merely held steady over the resumed segment.
+      report.val_initial_loss = val_initial_loss_;
+      report.has_val_accuracy = val_initial_has_accuracy_;
+      report.val_initial_accuracy = val_initial_accuracy_;
+    } else {
+      auto v = EvaluateMetrics(*options.validation);
+      if (!v) return std::unexpected(v.error());
+      report.val_initial_loss = v->loss;
+      report.has_val_accuracy = v->has_accuracy;
+      report.val_initial_accuracy = v->accuracy;
+      if (resumed)
+        std::fprintf(stderr,
+                     "seeml-update: note — the checkpoint predates the "
+                     "stored source-model score; the gate's baseline is the "
+                     "resumed state's loss %.6f\n",
+                     v->loss);
+      has_val_initial_ = true;
+      val_initial_loss_ = v->loss;
+      val_initial_has_accuracy_ = v->has_accuracy;
+      val_initial_accuracy_ = v->accuracy;
+    }
+    if (track_best) {
+      report.best_tracked = true;
+      // The bar to beat is the score of the state the run starts from:
+      // the source model's on a fresh run, the checkpoint's best on a
+      // resume. Until something beats it, the best state IS this one —
+      // labelled with ITS OWN score. A resume whose checkpoint carries the
+      // source model's score but no best (the first run did not track)
+      // starts from the resumed segment, not the source: scoring it as
+      // the source would let any later state between the two displace it.
+      if (!has_best_) {
+        float start_loss = report.val_initial_loss;
+        float start_accuracy = report.val_initial_accuracy;
+        if (resumed) {
+          auto v = EvaluateMetrics(*options.validation);
+          if (!v) return std::unexpected(v.error());
+          start_loss = v->loss;
+          start_accuracy = v->accuracy;
+        }
+        SnapshotBest(step_, start_loss, start_accuracy);
+      }
+    }
   }
 
   float* input_slot = WritePtr(header_.input_ref);
@@ -782,10 +868,43 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
       if (options.log_every && (s - start) % options.log_every == 0)
         std::fprintf(stderr, "seeml-update: step %llu  loss %.6f\n",
                      static_cast<unsigned long long>(step_), loss);
+      // Periodic evaluation (E9): every eval_every steps, except the last
+      // one, which the bracketing evaluation below scores. Before the
+      // checkpoint, so a checkpoint written this step carries the verdict.
+      // The eval program writes transients only, and the train program
+      // writes every transient it reads, so this changes no training bit.
+      bool out_of_patience = false;
+      // Keyed on the GLOBAL step: a resume re-enters mid-run, and keying
+      // on this call's count would evaluate at different steps than the
+      // uninterrupted run — and so, possibly, keep a different best.
+      if (track_best && step_ % eval_every == 0 &&
+          s + 1 < start + steps) {
+        auto v = EvaluateMetrics(*options.validation);
+        if (!v) return std::unexpected(v.error());
+        ++report.evaluations;
+        if (v->loss < best_loss_) {
+          SnapshotBest(step_, v->loss, v->accuracy);
+        } else {
+          ++stale_evals_;
+          out_of_patience =
+              options.patience > 0 && stale_evals_ >= options.patience;
+        }
+        if (options.log_every)
+          std::fprintf(stderr,
+                       "seeml-update: step %llu  validation loss %.6f "
+                       "(best %.6f at step %llu)\n",
+                       static_cast<unsigned long long>(step_), v->loss,
+                       best_loss_,
+                       static_cast<unsigned long long>(best_step_));
+      }
       if (options.checkpoint_every && !options.checkpoint_path.empty() &&
           step_ % options.checkpoint_every == 0) {
         if (auto r = SaveCheckpoint(options.checkpoint_path); !r)
           return std::unexpected(r.error());
+      }
+      if (out_of_patience) {
+        report.stopped_by_patience = true;
+        break;
       }
     }
   }
@@ -799,10 +918,42 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
   if (options.validation) {
     auto v = EvaluateMetrics(*options.validation);
     if (!v) return std::unexpected(v.error());
-    report.val_final_loss = v->loss;
-    report.val_final_accuracy = v->accuracy;
+    report.val_last_loss = v->loss;
+    report.val_last_accuracy = v->accuracy;
+    if (track_best) {
+      if (v->loss < best_loss_) SnapshotBest(step_, v->loss, v->accuracy);
+      // Leave the best evaluated state in the arena: it is what RunMerge
+      // and CommitToModel will ship. A checkpoint written after this
+      // carries it as both payloads.
+      if (best_step_ != step_) {
+        std::memcpy(arena_, best_state_.data(), best_state_.size());
+        if (options.log_every)
+          std::fprintf(stderr,
+                       "seeml-update: restored the best state (step %llu, "
+                       "validation loss %.6f); the last state (step %llu) "
+                       "scored %.6f\n",
+                       static_cast<unsigned long long>(best_step_),
+                       best_loss_, static_cast<unsigned long long>(step_),
+                       v->loss);
+      }
+      report.best_step = best_step_;
+      report.val_final_loss = best_loss_;
+      report.val_final_accuracy = best_accuracy_;
+    } else {
+      report.val_final_loss = v->loss;
+      report.val_final_accuracy = v->accuracy;
+    }
   }
   return report;
+}
+
+void UpdateEngine::SnapshotBest(uint64_t step, float loss, float accuracy) {
+  best_state_.assign(arena_, arena_ + header_.persistent_size);
+  has_best_ = true;
+  best_step_ = step;
+  best_loss_ = loss;
+  best_accuracy_ = accuracy;
+  stale_evals_ = 0;
 }
 
 std::expected<void, std::string> UpdateEngine::RunMerge() {
@@ -921,19 +1072,59 @@ std::expected<void, std::string> UpdateEngine::CommitToModel(
 
 std::expected<void, std::string> UpdateEngine::SaveCheckpoint(
     const std::string& path) const {
-  // The run horizon rides along (v4): a resume trains the remainder to it.
-  return SaveCheckpointFile(path, header_.plan_hash, step_, arena_,
-                            header_.persistent_size, horizon_);
+  // The run horizon rides along (v4): a resume trains the remainder to it;
+  // and (v5) the run binding, the source model's score and the best state.
+  CheckpointRecord record;
+  record.step = step_;
+  record.horizon_steps = horizon_;
+  record.shuffle_origin = binding_.shuffle_origin;
+  record.train_samples = binding_.train_samples;
+  record.val_samples = binding_.val_samples;
+  record.has_val_initial = has_val_initial_;
+  record.has_accuracy = val_initial_has_accuracy_;
+  record.val_initial_loss = val_initial_loss_;
+  record.val_initial_accuracy = val_initial_accuracy_;
+  record.has_best = has_best_;
+  record.best_step = best_step_;
+  record.best_loss = best_loss_;
+  record.best_accuracy = best_accuracy_;
+  record.stale_evals = stale_evals_;
+  // The best payload is written only while it differs from the segment
+  // being saved: at the moment of a new best the two are the same bytes,
+  // and a resume rebuilds the copy from the main payload.
+  if (has_best_ && best_step_ != step_) record.best_payload = best_state_;
+  return SaveCheckpointRecord(path, header_.plan_hash, record, arena_,
+                              header_.persistent_size);
 }
 
 std::expected<void, std::string> UpdateEngine::LoadCheckpoint(
     const std::string& path) {
-  uint64_t horizon = 0;
-  auto step = LoadCheckpointFile(path, header_.plan_hash,
-                                 header_.persistent_size, arena_, &horizon);
-  if (!step) return std::unexpected(step.error());
-  step_ = *step;
-  horizon_ = horizon;  // 0 from a v3 file: the plan's default, as before
+  auto record = LoadCheckpointRecord(path, header_.plan_hash,
+                                      header_.persistent_size, arena_);
+  if (!record) return std::unexpected(record.error());
+  step_ = record->step;
+  horizon_ = record->horizon_steps;  // 0 from a v3 file: the plan's default
+  binding_.bound = record->has_binding;
+  binding_.shuffle_origin = record->shuffle_origin;
+  binding_.train_samples = record->train_samples;
+  binding_.val_samples = record->val_samples;
+  has_val_initial_ = record->has_val_initial;
+  val_initial_has_accuracy_ = record->has_accuracy;
+  val_initial_loss_ = record->val_initial_loss;
+  val_initial_accuracy_ = record->val_initial_accuracy;
+  has_best_ = record->has_best;
+  best_step_ = record->best_step;
+  best_loss_ = record->best_loss;
+  best_accuracy_ = record->best_accuracy;
+  stale_evals_ = record->stale_evals;
+  // The best payload, or — when the checkpoint was written at a new best —
+  // the main payload, which is the same bytes.
+  if (!has_best_)
+    best_state_.clear();
+  else if (!record->best_payload.empty())
+    best_state_ = std::move(record->best_payload);
+  else
+    best_state_.assign(arena_, arena_ + header_.persistent_size);
   // The restored persistent segment replaces the adapter state any earlier
   // RunMerge materialized deltas from; committing those would patch deltas
   // that no longer match the parameters.

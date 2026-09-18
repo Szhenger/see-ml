@@ -24,6 +24,7 @@ import math
 import os
 import re
 import struct
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -621,13 +622,20 @@ class DifferentialSuite(unittest.TestCase):
             text=True)
         binary = os.path.join(out, "model_update")
         if done.returncode != 0 or not os.path.exists(binary):
-            self.skipTest("no C++ toolchain to build the emitted package")
+            # A missing toolchain is a skip; a package that does not build
+            # under the toolchain that built the compiler is a failure.
+            if shutil.which(os.environ.get("CXX", "c++")) is None:
+                self.skipTest("no C++ toolchain to build the emitted package")
+            self.fail(f"the emitted package did not build:\n{done.stdout[-3000:]}")
         corpus = os.path.join(self.dir, "decoder_corpus.sds")
         log = os.path.join(out, "loss.csv")
         trained = subprocess.run(
             [binary, "--model", os.path.join(self.dir, "decoder.smf"),
              "--data", corpus, "--out", os.path.join(out, "updated.smf"),
              "--steps", "25", "--seed", "11", "--val-frac", "0.25",
+             # The last state, as `frontier_exec run` trains it: the
+             # best-state gate (E9) would commit an earlier one.
+             "--eval-every", "0",
              "--loss-log", log, "--force"], stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True)
         self.assertEqual(trained.returncode, 0, trained.stdout)
