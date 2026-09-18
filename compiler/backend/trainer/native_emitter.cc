@@ -400,7 +400,8 @@ int main(int argc, char** argv) {
       std::fprintf(stderr,
                    "model_update: --resume refused: '%s' was written with a "
                    "different --seed or --val-frac (%llu train / %llu "
-                   "validation samples); resume with the first run's\n",
+                   "validation samples); resume with the first run's "
+                   "--seed and --val-frac\n",
                    options.checkpoint_path.c_str(),
                    (unsigned long long)peek->train_samples,
                    (unsigned long long)peek->val_samples);
