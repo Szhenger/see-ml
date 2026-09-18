@@ -1475,6 +1475,58 @@ TEST(UpdateEngineBest, ResumeKeepsTheSourceModelScoreAndTheBest) {
   EXPECT_TRUE(Persistent(resumed) == want);
 }
 
+TEST(UpdateEngineBest, AResumedStartIsScoredAsItselfNotAsTheSource) {
+  // The first run evaluates but does not track (eval_every 0), so its
+  // checkpoint carries the source model's score and no best state. It is
+  // interrupted at step 7 — this corpus's best — and the resume tracks.
+  // Every later state is worse than step 7 yet better than the source, so
+  // a resume that labelled its starting segment with the SOURCE score
+  // would let step 8 displace it (ultrareview on #125). The start must be
+  // scored as itself, and what the run reports must be what it holds.
+  using namespace best_state;
+  const std::vector<uint8_t> plan = OverfitPlan();
+  ASSERT_FALSE(plan.empty());
+  ScopedTempDir tmp;
+  const std::string ckpt = tmp.File("untracked.ckpt");
+  UpdateEngine first;
+  ASSERT_OK(first.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d1 = TrainSet(), v1 = ValSet();
+  TrainOptions cut = Quiet();
+  cut.validation = &v1;
+  cut.checkpoint_path = ckpt;
+  cut.checkpoint_every = 1;
+  uint64_t polls = 0;
+  cut.should_stop = [&] { return polls++ == 7; };
+  ASSERT_OK_AND_ASSIGN(auto head, first.Train(d1, 11, cut));
+  ASSERT_TRUE(head.stopped_early);
+  ASSERT_FALSE(head.best_tracked);
+  ASSERT_EQ(first.step(), 7u);
+
+  UpdateEngine resumed;
+  ASSERT_OK(resumed.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d2 = TrainSet(), v2 = ValSet();
+  TrainOptions ropt = Quiet();
+  ropt.validation = &v2;
+  ropt.checkpoint_path = ckpt;
+  ropt.resume = true;
+  ropt.eval_every = 1;
+  ASSERT_OK_AND_ASSIGN(auto rest, resumed.Train(d2, 0, ropt));
+  EXPECT_EQ(rest.steps, 4u);
+  EXPECT_EQ(rest.val_initial_loss, head.val_initial_loss);  // the source's
+  EXPECT_EQ(rest.best_step, 7u);
+  EXPECT_LT(rest.val_final_loss, rest.val_last_loss);
+  // The reported score is the held state's score.
+  Dataset v3 = ValSet();
+  ASSERT_OK_AND_ASSIGN(float held, resumed.Evaluate(v3));
+  EXPECT_EQ(held, rest.val_final_loss);
+  // And the held state is step 7's, byte for byte.
+  UpdateEngine fresh;
+  ASSERT_OK(fresh.LoadFromMemory(plan.data(), plan.size()));
+  Dataset d3 = TrainSet();
+  ASSERT_OK(fresh.Train(d3, 7, Quiet()));
+  EXPECT_TRUE(Persistent(resumed) == Persistent(fresh));
+}
+
 TEST(UpdateEngineBest, ResumeRefusesADifferentSeedOrSplit) {
   using namespace best_state;
   const std::vector<uint8_t> plan = OverfitPlan();

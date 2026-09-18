@@ -768,10 +768,22 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
       report.best_tracked = true;
       // The bar to beat is the score of the state the run starts from:
       // the source model's on a fresh run, the checkpoint's best on a
-      // resume. Until something beats it, the best state IS this one.
-      if (!has_best_)
-        SnapshotBest(step_, report.val_initial_loss,
-                     report.val_initial_accuracy);
+      // resume. Until something beats it, the best state IS this one —
+      // labelled with ITS OWN score. A resume whose checkpoint carries the
+      // source model's score but no best (the first run did not track)
+      // starts from the resumed segment, not the source: scoring it as
+      // the source would let any later state between the two displace it.
+      if (!has_best_) {
+        float start_loss = report.val_initial_loss;
+        float start_accuracy = report.val_initial_accuracy;
+        if (resumed) {
+          auto v = EvaluateMetrics(*options.validation);
+          if (!v) return std::unexpected(v.error());
+          start_loss = v->loss;
+          start_accuracy = v->accuracy;
+        }
+        SnapshotBest(step_, start_loss, start_accuracy);
+      }
     }
   }
 
