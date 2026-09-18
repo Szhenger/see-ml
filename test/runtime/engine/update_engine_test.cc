@@ -8,6 +8,7 @@
 #include <cstring>
 #include <fstream>
 #include <limits>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -1274,24 +1275,49 @@ std::vector<uint8_t> Persistent(UpdateEngine& e) {
                               e.arena() + e.header().persistent_size);
 }
 
-/// A tiny training set and a held-out set drawn from the same rule (seed
-/// 21 gives both one w_true), at a learning rate where the held-out loss
-/// dips for seven steps and then climbs — the small-corpus shape the issue
-/// describes.
+/// A classification set drawn PORTABLY: mt19937_64's raw output is fixed by
+/// the standard, and the floats are derived from it here by plain
+/// arithmetic — std::normal_distribution is implementation-defined, and
+/// gave libstdc++ and libc++ different corpora (and so different training
+/// curves) for one seed. Every sample shares one rule, w_true from `rule`.
+Dataset PortableSet(uint64_t n, uint64_t sample_seed, uint64_t rule) {
+  auto unit = [](std::mt19937_64& g) {  // [-1, 1), exact in f32
+    return static_cast<float>(static_cast<double>(g() >> 40) /
+                                  static_cast<double>(1ull << 23) -
+                              1.0);
+  };
+  std::mt19937_64 wr(rule), xr(sample_seed);
+  std::vector<float> w(kInDim), x(n * kInDim);
+  for (float& v : w) v = unit(wr);
+  std::vector<uint8_t> labels(n * sizeof(int32_t));
+  auto* lab = reinterpret_cast<int32_t*>(labels.data());
+  for (uint64_t i = 0; i < n; ++i) {
+    float dot = 0.0f;
+    for (int64_t c = 0; c < kInDim; ++c) {
+      x[i * kInDim + c] = unit(xr);
+      const float prod = x[i * kInDim + c] * w[c];
+      dot += prod;
+    }
+    lab[i] = dot > 0.0f ? 1 : 0;
+  }
+  auto d = Dataset::FromMemory(std::move(x), std::move(labels), n, kInDim,
+                               /*label_kind=*/1, /*label_dim=*/0);
+  if (!d) std::abort();
+  return std::move(*d);
+}
+
+/// A tiny training set and a held-out set drawn from one rule, at a
+/// learning rate where the held-out loss dips and then climbs — the
+/// small-corpus shape the issue describes.
 Dataset TrainSet() {
-  auto d = MakeClassificationData(8, kInDim, 21);
-  if (!d) std::abort();
-  d->EnableShuffle(3);
-  return std::move(*d);
+  Dataset d = PortableSet(8, 101, 7);
+  d.EnableShuffle(3);
+  return d;
 }
-Dataset ValSet() {
-  auto d = MakeClassificationData(96, kInDim, 21);
-  if (!d) std::abort();
-  return std::move(*d);
-}
+Dataset ValSet() { return PortableSet(96, 202, 7); }
 std::vector<uint8_t> OverfitPlan() {
   UpdateConfig config = BaseConfig(kBatch);
-  config.optimizer.lr = 0.01f;
+  config.optimizer.lr = 0.02f;
   return CompilePlan(config, 4);
 }
 
@@ -1344,7 +1370,7 @@ TEST(UpdateEngineBest, CommitsTheBestEvaluatedStateNotTheLast) {
   using namespace best_state;
   const std::vector<uint8_t> plan = OverfitPlan();
   ASSERT_FALSE(plan.empty());
-  const uint64_t steps = 9;
+  const uint64_t steps = 11;
 
   // The oracle: the held-out loss of every state from step 0 on, from an
   // untracked run stepped one at a time (each Train call evaluates its
@@ -1410,7 +1436,11 @@ TEST(UpdateEngineBest, ResumeKeepsTheSourceModelScoreAndTheBest) {
   TrainOptions o = Quiet();
   o.validation = &v1;
   o.eval_every = 2;
-  ASSERT_OK_AND_ASSIGN(auto whole, straight.Train(d1, 24, o));
+  ASSERT_OK_AND_ASSIGN(auto whole, straight.Train(d1, 11, o));
+  // The best comes after the interruption below, at an even step: a
+  // resume that keyed the cadence on its own step count (evaluating at 5,
+  // 7, 9 instead of 4, 6, 8, 10) would keep a different best (#124 CI).
+  ASSERT_GT(whole.best_step, 3u);
   const std::vector<uint8_t> want = Persistent(straight);
 
   UpdateEngine first;
@@ -1421,10 +1451,10 @@ TEST(UpdateEngineBest, ResumeKeepsTheSourceModelScoreAndTheBest) {
   cut.checkpoint_path = ckpt;
   cut.checkpoint_every = 1;
   uint64_t polls = 0;
-  cut.should_stop = [&] { return polls++ == 15; };
-  ASSERT_OK_AND_ASSIGN(auto head, first.Train(d2, 24, cut));
+  cut.should_stop = [&] { return polls++ == 3; };
+  ASSERT_OK_AND_ASSIGN(auto head, first.Train(d2, 11, cut));
   EXPECT_TRUE(head.stopped_early);
-  EXPECT_EQ(first.step(), 15u);
+  EXPECT_EQ(first.step(), 3u);
 
   UpdateEngine resumed;
   ASSERT_OK(resumed.LoadFromMemory(plan.data(), plan.size()));
@@ -1434,7 +1464,7 @@ TEST(UpdateEngineBest, ResumeKeepsTheSourceModelScoreAndTheBest) {
   ropt.checkpoint_path = ckpt;
   ropt.resume = true;
   ASSERT_OK_AND_ASSIGN(auto rest, resumed.Train(d3, 0, ropt));
-  EXPECT_EQ(rest.steps, 9u);
+  EXPECT_EQ(rest.steps, 8u);
   // The gate's "before" is still the source model's score, not the
   // resumed adapter's; the best and the committed bytes are the whole
   // run's.

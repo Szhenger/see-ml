@@ -724,11 +724,13 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
   binding_.val_samples =
       options.validation ? options.validation->num_samples() : 0;
 
-  // Periodic evaluation (E9): resolved against the run's step count.
+  // Periodic evaluation (E9): "auto" resolves against the RUN — its
+  // horizon, already decided above — never against this call's step count,
+  // so a resumed run evaluates on the cadence the uninterrupted one did.
   const uint64_t eval_every =
       !options.validation ? 0
       : options.eval_every == TrainOptions::kEvalEveryAuto
-          ? std::max<uint64_t>(1, steps / 10)
+          ? std::max<uint64_t>(1, horizon_ / 10)
           : options.eval_every;
   const bool track_best = options.validation && eval_every > 0;
 
@@ -860,7 +862,10 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
       // The eval program writes transients only, and the train program
       // writes every transient it reads, so this changes no training bit.
       bool out_of_patience = false;
-      if (track_best && executed % eval_every == 0 &&
+      // Keyed on the GLOBAL step: a resume re-enters mid-run, and keying
+      // on this call's count would evaluate at different steps than the
+      // uninterrupted run — and so, possibly, keep a different best.
+      if (track_best && step_ % eval_every == 0 &&
           s + 1 < start + steps) {
         auto v = EvaluateMetrics(*options.validation);
         if (!v) return std::unexpected(v.error());
