@@ -654,11 +654,19 @@ class DifferentialSuite(unittest.TestCase):
                 self.skipTest("no C++ toolchain to build the emitted package")
             self.fail(f"the emitted package did not build:\n{done.stdout[-3000:]}")
         corpus = os.path.join(self.dir, "decoder_corpus.sds")
+        # 0.25 splits 12 validation records (whole batches of 2); 0.2
+        # splits 9, so the final eval batch wraps and both sides must score
+        # its real rows alone (G13, #97).
+        for frac in ("0.25", "0.2"):
+            with self.subTest(val_fraction=frac):
+                self._run_matches_package(out, binary, corpus, frac)
+
+    def _run_matches_package(self, out, binary, corpus, frac):
         log = os.path.join(out, "loss.csv")
         trained = subprocess.run(
             [binary, "--model", os.path.join(self.dir, "decoder.smf"),
              "--data", corpus, "--out", os.path.join(out, "updated.smf"),
-             "--steps", "25", "--seed", "11", "--val-frac", "0.25",
+             "--steps", "25", "--seed", "11", "--val-frac", frac,
              # The last state, as `frontier_exec run` trains it: the
              # best-state gate (E9) would commit an earlier one.
              "--eval-every", "0",
@@ -674,7 +682,7 @@ class DifferentialSuite(unittest.TestCase):
             self.assertEqual(fx.main([
                 "run", os.path.join(out, "update_plan.seeu"), "--corpus",
                 corpus, "--steps", "25", "--seed", "11", "--val-fraction",
-                "0.25", "--log-every", "0", "--report", report]), 0)
+                frac, "--log-every", "0", "--report", report]), 0)
         with open(report) as f:
             ran = json.load(f)
         self.assertEqual(len(cpp), 25)

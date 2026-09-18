@@ -1378,20 +1378,73 @@ class Executor:
         self.mem.sync()
         return total / self.plan.grad_accum
 
-    def evaluate(self, corpus):
-        """Mean eval-program loss over one pass in compiled-batch chunks
-        (the final partial batch wraps, as in the engine)."""
+    def _eval_tail(self):
+        """How the engine scores a final batch's real rows (G13): ("xent",
+        probs, labels, classes) or ("mse", pred, target, per_row) for a
+        lone row-separable loss, else ("weighted",)."""
         p = self.plan
-        per_step = p.batch // (p.seq_len if p.input_kind == 1 else 1)
+        for ins in p.sections["eval"]:
+            if ins.opcode == 11 and ins.src[2] == p.loss_ref and \
+                    ins.out[0] == p.batch:
+                return ("xent", ins.src[3], ins.src[1], ins.out[1])
+            if ins.opcode == 13 and ins.src[2] == p.loss_ref and \
+                    p.batch and ins.out[0] % p.batch == 0:
+                return ("mse", ins.src[0], ins.src[1], ins.out[0] // p.batch)
+        return ("weighted",)
+
+    def _real_row_loss(self, tail, real):
+        """The engine's RealRowLoss: the sum of per-row losses over the
+        batch's first `real` rows, in double, with the kernels' own row
+        expressions."""
+        if tail[0] == "xent":
+            _, probs_ref, labels_ref, classes = tail
+            probs = self.x.to_numpy(self.mem.read(
+                probs_ref, (self.plan.batch, classes)))
+            labels = self.x.to_numpy(self.mem.read(
+                labels_ref, (self.plan.batch,), "<i4"))
+            total = 0.0
+            for r in range(real):
+                pr = float(probs[r, int(labels[r])])
+                total -= math.log(pr if pr != pr else max(pr, f32(1e-12)))
+            return total
+        if tail[0] == "mse":
+            _, pred_ref, target_ref, width = tail
+            n = self.plan.batch * width
+            pred = self.x.to_numpy(self.mem.read(pred_ref, (n,)))
+            target = self.x.to_numpy(self.mem.read(target_ref, (n,)))
+            total = 0.0
+            for i in range(real * width):
+                d = float(pred[i]) - float(target[i])
+                total += d * d
+            return total / width
+        return self.mem.loss() * real
+
+    def evaluate(self, corpus):
+        """Eval-program loss over one pass in compiled-batch chunks, as the
+        engine reports it: the plain mean of the batch losses when the set
+        is whole batches, else the mean over REAL rows — the final batch's
+        wrapped duplicates excluded exactly for a lone cross-entropy or MSE,
+        by weight for a composite loss (G13, #97)."""
+        p = self.plan
+        rows_per_sample = p.seq_len if p.input_kind == 1 else 1
+        per_step = p.batch // rows_per_sample
         batches = max(1, -(-corpus.num_samples // per_step))
+        ragged = corpus.num_samples % per_step != 0
+        tail = self._eval_tail() if ragged else None
         saved = (corpus.cursor, corpus.order, corpus.state)
         corpus.cursor, total = 0, 0.0
-        for _ in range(batches):
+        real_loss, real_rows = 0.0, 0
+        for b in range(batches):
             self.stage(corpus.batch(p))
             self.execute("eval")
             total += self.mem.loss()
+            if ragged:
+                real = min(per_step, corpus.num_samples - b * per_step) * \
+                    rows_per_sample
+                real_loss += self._real_row_loss(tail, real)
+                real_rows += real
         corpus.cursor, corpus.order, corpus.state = saved
-        return total / batches
+        return real_loss / real_rows if ragged else total / batches
 
 
 # --- diff: the oracle ------------------------------------------------------------

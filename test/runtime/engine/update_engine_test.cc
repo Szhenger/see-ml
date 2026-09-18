@@ -1113,6 +1113,76 @@ std::vector<uint8_t> CosinePlan(uint64_t warmup = 0) {
   return CompilePlan(config);
 }
 
+TEST(UpdateEngineEval, AWrappedFinalBatchReportsTheRealSamplesMean) {
+  // G13 (#97): a validation set smaller than a batch wraps; the reported
+  // loss is the mean over its REAL samples, not over a batch dominated by
+  // duplicates. Each sample alone (a one-sample set wraps to a batch of
+  // copies of itself, so its batch mean IS its loss) is the oracle.
+  // Cross-entropy and MSE — the row-separable losses — are exact.
+  for (const LossKind loss : {LossKind::kSoftmaxXEnt, LossKind::kMse}) {
+    UpdateConfig config = BaseConfig(32);
+    config.loss = loss;
+    SmfModel model = MakeMlp(kInDim, 10, 3, 5);
+    auto compiled = UpdateCompiler(config).Compile(model);
+    ASSERT_TRUE(compiled.has_value());
+    UpdateEngine engine;
+    ASSERT_OK(engine.LoadFromMemory(compiled->plan.data(),
+                                    compiled->plan.size()));
+    std::mt19937_64 rng(77);
+    std::normal_distribution<float> dist(0.0f, 1.0f);
+    const uint64_t n = 5;
+    std::vector<float> x(n * kInDim);
+    for (auto& v : x) v = dist(rng);
+    std::vector<uint8_t> labels;
+    if (loss == LossKind::kSoftmaxXEnt) {
+      labels.resize(n * sizeof(int32_t));
+      auto* lab = reinterpret_cast<int32_t*>(labels.data());
+      for (uint64_t i = 0; i < n; ++i) lab[i] = static_cast<int32_t>(i % 3);
+    } else {
+      std::vector<float> t(n * 3);
+      for (auto& v : t) v = dist(rng);
+      labels.assign(reinterpret_cast<const uint8_t*>(t.data()),
+                    reinterpret_cast<const uint8_t*>(t.data() + t.size()));
+    }
+    const uint32_t kind = loss == LossKind::kSoftmaxXEnt ? 1 : 2;
+    const uint64_t label_dim = loss == LossKind::kSoftmaxXEnt ? 0 : 3;
+    const uint64_t label_row = labels.size() / n;
+    double sum = 0.0;
+    for (uint64_t i = 0; i < n; ++i) {
+      std::vector<float> xi(x.begin() + i * kInDim,
+                            x.begin() + (i + 1) * kInDim);
+      std::vector<uint8_t> li(labels.begin() + i * label_row,
+                              labels.begin() + (i + 1) * label_row);
+      ASSERT_OK_AND_ASSIGN(Dataset one,
+                           Dataset::FromMemory(std::move(xi), std::move(li),
+                                               1, kInDim, kind, label_dim));
+      ASSERT_OK_AND_ASSIGN(float alone, engine.Evaluate(one));
+      sum += alone;
+    }
+    ASSERT_OK_AND_ASSIGN(Dataset five,
+                         Dataset::FromMemory(std::vector<float>(x),
+                                             std::vector<uint8_t>(labels), n,
+                                             kInDim, kind, label_dim));
+    ASSERT_OK_AND_ASSIGN(float got, engine.Evaluate(five));
+    EXPECT_NEAR(got, sum / n, 2e-6 * (1.0 + std::fabs(sum / n)));
+  }
+}
+
+TEST(UpdateEngineLr, PastTheHorizonTheRateStaysAtTheDefaultFloor) {
+  // G13 (#97): the default floor (0.1 since E8) holds after the horizon —
+  // a step past it neither restarts the cosine nor falls to zero.
+  const std::vector<uint8_t> plan = CosinePlan();
+  ASSERT_FALSE(plan.empty());
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(plan.data(), plan.size()));
+  const uint64_t budget = engine.header().default_steps;
+  EXPECT_EQ(engine.header().min_lr_factor, 0.1f);
+  for (const uint64_t step : {budget, budget + 1, 2 * budget + 7}) {
+    engine.SetStep(step);
+    EXPECT_NEAR(engine.EffectiveLr(), 0.1f * 0.1f, 1e-7);
+  }
+}
+
 TEST(UpdateEngineLr, TheHorizonIsTheRunNotTheCompiledBudget) {
   // The same 1000-step plan, run for 20 steps and for 60: each anneals
   // over ITS OWN length and reaches the floor on its last step. Before E8

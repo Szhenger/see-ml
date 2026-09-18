@@ -339,6 +339,31 @@ TEST(UpdateSystem, AccumulatedGradientsMatchTheLargeBatchGradient) {
   EXPECT_GT(checked, 20u);
 }
 
+TEST(UpdateSystem, MseGradientsMatchFiniteDifferences) {
+  // G13 (#97): the MSE loss through the compiled backward against the
+  // compiled forward — every other program-level FD check used xent or
+  // the KL family.
+  const int64_t in_dim = 5, hidden = 7, out_dim = 3, batch = 2;
+  SmfModel model = MakeMlp(in_dim, hidden, out_dim, 63);
+  UpdateConfig config = BaseConfig(batch);
+  config.loss = LossKind::kMse;
+  config.lora.rank = 3;
+  config.emit_optimizer = false;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+  std::mt19937_64 rng(6363);
+  std::normal_distribution<float> dist(0.0f, 1.0f);
+  std::vector<float> x(batch * in_dim);
+  for (auto& v : x) v = dist(rng);
+  FillSlots(engine, x, {});
+  ASSERT_EQ(engine.header().label_bytes, batch * out_dim * sizeof(float));
+  for (int64_t i = 0; i < batch * out_dim; ++i)
+    WriteArenaF32(engine, engine.header().label_ref, i, dist(rng));
+  GradientCheck(compiled, engine, 6363);
+}
+
 TEST(UpdateSystem, DistillationGradientsMatchFiniteDifferences) {
   // The T^2-scaled KL loss (#13) and the composite (1-w)·xent + w·kl, each
   // checked through the compiled backward against the compiled forward —
