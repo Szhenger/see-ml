@@ -4,9 +4,11 @@
 // =============================================================================
 
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "compiler/frontend/ingressor/model_reader.h"
@@ -199,7 +201,49 @@ TEST(Smf, SaveLoadRoundTripsV5RopeBase) {
   f.read(reinterpret_cast<char*>(&version), sizeof(version));
   EXPECT_EQ(magic, kSmfMagic);
   EXPECT_EQ(version, kSmfVersion);
-  EXPECT_EQ(version, 5u);
+  EXPECT_EQ(version, 6u);
+}
+
+TEST(Smf, SaveLoadRoundTripsV6NormEpsilon) {
+  // SMF v6 (P7, #96): attr2 carries a LayerNorm / RmsNorm epsilon's f32
+  // bits (0 = 1e-5). A Qwen2-class 1e-6 survives the round trip on every
+  // norm op and nowhere else.
+  ScopedTempDir dir;
+  SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 9);
+  const uint32_t qwen = std::bit_cast<uint32_t>(1e-6f);
+  size_t norms = 0;
+  for (SmfOp& op : model.ops)
+    if (op.kind == SmfOpKind::kRmsNorm) {
+      op.attr2 = qwen;
+      ++norms;
+    }
+  ASSERT_GT(norms, 0u);
+  const std::string path = dir.File("decoder_v6.smf");
+  ASSERT_OK(SaveSmf(path, model));
+  ASSERT_OK_AND_ASSIGN(SmfModel loaded, LoadSmf(path));
+  for (size_t i = 0; i < model.ops.size(); ++i)
+    EXPECT_EQ(loaded.ops[i].attr2,
+              model.ops[i].kind == SmfOpKind::kRmsNorm ? qwen : 0u);
+}
+
+TEST(Smf, LoadRejectsAnAttr2ThatIsNotANormEpsilon) {
+  // attr2 is a norm's epsilon and nothing else's; when set it must be a
+  // finite positive float.
+  ScopedTempDir dir;
+  for (const auto& [kind, bits, why] :
+       {std::tuple{SmfOpKind::kAttention, std::bit_cast<uint32_t>(1e-6f),
+                   "nonzero attr2"},
+        std::tuple{SmfOpKind::kRmsNorm, std::bit_cast<uint32_t>(-1e-6f),
+                   "finite positive"},
+        std::tuple{SmfOpKind::kRmsNorm, std::bit_cast<uint32_t>(INFINITY),
+                   "finite positive"}}) {
+    SmfModel model = seeml::testing::MakeTinyDecoder(8, 2, 4, 12, 3, 9);
+    for (SmfOp& op : model.ops)
+      if (op.kind == kind) op.attr2 = bits;
+    const std::string path = dir.File("bad_attr2.smf");
+    ASSERT_OK(SaveSmf(path, model));
+    EXPECT_ERROR_CONTAINS(LoadSmf(path), why);
+  }
 }
 
 TEST(Smf, LoadRejectsAttr1OnKindsThatDoNotDefineIt) {

@@ -93,7 +93,24 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // / kAttnDVTiled, four opcodes that keep O(B·H·S) attention state instead
 // of the O(B·H·S²) probability cache. Additive, rejected below v15;
 // bit-identical to the cached family they stand in for.
-inline constexpr uint32_t kSeeuVersion = 15;
+// v16: the normalization epsilon (P7, #96) — the instruction's former pad
+// word is `imm`, and kLayerNormFwd / kRmsNormFwd carry the epsilon's f32
+// bits in it (0 = 1e-5, what every earlier plan meant). Additive: a
+// nonzero imm anywhere else, or below v16, is corruption.
+// v17: score what ships (E12, #95) — a third address space for tensor refs,
+// the source model file (kSourceBit), admitted in the eval program only:
+// under --quantize-base / --bf16-base the eval program reads the student's
+// frozen weights as the f32 the commit patches, not as the plan's narrow
+// copies, so every gate and best-state evaluation scores the function that
+// ships. The q8 GEMMs also take a per-output-column scale vector (a rodata
+// ref in in[3] where the per-tensor scale bits were). Rejected below v17.
+inline constexpr uint32_t kSeeuVersion = 17;
+
+// The version that introduced source refs and per-column int8 scales.
+inline constexpr uint32_t kSeeuShippedEvalVersion = 17;
+
+// The version that gave the instruction's imm word meaning.
+inline constexpr uint32_t kSeeuNormEpsVersion = 16;
 
 // The version that introduced the tiled attention family.
 inline constexpr uint32_t kSeeuTiledAttentionVersion = 15;

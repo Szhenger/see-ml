@@ -69,9 +69,10 @@ class Layout:
 # --- SMF: the model container (source/language/model_format.h) ---------------
 
 SMF_MAGIC = 0x31464D53  # "SMF1"
-SMF_VERSION = 5         # v5: per-op attr1 (RoPE base as f32 bits) after attr0
+SMF_VERSION = 6         # v6: per-op attr2 (norm epsilon as f32 bits) after attr1
 SMF_MIN_VERSION = 1
 SMF_DEFAULT_ROPE_BASE = 10000.0  # what attr1 == 0 means on a Rope op
+SMF_DEFAULT_NORM_EPS = 1e-5  # what attr2 == 0 means on a LayerNorm / RmsNorm
 SMF_OP_KINDS = {
     "matmul": 0, "add_bias": 1, "relu": 2, "gelu": 3, "silu": 4, "mul": 5,
     "layer_norm": 6, "add": 7, "rms_norm": 8, "rope": 9, "attention": 10,
@@ -96,9 +97,10 @@ SDS_HEADER_BYTES = SDS_HEADER.size
 # --- SEEU: the update plan (source/plan/schema.h, instruction.h) -------------
 
 SEEU_MAGIC = 0x55454553  # "SEEU"
-SEEU_VERSION = 15
+SEEU_VERSION = 17
 SEEU_OLDEST_READABLE = 4
 RODATA_BIT = 1 << 63
+SOURCE_BIT = 1 << 62  # v17: the source model file (E12), eval program only
 NULL_REF = (1 << 64) - 1
 RODATA_ALIGNMENT = 16384
 GEMM_PANEL_FLOATS = 8192
@@ -128,9 +130,10 @@ PLAN_HEADER = Layout("PlanHeader", [
     ("seq_len", "Q"),
     ("step_instr_offset", "Q"), ("step_instr_count", "Q")])
 
-# `pad` is written as zero and never read; `in`/`out` are operand words.
+# `imm` (v16) is an opcode-defined immediate — the normalization forwards'
+# epsilon bits, zero elsewhere; `in`/`out` are operand words.
 INSTRUCTION = Layout("UpdateInstruction", [
-    ("opcode", "H"), ("flags", "H"), ("pad", "I"), ("in", "4Q"),
+    ("opcode", "H"), ("flags", "H"), ("imm", "I"), ("in", "4Q"),
     ("out", "3Q")])
 EMIT_ENTRY = Layout("EmitEntry", [
     ("smf_data_offset", "Q"), ("byte_size", "Q"), ("arena_offset", "Q")])
@@ -161,6 +164,8 @@ FLAG_EPILOGUE_ACT_SHIFT = 1
 FLAG_EPILOGUE_ACT_MASK = 6
 # The f32 GEMMs (v14): C = D + A@B, D's ref in in[3]; excludes the epilogue.
 FLAG_GEMM_ADDEND = 8
+# The int8 GEMMs (v17): in[3] is a rodata ref to per-output-column scales.
+FLAG_Q8_COL_SCALE = 16
 
 # kFusedMap micro-program: one byte per stage, packed into an operand word.
 FUSED_STAGES = {"end": 0, "add": 1, "mul": 2, "scale": 3, "relu": 4,
@@ -231,6 +236,7 @@ def check_against(abi: Dict[str, Any]) -> List[str]:
     same("seeu.oldest_readable", SEEU_OLDEST_READABLE,
          seeu["oldest_readable"])
     same("seeu.rodata_bit", RODATA_BIT, 1 << seeu["rodata_bit"])
+    same("seeu.source_bit", SOURCE_BIT, 1 << seeu["source_bit"])
     same("seeu.rodata_alignment", RODATA_ALIGNMENT, seeu["rodata_alignment"])
     same("seeu.gemm_panel_floats", GEMM_PANEL_FLOATS,
          seeu["gemm_panel_floats"])
@@ -238,7 +244,8 @@ def check_against(abi: Dict[str, Any]) -> List[str]:
     same("seeu.flags", {"epilogue_bias": FLAG_EPILOGUE_BIAS,
                         "epilogue_act_shift": FLAG_EPILOGUE_ACT_SHIFT,
                         "epilogue_act_mask": FLAG_EPILOGUE_ACT_MASK,
-                        "gemm_addend": FLAG_GEMM_ADDEND},
+                        "gemm_addend": FLAG_GEMM_ADDEND,
+                        "q8_col_scale": FLAG_Q8_COL_SCALE},
          seeu["flags"])
     same("seeu.fused_stages", FUSED_STAGES, seeu["fused_stages"])
     same("seeu.fused_stage", {"kind_mask": FUSED_KIND_MASK,

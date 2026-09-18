@@ -20,6 +20,7 @@ import copy
 import io
 import json
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -71,6 +72,9 @@ class ManifestAgreement(unittest.TestCase):
         grown = copy.deepcopy(abi)
         grown["smf"]["op_kinds"]["conv"] = 12
         cases.append((grown, "smf.op_kinds"))
+        moved_bit = copy.deepcopy(abi)
+        moved_bit["seeu"]["source_bit"] = 61  # the v17 address space
+        cases.append((moved_bit, "seeu.source_bit"))
         for doctored, where in cases:
             problems = formats.check_against(doctored)
             self.assertEqual(len(problems), 1, problems)
@@ -134,12 +138,39 @@ class GoldenFixtures(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="seeml-golden-") as tmp:
             with contextlib.redirect_stdout(io.StringIO()):
                 make_golden.write_all(tmp)
-            for name in ("mlp.smf", "class.sds", "tokens.sds"):
+            for name in ("mlp.smf", "class.sds", "tokens.sds", "eps6.smf"):
                 with open(os.path.join(tmp, name), "rb") as f:
                     fresh = f.read()
                 with open(os.path.join(GOLDEN, name), "rb") as f:
                     committed = f.read()
                 self.assertEqual(fresh, committed, name)
+
+    def test_a_qwen2_epsilon_rides_every_norm_into_the_plan(self):
+        # P7 (#96): the eps6 fixture compiles, and every normalization
+        # forward in every program carries the model's 1e-6 in its imm
+        # word — the text disassembly shows it too.
+        if not (os.path.exists(COMPILER) and os.path.exists(DUMP)):
+            self.skipTest(f"no built seeml tools under {BUILD}")
+        bits = struct.unpack("<I", struct.pack("<f", 1e-6))[0]
+        with tempfile.TemporaryDirectory(prefix="seeml-eps-") as tmp:
+            done = subprocess.run(
+                [COMPILER, "--source", os.path.join(GOLDEN, "eps6.smf"),
+                 "--out", tmp, "--data-batch", "4", "--loss", "mse",
+                 "--no-embed"], capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+            path = os.path.join(tmp, "update_plan.seeu")
+            plan = json.loads(subprocess.run(
+                [DUMP, path, "--json"], capture_output=True,
+                text=True).stdout)
+            text = subprocess.run([DUMP, path, "--instrs"],
+                                  capture_output=True, text=True).stdout
+        norms = [i for sec in ("train", "eval")
+                 for i in plan["sections"][sec]
+                 if i["name"] == "rms_norm.fwd"]
+        self.assertEqual(len(norms), 2 * 3)  # ln1, ln2, lnf per program
+        self.assertTrue(all(i["imm"] == bits for i in norms))
+        self.assertIn("eps 1e-06", text)
+        self.assertNotIn("eps 1e-05", text)
 
     def test_the_corpus_reader_serves_the_golden_rows(self):
         import make_golden as g
@@ -203,10 +234,10 @@ class TwoDecodersOnePlan(unittest.TestCase):
                     self.assertEqual(len(ours), len(theirs), section)
                     for a, b in zip(ours, theirs):
                         self.assertEqual(
-                            (a.opcode, a.flags, list(a.src), list(a.out),
-                             formats.OPCODES[a.opcode]),
-                            (b["opcode"], b["flags"], b["in"], b["out"],
-                             b["name"]))
+                            (a.opcode, a.flags, a.imm, list(a.src),
+                             list(a.out), formats.OPCODES[a.opcode]),
+                            (b["opcode"], b["flags"], b["imm"], b["in"],
+                             b["out"], b["name"]))
                 self.assertEqual(len(cpp["emit"]), plan.emit_count)
                 for i, entry in enumerate(cpp["emit"]):
                     got = formats.EMIT_ENTRY.unpack_from(

@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
+#include <vector>
 
 #include "runtime/executor/kernel_policy.h"
 #include "runtime/executor/update_kernels.h"
@@ -57,7 +59,9 @@ namespace {
 //
 // The panel is a fixed 32 KiB local — no allocation, within any thread
 // stack the runtime targets — and the N tile is clamped so a tile always
-// fits it; a geometry change is a traversal change, never a bit. Measured
+// fits it; a geometry change is a traversal change, never a bit. (The one
+// buffer a GEMM kernel owns is GemmNTQ8's per-column form: a per-thread
+// vector, at most 1 MiB, that grows once and is reused — see there.) Measured
 // on one Apple M5 core, bit-identical on every shape: 1.6-3.2x on f32
 // (30 -> 54 GFLOP/s at D=512 projections, 14 -> 46 at SmolLM's 49k-vocab
 // head) and 2.2-2.5x on int8 weights.
@@ -71,7 +75,8 @@ void BlockedNNImpl(const float* SEEML_RESTRICT A,
                    const BType* SEEML_RESTRICT B, float* SEEML_RESTRICT C,
                    size_t m_begin, size_t m_end, size_t n_begin, size_t n_end,
                    size_t N, size_t K, float alpha, size_t a_stride,
-                   const GemmTiles& tiles) {
+                   const GemmTiles& tiles,
+                   const float* SEEML_RESTRICT col_scale) {
   auto a_at = [&](size_t k, size_t m) {
     if constexpr (kTransposedA)
       return A[k * a_stride + m];
@@ -86,11 +91,23 @@ void BlockedNNImpl(const float* SEEML_RESTRICT A,
     const size_t k1 = MinZ(k0 + tile_k, K);
     for (size_t n0 = n_begin; n0 < n_end; n0 += tile_n) {
       const size_t w = MinZ(n0 + tile_n, n_end) - n0;
-      // Pack (and widen) B[k0:k1, n0:n0+w] row by row, unit stride.
-      for (size_t k = k0; k < k1; ++k) {
-        const BType* SEEML_RESTRICT src = B + k * N + n0;
-        float* SEEML_RESTRICT dst = panel + (k - k0) * w;
-        for (size_t n = 0; n < w; ++n) dst[n] = static_cast<float>(src[n]);
+      // Pack (and widen) B[k0:k1, n0:n0+w] row by row, unit stride. With
+      // per-column int8 scales (v17) the scale joins the widening: once per
+      // panel element, reused by every row the panel serves.
+      if (col_scale) {
+        const float* SEEML_RESTRICT cs = col_scale + n0;
+        for (size_t k = k0; k < k1; ++k) {
+          const BType* SEEML_RESTRICT src = B + k * N + n0;
+          float* SEEML_RESTRICT dst = panel + (k - k0) * w;
+          for (size_t n = 0; n < w; ++n)
+            dst[n] = static_cast<float>(src[n]) * cs[n];
+        }
+      } else {
+        for (size_t k = k0; k < k1; ++k) {
+          const BType* SEEML_RESTRICT src = B + k * N + n0;
+          float* SEEML_RESTRICT dst = panel + (k - k0) * w;
+          for (size_t n = 0; n < w; ++n) dst[n] = static_cast<float>(src[n]);
+        }
       }
 
       size_t m = m_begin;
@@ -173,13 +190,14 @@ template <typename BType>
 void BlockedNN(const float* SEEML_RESTRICT A, const BType* SEEML_RESTRICT B,
                float* SEEML_RESTRICT C, size_t m_begin, size_t m_end,
                size_t n_begin, size_t n_end, size_t N, size_t K, float alpha,
-               size_t a_stride, bool a_transposed, const GemmTiles& tiles) {
+               size_t a_stride, bool a_transposed, const GemmTiles& tiles,
+               const float* col_scale = nullptr) {
   if (a_transposed)
     BlockedNNImpl<true>(A, B, C, m_begin, m_end, n_begin, n_end, N, K, alpha,
-                        a_stride, tiles);
+                        a_stride, tiles, col_scale);
   else
     BlockedNNImpl<false>(A, B, C, m_begin, m_end, n_begin, n_end, N, K, alpha,
-                         a_stride, tiles);
+                         a_stride, tiles, col_scale);
 }
 
 // The 2D partition of C (E1 stage 3). The first nest split C by rows alone,
@@ -605,21 +623,51 @@ void GemmAccNN(const float* A, const float* B, float* C, size_t M, size_t N,
 
 void GemmNNQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
               size_t K, float scale, up::EpilogueAct act,
-              const GemmTiles& tiles) {
+              const GemmTiles& tiles, const float* col_scale) {
   ForEachGemmTask(M, N, K, tiles,
                   [&](size_t m0, size_t m1, size_t n0, size_t n1) {
                     ZeroCell(C, N, m0, m1, n0, n1);
-                    BlockedNN(A, B, C, m0, m1, n0, n1, N, K, scale, K,
-                              /*a_transposed=*/false, tiles);
+                    // Per-column scales (v17) join B's panel widening; the
+                    // per-tensor form folds its one scale into A.
+                    BlockedNN(A, B, C, m0, m1, n0, n1, N, K,
+                              col_scale ? 1.0f : scale, K,
+                              /*a_transposed=*/false, tiles, col_scale);
                     EpilogueRows(C, /*bias=*/nullptr, m0, m1, n0, n1, N, act);
                   });
 }
 
+// Per-column int8 scales in the dX GEMM (v17) sit on the reduction axis:
+// sum_k A[m, k] * q[n, k] * s[k] = sum_k (A[m, k] * s[k]) * q[n, k]. Each
+// task scales its A rows once into a per-thread buffer (bounded: a
+// vocabulary-wide K goes in row chunks) and runs the unchanged NT core on
+// them — the per-tensor path is the committed kernel, byte for byte.
+inline constexpr size_t kNtScaledFloatsMax = size_t{1} << 18;  // 1 MiB
+
 void GemmNTQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
-              size_t K, float scale, const GemmTiles& tiles) {
+              size_t K, float scale, const GemmTiles& tiles,
+              const float* k_scale) {
+  if (!k_scale) {
+    ForEachGemmTask(M, N, K, tiles,
+                    [&](size_t m0, size_t m1, size_t n0, size_t n1) {
+                      BlockedNT(A, B, C, m0, m1, n0, n1, N, K, scale,
+                                tiles.n);
+                    });
+    return;
+  }
+  const size_t chunk_rows =
+      std::max<size_t>(2, (kNtScaledFloatsMax / std::max<size_t>(1, K)) & ~size_t{1});
   ForEachGemmTask(M, N, K, tiles,
                   [&](size_t m0, size_t m1, size_t n0, size_t n1) {
-                    BlockedNT(A, B, C, m0, m1, n0, n1, N, K, scale, tiles.n);
+                    thread_local std::vector<float> scaled;
+                    for (size_t r0 = m0; r0 < m1; r0 += chunk_rows) {
+                      const size_t rows = MinZ(chunk_rows, m1 - r0);
+                      if (scaled.size() < rows * K) scaled.resize(rows * K);
+                      for (size_t r = 0; r < rows; ++r)
+                        for (size_t k = 0; k < K; ++k)
+                          scaled[r * K + k] = A[(r0 + r) * K + k] * k_scale[k];
+                      BlockedNT(scaled.data(), B, C + r0 * N, 0, rows, n0, n1,
+                                N, K, 1.0f, tiles.n);
+                    }
                   });
 }
 

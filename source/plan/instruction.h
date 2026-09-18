@@ -2,6 +2,7 @@
 #define SEEML_SOURCE_PLAN_INSTRUCTION_H_
 
 #include <cstddef>
+#include <bit>
 #include <cstdint>
 
 // =============================================================================
@@ -14,16 +15,31 @@
 namespace seeml::update {
 
 // A tensor reference is a 64-bit word: bit 63 selects the address space
-// (0 = mutable arena, 1 = read-only rodata), bits 0..62 are a byte offset.
+// (0 = mutable arena, 1 = read-only rodata), bits 0..61 are a byte offset.
+// Bit 62 (plan v17, E12 #95) selects a third, read-only space: the SOURCE
+// MODEL FILE the plan was compiled from, bound by the engine at run time
+// (BindSourceModel). A source ref's offset is an absolute SMF data offset —
+// the very offset the emit table patches — so an eval program lowered
+// against it reads the f32 weights that ship, not the plan's int8 / bf16
+// copies of them. Source refs are admitted in the eval program only.
 inline constexpr uint64_t kRodataBit = 1ULL << 63;
+inline constexpr uint64_t kSourceBit = 1ULL << 62;
 inline constexpr uint64_t kNullRef = ~0ULL;
 
 inline constexpr uint64_t MakeArenaRef(uint64_t offset) { return offset; }
 inline constexpr uint64_t MakeRodataRef(uint64_t offset) {
   return offset | kRodataBit;
 }
+inline constexpr uint64_t MakeSourceRef(uint64_t offset) {
+  return offset | kSourceBit;
+}
 inline constexpr bool IsRodataRef(uint64_t ref) { return (ref & kRodataBit) != 0; }
-inline constexpr uint64_t RefOffset(uint64_t ref) { return ref & ~kRodataBit; }
+inline constexpr bool IsSourceRef(uint64_t ref) {
+  return (ref & (kRodataBit | kSourceBit)) == kSourceBit;
+}
+inline constexpr uint64_t RefOffset(uint64_t ref) {
+  return ref & ~(kRodataBit | kSourceBit);
+}
 
 enum class OpCode : uint16_t {
   kNop = 0,
@@ -244,8 +260,19 @@ inline constexpr uint16_t kEpilogueFlagsMask =
 // never bits. It excludes the bias / activation epilogue (kGemmNN's in[3]
 // holds one ref), and the narrow-weight GEMMs do not take it.
 inline constexpr uint16_t kFlagGemmAddend = 1u << 3;  // in[3] = addend ref [M,N]
+// --- Per-column int8 scales (plan v17, E12 #95). ------------------------------
+// kGemmNNQ8 / kGemmNTQ8 only: in[3] is a rodata ref to one f32 scale per
+// OUTPUT COLUMN of the quantized weight W [K, M] (float[M]) instead of the
+// per-tensor scale's bits. A per-tensor max-abs scale lets one outlier
+// column (LLM projections carry |w| outliers 10-50x the bulk) collapse
+// every other column to a few int8 levels; a column's own scale keeps its
+// resolution. In the forward (NN) the scale is the output column's —
+// C[m, n] = act(s[n] * sum_k A[m, k] * q[k, n]); in the dX GEMM (NT, W read
+// as [N = K, M]) it is the REDUCTION index's, applied as each int8 element
+// widens — C[m, n] = sum_k A[m, k] * (q[n, k] * s[k]).
+inline constexpr uint16_t kFlagQ8ColScale = 1u << 4;  // in[3] = scales ref
 inline constexpr uint16_t kKnownFlagsMask =
-    kEpilogueFlagsMask | kFlagGemmAddend;
+    kEpilogueFlagsMask | kFlagGemmAddend | kFlagQ8ColScale;
 
 enum class EpilogueAct : uint16_t { kNone = 0, kRelu = 1, kGelu = 2, kSilu = 3 };
 
@@ -259,14 +286,27 @@ inline constexpr uint16_t MakeEpilogueFlags(bool bias, EpilogueAct act) {
                                << kFlagEpilogueActShift);
 }
 
+/// The epsilon a normalization forward's imm word means (0 = 1e-5).
+inline constexpr float kDefaultNormEps = 1e-5f;
+inline float NormEpsOf(uint32_t imm) {
+  return imm == 0 ? kDefaultNormEps : std::bit_cast<float>(imm);
+}
+
 #pragma pack(push, 1)
 
 /// One 64-byte instruction: a single L1 cache line, mirroring the design of
 /// the inference-side SerializedInstruction in backend/serializer/schema.h.
+///
+/// `imm` (plan v16, P7 #96) is an opcode-defined 32-bit immediate. It was a
+/// pad word every compiler wrote as zero and no runtime read; from v16
+/// kLayerNormFwd and kRmsNormFwd carry the normalization epsilon's f32 bits
+/// there (0 = the classic 1e-5, so every earlier plan means what it always
+/// meant). On any other opcode, and on any opcode below v16, a nonzero imm
+/// is corruption — the flags word's discipline.
 struct UpdateInstruction {
   uint16_t opcode = 0;
   uint16_t flags = 0;
-  uint32_t pad = 0;
+  uint32_t imm = 0;
   uint64_t in[4] = {kNullRef, kNullRef, kNullRef, kNullRef};
   uint64_t out[3] = {0, 0, 0};
 };

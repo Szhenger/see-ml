@@ -16,8 +16,8 @@ namespace up = seeml::update;
 
 void LayerNormFwd(const float* x, const float* gamma, const float* beta,
                   float* y, float* mean, float* rstd, size_t rows,
-                  size_t cols) {
-  constexpr float kEps = 1e-5f;
+                  size_t cols, float eps) {
+  const float kEps = eps;  // the plan's (v16); 1e-5 is the same float as ever
   up::ParallelFor(rows, RowGrain(cols, kGrainMath), [&](size_t r0, size_t r1,
                                                         size_t) {
     for (size_t r = r0; r < r1; ++r) {
@@ -73,8 +73,8 @@ void LayerNormBwd(const float* dy, const float* x, const float* gamma,
 }
 
 void RmsNormFwd(const float* x, const float* gamma, float* y, float* rstd,
-                size_t rows, size_t cols) {
-  constexpr float kEps = 1e-5f;
+                size_t rows, size_t cols, float eps) {
+  const float kEps = eps;
   up::ParallelFor(rows, RowGrain(cols, kGrainMath), [&](size_t r0, size_t r1,
                                                         size_t) {
     for (size_t r = r0; r < r1; ++r) {

@@ -10,6 +10,7 @@ oldest and newest interpreters the tools support.
     python3 -m unittest discover -s test/tool -p '*_test.py'
 """
 
+import contextlib
 import hashlib
 import io
 import json
@@ -455,7 +456,8 @@ class HfImportTest(unittest.TestCase):
         want = hf_reference_logits(cfg, t, tokens)
         got = em.reference_decoder_logits(conv["embedding"], conv["blocks"],
                                           conv["head"], conv["num_heads"],
-                                          conv["rope_base"], tokens)
+                                          conv["rope_base"], tokens,
+                                          norm_eps=conv["norm_eps"])
         self.assertEqual(got.shape, want.shape)
         np.testing.assert_allclose(got, want, rtol=2e-4, atol=2e-4)
         return conv
@@ -478,11 +480,13 @@ class HfImportTest(unittest.TestCase):
     def test_refuses_what_the_runtime_cannot_compute(self):
         cfg = hf_tiny_config()
         t = hf_tiny_tensors(cfg)
-        with self.assertRaisesRegex(ValueError, "rms_norm_eps"):
-            em.hf_llama_to_seeml(hf_tiny_config(eps=1e-6), t, 8)
-        conv = em.hf_llama_to_seeml(hf_tiny_config(eps=1e-6), t, 8,
-                                    allow_eps_drift=True)
-        self.assertTrue(any("eps drift" in n for n in conv["notes"]))
+        # A Qwen2-class epsilon is carried now (P7, #96), not refused, and
+        # the SeeML forward at that epsilon is the checkpoint's forward.
+        conv = self._check_mapping(hf_tiny_config(eps=1e-6), 4)
+        self.assertEqual(conv["norm_eps"], 1e-6)
+        self.assertTrue(any("carried" in n for n in conv["notes"]))
+        with self.assertRaisesRegex(ValueError, "epsilon"):
+            em.hf_llama_to_seeml(hf_tiny_config(eps=0.0), t, 8)
         with self.assertRaisesRegex(ValueError, "max_position_embeddings"):
             em.hf_llama_to_seeml(cfg, t, 65)
         with self.assertRaisesRegex(ValueError, "hidden_act"):
@@ -529,12 +533,15 @@ class HfImportTest(unittest.TestCase):
                                 os.path.join(d, "pkg"), "--data-batch", "16",
                                 "--steps", "2"], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
-        # eps drift is refused at the CLI, accepted with the flag.
+        # A 1e-6 epsilon exports as SMF v6 with the epsilon on every norm
+        # (P7, #96) — no flag needed; the old flag is accepted and ignored.
         write_hf_dir(d, hf_tiny_config(eps=1e-6), hf_tiny_tensors(cfg, 5))
         r = subprocess.run([sys.executable, script, "--hf", d, out,
                             "--seq-len", "8"], capture_output=True, text=True)
-        self.assertEqual(r.returncode, 2)
+        self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("rms_norm_eps", r.stderr)
+        with open(out, "rb") as f:
+            self.assertEqual(struct.unpack_from("<I", f.read(8), 4)[0], 6)
         r = subprocess.run([sys.executable, script, "--hf", d, out,
                             "--seq-len", "8", "--allow-eps-drift"],
                            capture_output=True, text=True)
@@ -569,7 +576,8 @@ class TorchExportTest(unittest.TestCase):
         import torch
         import torch.nn as nn
         torch.manual_seed(5)
-        model = nn.Sequential(nn.Linear(6, 5), nn.GELU(), nn.LayerNorm(5),
+        model = nn.Sequential(nn.Linear(6, 5), nn.GELU(approximate="tanh"),
+                              nn.LayerNorm(5),
                               nn.Linear(5, 3, bias=False), nn.SiLU(),
                               nn.LayerNorm(3, elementwise_affine=False),
                               nn.Linear(3, 2))
@@ -609,6 +617,61 @@ class TorchExportTest(unittest.TestCase):
                 b.add_op(em.OP_LAYERNORM, f"ln{pos}", [prev, f"ln_g{pos}", f"ln_b{pos}"], f"n{pos}")
                 prev = f"n{pos}"
         self.assertEqual(got, ref_serialize(b))
+
+    def test_an_erf_gelu_is_refused_and_a_tanh_one_is_the_same_bytes(self):
+        # P7 (#96): the device's GELU is the tanh approximation. torch's
+        # default nn.GELU() is erf — exporting it silently would make step
+        # 0 a different function in every MLP layer.
+        import torch
+        import torch.nn as nn
+        d_ = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d_, True)
+
+        def model(gelu):
+            torch.manual_seed(9)
+            return nn.Sequential(nn.Linear(4, 6), gelu, nn.Linear(6, 3))
+
+        path = os.path.join(d_, "m.smf")
+        with self.assertRaisesRegex(ValueError,
+                                    r"approximate='tanh'.*gelu_tanh_ok"):
+            em.export_smf(model(nn.GELU()), path)
+        self.assertFalse(os.path.exists(path))
+        em.export_smf(model(nn.GELU(approximate="tanh")), path)
+        with open(path, "rb") as f:
+            tanh = f.read()
+        accepted = os.path.join(d_, "accepted.smf")
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            em.export_smf(model(nn.GELU()), accepted, gelu_tanh_ok=True)
+        self.assertIn("drift", err.getvalue())
+        with open(accepted, "rb") as f:
+            self.assertEqual(f.read(), tanh)  # the same file either way
+        self.assertEqual(struct.unpack_from("<I", tanh, 4)[0], 3)
+        # The documented bound is the real one.
+        x = torch.linspace(-12, 12, 200001, dtype=torch.float64)
+        drift = (torch.nn.functional.gelu(x) -
+                 torch.nn.functional.gelu(x, approximate="tanh")).abs().max()
+        self.assertLessEqual(float(drift), em.GELU_TANH_MAX_DRIFT)
+
+    def test_a_layer_norm_epsilon_rides_attr2(self):
+        # P7 (#96): nn.LayerNorm.eps is the model's; 1e-5 keeps the file
+        # at v3 byte for byte, anything else writes SMF v6 with attr2.
+        import torch
+        import torch.nn as nn
+        d_ = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d_, True)
+        files = {}
+        for eps in (1e-5, 1e-6):
+            torch.manual_seed(3)
+            m = nn.Sequential(nn.Linear(4, 4), nn.LayerNorm(4, eps=eps),
+                              nn.Linear(4, 2))
+            path = os.path.join(d_, f"ln{eps}.smf")
+            em.export_smf(m, path)
+            with open(path, "rb") as f:
+                files[eps] = f.read()
+        self.assertEqual(struct.unpack_from("<I", files[1e-5], 4)[0], 3)
+        self.assertEqual(struct.unpack_from("<I", files[1e-6], 4)[0], 6)
+        bits = struct.unpack("<I", struct.pack("<f", 1e-6))[0]
+        self.assertIn(struct.pack("<I", bits), files[1e-6])
 
     def test_half_precision_weights_export_as_f32(self):
         import torch

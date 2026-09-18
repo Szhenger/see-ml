@@ -346,10 +346,18 @@ int main(int argc, char** argv) {
   // Fail fast: the plan's emit offsets are only meaningful inside the exact
   // file it was compiled from, and commit would refuse anyway — but only
   // after the full training run. One file scan here buys that refusal now.
-  if (auto r = engine.VerifySourceModel(model); !r) {
+  // A plan that scores what ships (E12, --quantize-base / --bf16-base from
+  // a model file) also maps the file here: its eval program reads the f32
+  // weights the commit will patch, so every gate score is the shipped one.
+  if (auto r = engine.BindSourceModel(model); !r) {
     std::fprintf(stderr, "model: %s\n", r.error().c_str());
     return 1;
   }
+  if (engine.scores_shipped())
+    std::fprintf(stderr,
+                 "seeml-update: validation scores the shipped model (the "
+                 "f32 weights of '%s' plus the update)\n",
+                 model.c_str());
   std::fprintf(stderr,
                "seeml-update: resource contract — arena %llu bytes"
                " (%llu persistent)\n",
@@ -485,7 +493,7 @@ int main(int argc, char** argv) {
       }
       std::fputc('"', f);
     };
-    std::fputs("{\n  \"schema\": 2,\n  \"backend\": ", f);
+    std::fputs("{\n  \"schema\": 3,\n  \"backend\": ", f);
     str(engine.backend_name());
     std::fputs(",\n  \"device\": ", f);
     str(engine.backend_device());
@@ -502,6 +510,11 @@ int main(int argc, char** argv) {
       num(report->val_final_loss);
       std::fputs("],\n", f);
     }
+    // What the validation losses score (schema 3, E12): the model that
+    // ships, or — for a narrow-storage plan compiled from memory — the
+    // plan's own narrow weights, a proxy.
+    std::fprintf(f, "  \"validation_scores\": \"%s\",\n",
+                 engine.scores_shipped() ? "shipped" : "plan");
     if (report->best_tracked) {
       // validation_loss[1] above is the committed (best) state's; here is
       // the run's endpoint and where the best was found.

@@ -23,6 +23,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <string>
 #include <vector>
 
 #include "source/plan/opcode_names.h"
@@ -44,7 +45,10 @@ void PrintRef(uint64_t ref) {
     std::printf("  <null>          ");
     return;
   }
-  std::printf("  %s+0x%08" PRIx64, IsRodataRef(ref) ? "ro" : "ar",
+  std::printf("  %s+0x%08" PRIx64,
+              IsRodataRef(ref)   ? "ro"
+              : IsSourceRef(ref) ? "src"  // v17: the source model file
+                                 : "ar",
               RefOffset(ref));
 }
 
@@ -66,7 +70,9 @@ float KlScaleOf(uint64_t word) {
 /// the ISA in source/plan/instruction.h; -1 when every slot is a ref.
 /// Decoding immediates as refs printed "ar+0x3f800000" for alpha = 1.0 — an
 /// apparently valid ~1 GB arena reference a field debugger would chase.
-int ImmInSlot(uint16_t opcode) {
+int ImmInSlot(uint16_t opcode, uint16_t flags = 0) {
+  // v17: a q8 GEMM with per-column scales carries a ref in in[3].
+  if (flags & kFlagQ8ColScale) return -1;
   switch (static_cast<OpCode>(opcode)) {
     case OpCode::kScale:     return 2;
     case OpCode::kFill:      return 1;
@@ -78,16 +84,25 @@ int ImmInSlot(uint16_t opcode) {
   }
 }
 
-/// Compact decode of the flag word: the v5 epilogue ("bias", "relu",
-/// "bias+gelu", ...), the v14 GEMM "addend" (exclusive with the epilogue) —
-/// or nullptr when no flags are set.
-const char* EpilogueName(uint16_t flags) {
-  static const char* const kNames[] = {
-      nullptr, "bias",      "relu", "bias+relu",
-      "gelu",  "bias+gelu", "silu", "bias+silu",
+/// Compact decode of the flag word, composed from its parts: the v5
+/// epilogue ("bias", "relu", "bias+gelu", ...), the v14 GEMM "addend" and
+/// the v17 per-column int8 scales ("cols"). Returned by value, so any
+/// number of calls may share one expression.
+std::string EpilogueName(uint16_t flags) {
+  static const char* const kActs[] = {"", "relu", "gelu", "silu"};
+  std::string name;
+  auto add = [&name](const char* part) {
+    if (!name.empty()) name += "+";
+    name += part;
   };
-  if (flags == seeml::update::kFlagGemmAddend) return "addend";  // v14
-  return flags < 8 ? kNames[flags] : "unknown-flags";
+  if (flags & kFlagEpilogueBias) add("bias");
+  if (const uint16_t act = (flags & kFlagEpilogueActMask) >>
+                           kFlagEpilogueActShift)
+    add(kActs[act]);
+  if (flags & kFlagGemmAddend) add("addend");
+  if (flags & kFlagQ8ColScale) add("cols");
+  if (flags & static_cast<uint16_t>(~kKnownFlagsMask)) add("unknown-flags");
+  return name;
 }
 
 bool SectionInBounds(uint64_t off, uint64_t count, uint64_t elem,
@@ -150,9 +165,11 @@ int DumpJson(const std::vector<uint8_t>& plan, const PlanHeader& h,
       std::memcpy(&ins, plan.data() + sections[s].off + i * sizeof(ins),
                   sizeof(ins));
       std::printf("%s\n      {\"opcode\": %u, \"name\": \"%s\", \"flags\": %u, "
+                  "\"imm\": %u, "
                   "\"in\": [%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64
                   "], \"out\": [%" PRIu64 ", %" PRIu64 ", %" PRIu64 "]}",
                   i ? "," : "", ins.opcode, OpName(ins.opcode), ins.flags,
+                  ins.imm,
                   ins.in[0], ins.in[1], ins.in[2], ins.in[3], ins.out[0],
                   ins.out[1], ins.out[2]);
     }
@@ -183,8 +200,8 @@ void Disassemble(const char* title, const UpdateInstruction* instrs,
     const UpdateInstruction& ins = instrs[i];
     std::printf("  %4" PRIu64 "  %-18s", i, OpName(ins.opcode));
     if (ins.flags)
-      std::printf(" epi(%s)", EpilogueName(ins.flags));
-    const int imm = ImmInSlot(ins.opcode);
+      std::printf(" epi(%s)", EpilogueName(ins.flags).c_str());
+    const int imm = ImmInSlot(ins.opcode, ins.flags);
     for (int s = 0; s < 4; ++s) {
       if (s == imm)
         std::printf("  imm(%-11g)", ImmBitsToF32(ins.in[s]));
@@ -198,8 +215,9 @@ void Disassemble(const char* title, const UpdateInstruction* instrs,
         std::printf("   stats:");
         PrintRef(ins.out[1]);
         PrintRef(ins.out[2]);
-        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
-                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
+        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "  eps %g\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                    static_cast<double>(NormEpsOf(ins.imm)));
         break;
       case OpCode::kLayerNormBwd:
         std::printf("   stats:");
@@ -223,8 +241,9 @@ void Disassemble(const char* title, const UpdateInstruction* instrs,
                     KlScaleOf(ins.out[1]));
         break;
       case OpCode::kRmsNormFwd:
-        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
-                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
+        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "  eps %g\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                    static_cast<double>(NormEpsOf(ins.imm)));
         break;
       case OpCode::kRmsNormBwd:
         std::printf("   rstd:");

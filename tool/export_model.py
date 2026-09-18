@@ -46,16 +46,20 @@ Usage:
         (tokenizes with the checkpoint's tokenizer.json; needs the
         `tokenizers` package), --hf-parity (max |Δ logits| of the SeeML
         forward vs transformers; needs torch + transformers), and
-        --allow-eps-drift (a checkpoint whose rms_norm_eps is not the
-        runtime's 1e-5).
+        --allow-eps-drift (accepted for old scripts and ignored: the
+        checkpoint's rms_norm_eps is carried in SMF v6 now).
 
 Supported modules inside an nn.Sequential:
     nn.Linear     -> MatMul(x, W[in,out]) + AddBias(b[out])  (W stored
                      transposed from PyTorch's [out, in] layout)
     nn.ReLU       -> Relu
-    nn.GELU       -> Gelu (tanh approximation on-device)
+    nn.GELU       -> Gelu — the device computes the tanh approximation, so
+                     only nn.GELU(approximate='tanh') exports as the same
+                     function; torch's default (erf) is refused unless
+                     export_smf(..., gelu_tanh_ok=True) accepts the drift
     nn.SiLU       -> Silu
-    nn.LayerNorm  -> LayerNorm(x, gamma, beta) over the last dim
+    nn.LayerNorm  -> LayerNorm(x, gamma, beta) over the last dim, with the
+                     module's eps (SMF v6 attr2 when it is not 1e-5)
 """
 
 import argparse
@@ -71,9 +75,11 @@ from seeml import formats  # noqa: E402
 SMF_MAGIC = formats.SMF_MAGIC
 SMF_VERSION = formats.SMF_VERSION
 DEFAULT_ROPE_BASE = formats.SMF_DEFAULT_ROPE_BASE  # attr1 == 0 on a Rope op
+DEFAULT_NORM_EPS = formats.SMF_DEFAULT_NORM_EPS  # attr2 == 0 on a norm op
 # The writer emits the LOWEST version that can carry the model: v3 for a
 # feature-input model, v4 for a token-native one, v5 only when some Rope op
-# carries a non-default base (attr1 != 0). Files that use nothing newer keep
+# carries a non-default base (attr1 != 0), v6 only when some norm op carries
+# a non-default epsilon (attr2 != 0). Files that use nothing newer keep
 # loading on older compilers, and the classic demos stay byte-for-byte.
 SDS_MAGIC = formats.SDS_MAGIC
 ALIGN = 64
@@ -147,13 +153,16 @@ class _SmfBuilder:
                                  data=data, nbytes=int(nbytes)))
 
     def add_op(self, kind, name, inputs, output, attr0: int = 0,
-               attr1: int = 0):
+               attr1: int = 0, attr2: int = 0):
         self.ops.append(dict(kind=kind, name=name, inputs=inputs,
-                             output=output, attr0=attr0, attr1=attr1))
+                             output=output, attr0=attr0, attr1=attr1,
+                             attr2=attr2))
         self.output_name = output
 
     @property
     def version(self) -> int:
+        if any(op["attr2"] != 0 for op in self.ops):
+            return 6
         needs_v5 = any(op["attr1"] != 0 for op in self.ops)
         return max(self.min_version, 5 if needs_v5 else 3)
 
@@ -177,6 +186,8 @@ class _SmfBuilder:
             out += struct.pack("<I", op["attr0"])
             if version >= 5:
                 out += struct.pack("<I", op["attr1"])
+            if version >= 6:
+                out += struct.pack("<I", op["attr2"])
         return out
 
     def _layout(self):
@@ -227,8 +238,15 @@ class _SmfBuilder:
         return buf.getvalue()
 
 
-def export_smf(model, path: str, input_name: str = "x"):
-    """Export an nn.Sequential of Linear/ReLU/GELU/SiLU/LayerNorm to SMF."""
+def export_smf(model, path: str, input_name: str = "x",
+               gelu_tanh_ok: bool = False):
+    """Export an nn.Sequential of Linear/ReLU/GELU/SiLU/LayerNorm to SMF.
+
+    The device's GELU is the tanh approximation, so an nn.GELU() with
+    torch's default erf form is refused: the exported model would not be
+    the model trained (it differs by up to GELU_TANH_MAX_DRIFT per
+    activation, in every MLP layer). Build the module with
+    approximate='tanh', or pass gelu_tanh_ok=True to accept the drift."""
     import numpy as np
     import torch
     import torch.nn as nn
@@ -266,6 +284,20 @@ def export_smf(model, path: str, input_name: str = "x"):
                 prev = f"z{idx}"
             idx += 1
         elif isinstance(m, (nn.ReLU, nn.GELU, nn.SiLU)):
+            if isinstance(m, nn.GELU) and \
+                    getattr(m, "approximate", "none") != "tanh":
+                if not gelu_tanh_ok:
+                    raise ValueError(
+                        f"export_smf: module {pos} is nn.GELU() with "
+                        "approximate='none' (erf), but the device computes "
+                        "the tanh approximation — step 0 would not be the "
+                        "model you trained. Use "
+                        "nn.GELU(approximate='tanh'), or pass "
+                        "gelu_tanh_ok=True to accept a drift of up to "
+                        f"{GELU_TANH_MAX_DRIFT:.1e} per activation")
+                print(f"export_smf: accepting the erf -> tanh GELU drift "
+                      f"at module {pos} (up to {GELU_TANH_MAX_DRIFT:.1e} "
+                      "per activation)", file=sys.stderr)
             # Name by module position: consecutive activations must not collide.
             kind = (OP_RELU if isinstance(m, nn.ReLU)
                     else OP_GELU if isinstance(m, nn.GELU) else OP_SILU)
@@ -283,7 +315,8 @@ def export_smf(model, path: str, input_name: str = "x"):
             tensor(f"ln_b{pos}",
                    m.bias if m.bias is not None else torch.zeros(d))
             b.add_op(OP_LAYERNORM, f"ln{pos}",
-                     [prev, f"ln_g{pos}", f"ln_b{pos}"], f"n{pos}")
+                     [prev, f"ln_g{pos}", f"ln_b{pos}"], f"n{pos}",
+                     attr2=_norm_eps_bits(m.eps))
             prev = f"n{pos}"
         else:
             raise ValueError(f"export_smf: unsupported module {type(m).__name__}")
@@ -327,12 +360,39 @@ def _rope_base_bits(rope_base: float) -> int:
     return struct.unpack("<I", packed)[0]
 
 
+def _norm_eps_bits(eps) -> int:
+    """attr2 encoding of a normalization epsilon (SMF v6): its f32 bits as
+    the kernel will read them, or 0 when it rounds to the 1e-5 default —
+    which keeps such files at their pre-v6 version, byte for byte."""
+    import math
+    value = float(eps)
+    try:
+        packed = struct.pack("<f", value)
+    except OverflowError:
+        raise ValueError(f"normalization eps {eps} exceeds float32 range")
+    rounded = struct.unpack("<f", packed)[0]
+    if not math.isfinite(rounded) or rounded <= 0.0:
+        raise ValueError(f"normalization eps {eps} rounds to {rounded} in "
+                         "float32, which is not a usable epsilon (> 0)")
+    if packed == struct.pack("<f", DEFAULT_NORM_EPS):
+        return 0
+    return struct.unpack("<I", packed)[0]
+
+
+# The largest |gelu_erf(x) - gelu_tanh(x)| over the reals (4.732e-4, at
+# |x| = 2.70, measured in float64 over [-12, 12]):
+# what a model trained with erf-GELU loses per activation on this device.
+GELU_TANH_MAX_DRIFT = 4.74e-4
+
+
 def _emit_decoder_graph(b, blocks, head, num_heads: int, prev: str,
-                        rope_base: float = DEFAULT_ROPE_BASE):
+                        rope_base: float = DEFAULT_ROPE_BASE,
+                        norm_eps: float = DEFAULT_NORM_EPS):
     """Append the pre-norm block stack and lm head, reading rows from `prev`."""
     import numpy as np
 
     base_bits = _rope_base_bits(rope_base)
+    eps_bits = _norm_eps_bits(norm_eps)
 
     def tensor(name, arr):
         # Explicit little-endian f32 — the container's byte order, whatever
@@ -344,7 +404,8 @@ def _emit_decoder_graph(b, blocks, head, num_heads: int, prev: str,
     for i, blk in enumerate(blocks):
         p = f"l{i}."
         tensor(p + "ln1_g", blk["ln1_g"])
-        b.add_op(OP_RMSNORM, p + "ln1", [prev, p + "ln1_g"], p + "n1")
+        b.add_op(OP_RMSNORM, p + "ln1", [prev, p + "ln1_g"], p + "n1",
+                 attr2=eps_bits)
         for w in ("wq", "wk", "wv"):
             tensor(p + w, blk[w])
             # Optional projection bias (Qwen2-class attention_bias): a rank-1
@@ -368,7 +429,8 @@ def _emit_decoder_graph(b, blocks, head, num_heads: int, prev: str,
         b.add_op(OP_MATMUL, p + "mm_wo", [p + "a", p + "wo"], p + "o")
         b.add_op(OP_ADD, p + "res1", [prev, p + "o"], p + "x1")
         tensor(p + "ln2_g", blk["ln2_g"])
-        b.add_op(OP_RMSNORM, p + "ln2", [p + "x1", p + "ln2_g"], p + "n2")
+        b.add_op(OP_RMSNORM, p + "ln2", [p + "x1", p + "ln2_g"], p + "n2",
+                 attr2=eps_bits)
         tensor(p + "w_gate", blk["w_gate"])
         tensor(p + "w_up", blk["w_up"])
         b.add_op(OP_MATMUL, p + "mm_gate", [p + "n2", p + "w_gate"], p + "g")
@@ -381,15 +443,17 @@ def _emit_decoder_graph(b, blocks, head, num_heads: int, prev: str,
         prev = p + "x2"
 
     tensor("lnf_g", head["lnf_g"])
-    b.add_op(OP_RMSNORM, "lnf", [prev, "lnf_g"], "nf")
+    b.add_op(OP_RMSNORM, "lnf", [prev, "lnf_g"], "nf", attr2=eps_bits)
     tensor("w_head", head["w_head"])
     b.add_op(OP_MATMUL, "mm_head", ["nf", "w_head"], "logits")
 
 
 def export_decoder_smf(blocks, head, path: str, seq_len: int, num_heads: int,
                        input_name: str = "x",
-                       rope_base: float = DEFAULT_ROPE_BASE):
-    """Export a pre-norm causal decoder stack to SMF v5.
+                       rope_base: float = DEFAULT_ROPE_BASE,
+                       norm_eps: float = DEFAULT_NORM_EPS):
+    """Export a pre-norm causal decoder stack to SMF (v6 when `norm_eps`,
+    the RMSNorm epsilon, is not 1e-5; v5 when rope_base is not 10000).
 
     `rope_base` is the rotary θ (HF `rope_theta`): 10000 for GPT-NeoX /
     SmolLM-v1, 100000 for SmolLM2, 500000 for Llama 3.x, 1000000 for Qwen.
@@ -407,7 +471,7 @@ def export_decoder_smf(blocks, head, path: str, seq_len: int, num_heads: int,
     D = _decoder_dim(blocks, head, num_heads, "export_decoder_smf")
     b = _SmfBuilder(input_name, D, seq_len=seq_len)
     _emit_decoder_graph(b, blocks, head, num_heads, prev=input_name,
-                        rope_base=rope_base)
+                        rope_base=rope_base, norm_eps=norm_eps)
     with open(path, "wb") as f:
         b.write(f)
     print(f"wrote {path} ({len(blocks)} decoder blocks, seq_len={seq_len}, "
@@ -416,8 +480,10 @@ def export_decoder_smf(blocks, head, path: str, seq_len: int, num_heads: int,
 
 def export_token_decoder_smf(embedding, blocks, head, path: str, seq_len: int,
                              num_heads: int, input_name: str = "x",
-                             rope_base: float = DEFAULT_ROPE_BASE):
-    """Export a token-native pre-norm causal decoder to SMF v5.
+                             rope_base: float = DEFAULT_ROPE_BASE,
+                             norm_eps: float = DEFAULT_NORM_EPS):
+    """Export a token-native pre-norm causal decoder to SMF (v4; v5 / v6 as
+    export_decoder_smf).
 
     Same `blocks` / `head` dictionaries as export_decoder_smf, plus
     `embedding`: a float32 [V, D] table. The exported model's input is a
@@ -439,7 +505,7 @@ def export_token_decoder_smf(embedding, blocks, head, path: str, seq_len: int,
     b.add_tensor("emb", list(emb.shape), emb)
     b.add_op(OP_EMBEDDING, "embed", [input_name, "emb"], "e")
     _emit_decoder_graph(b, blocks, head, num_heads, prev="e",
-                        rope_base=rope_base)
+                        rope_base=rope_base, norm_eps=norm_eps)
     with open(path, "wb") as f:
         b.write(f)
     print(f"wrote {path} ({len(blocks)} decoder blocks, seq_len={seq_len}, "
@@ -467,15 +533,14 @@ def export_token_decoder_smf(embedding, blocks, head, path: str, seq_len: int,
 #                               applied to both; v and o are untouched.
 #   rope_theta -> rope_base     per Rope op (SMF v5 attr1)
 #   tied lm_head                w_head = embedding^T when lm_head is absent
-#   RMSNorm eps                 the runtime's norms are fixed at 1e-5 (P7,
-#                               #96, adds the attribute); a checkpoint with
-#                               another eps is refused unless the drift is
-#                               accepted explicitly.
+#   RMSNorm eps                 per RmsNorm op (SMF v6 attr2, P7 #96): a
+#                               Qwen2-class 1e-6 is the model's own forward
+#                               on the device, not an approximation of it.
 # The parity check (--hf-parity) runs the SeeML-semantics NumPy forward
 # below against `transformers` when it is installed — a second, independent
 # implementation of every op the compiled plan will execute.
 
-RUNTIME_NORM_EPS = 1e-5  # runtime/executor/normalization.cc; P7 (#96) lifts it
+RUNTIME_NORM_EPS = DEFAULT_NORM_EPS  # what a norm with no attr2 computes
 
 _SAFETENSORS_DTYPES = {"F32": "<f4", "F16": "<f2", "BF16": "<u2", "F64": "<f8"}
 
@@ -609,14 +674,12 @@ def hf_llama_to_seeml(config: dict, tensors: dict, seq_len: int,
         raise ValueError(f"--seq-len {seq_len} exceeds the checkpoint's "
                          f"max_position_embeddings {max_pos}")
     notes = []
-    if abs(eps - RUNTIME_NORM_EPS) > 0:
-        msg = (f"rms_norm_eps {eps:g} differs from the runtime's fixed "
-               f"{RUNTIME_NORM_EPS:g} (P7, #96, adds the attribute)")
-        if not allow_eps_drift:
-            raise ValueError(msg + "; pass --allow-eps-drift to import "
-                             "anyway (step 0 will not equal the source "
-                             "model exactly)")
-        notes.append("accepted eps drift: " + msg)
+    # The epsilon rides every RmsNorm op (SMF v6 attr2) since P7 (#96);
+    # `allow_eps_drift` is accepted for old callers and means nothing now.
+    _norm_eps_bits(eps)  # refuses an epsilon the format cannot carry
+    if _norm_eps_bits(eps) != 0:
+        notes.append(f"rms_norm_eps {eps:g} carried on every RmsNorm "
+                     "(SMF v6)")
     if Hkv != H:
         notes.append(f"GQA: {Hkv} kv heads repeated to {H} query heads "
                      "(the format carries no kv heads yet)")
@@ -683,7 +746,7 @@ def hf_llama_to_seeml(config: dict, tensors: dict, seq_len: int,
     head = {"lnf_g": take("model.norm.weight"), "w_head": w_head}
     return {"embedding": emb, "blocks": blocks, "head": head,
             "num_heads": H, "rope_base": theta, "seq_len": seq_len,
-            "notes": notes, "vocab": V, "dim": D}
+            "norm_eps": eps, "notes": notes, "vocab": V, "dim": D}
 
 
 def export_hf_decoder(model_dir: str, out_path: str, seq_len: int,
@@ -697,14 +760,16 @@ def export_hf_decoder(model_dir: str, out_path: str, seq_len: int,
     export_token_decoder_smf(conv["embedding"], conv["blocks"], conv["head"],
                              out_path, seq_len=seq_len,
                              num_heads=conv["num_heads"],
-                             rope_base=conv["rope_base"])
+                             rope_base=conv["rope_base"],
+                             norm_eps=conv["norm_eps"])
     return conv
 
 
 def reference_decoder_logits(embedding, blocks, head, num_heads: int,
-                             rope_base: float, tokens):
+                             rope_base: float, tokens,
+                             norm_eps: float = DEFAULT_NORM_EPS):
     """The SeeML decoder's semantics in NumPy: the forward the compiled
-    plan executes (RMSNorm at the runtime's eps, interleaved RoPE with the
+    plan executes (RMSNorm at the model's eps, interleaved RoPE with the
     kernel's frequency recurrence, causal softmax, SwiGLU), for parity
     checks. tokens: int array [B, S]; returns float32 logits [B, S, V]."""
     import numpy as np
@@ -718,7 +783,7 @@ def reference_decoder_logits(embedding, blocks, head, num_heads: int,
 
     def rmsnorm(v, g):
         rs = 1.0 / np.sqrt(np.mean(v.astype(np.float32) ** 2, axis=-1,
-                                   keepdims=True) + RUNTIME_NORM_EPS)
+                                   keepdims=True) + np.float32(norm_eps))
         return (v * rs * g).astype(np.float32)
 
     # angle(s, c) = s * base^(-2c/d) by the kernel's multiplicative recurrence
@@ -791,7 +856,8 @@ def hf_parity(model_dir: str, conv: dict, batch: int = 2, seed: int = 0):
         want = model(torch.from_numpy(tokens)).logits.float().numpy()
     got = reference_decoder_logits(conv["embedding"], conv["blocks"],
                                    conv["head"], conv["num_heads"],
-                                   conv["rope_base"], tokens)
+                                   conv["rope_base"], tokens,
+                                   norm_eps=conv["norm_eps"])
     return float(np.max(np.abs(got - want))), float(np.max(np.abs(want)))
 
 
@@ -946,7 +1012,8 @@ def _demo(out_dir: str, width: int = 32, depth: int = 1, samples: int = 2048,
 def _demo_decoder(out_dir: str, vocab: int = 50, dim: int = 32,
                   heads: int = 4, seq: int = 8, ffn: int = 0,
                   blocks_n: int = 2, samples: int = 192, seed: int = 0,
-                  rope_base: float = DEFAULT_ROPE_BASE):
+                  rope_base: float = DEFAULT_ROPE_BASE,
+                  norm_eps: float = DEFAULT_NORM_EPS):
     """A tiny token-native decoder plus a corpus it can actually learn:
     a cyclic-successor language where token t is always followed by
     (t + 3) % vocab. Needs NumPy only — no PyTorch."""
@@ -967,7 +1034,8 @@ def _demo_decoder(out_dir: str, vocab: int = 50, dim: int = 32,
     head = {"lnf_g": np.ones(dim, np.float32), "w_head": mat(dim, vocab)}
     emb = (rng.standard_normal((vocab, dim)) * 0.5).astype(np.float32)
     export_token_decoder_smf(emb, blocks, head, f"{out_dir}/decoder.smf",
-                             seq_len=seq, num_heads=heads, rope_base=rope_base)
+                             seq_len=seq, num_heads=heads, rope_base=rope_base,
+                             norm_eps=norm_eps)
 
     starts = rng.integers(0, vocab, samples)
     records = (starts[:, None] + 3 * np.arange(seq + 1)) % vocab
@@ -1021,8 +1089,8 @@ if __name__ == "__main__":
                              "+ safetensors) as a token-native decoder; needs "
                              "--seq-len; NumPy only")
     parser.add_argument("--allow-eps-drift", action="store_true",
-                        help="--hf only: import a checkpoint whose "
-                             "rms_norm_eps differs from the runtime's 1e-5")
+                        help="--hf only: accepted for old scripts and "
+                             "ignored — rms_norm_eps is carried (SMF v6)")
     parser.add_argument("--hf-parity", action="store_true",
                         help="--hf only: after the export, compare the "
                              "SeeML-semantics NumPy forward against "

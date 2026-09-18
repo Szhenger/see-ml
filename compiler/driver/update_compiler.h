@@ -91,6 +91,9 @@ struct CompiledUpdate {
   // and the probability-cache bytes the cached family would have held.
   bool attention_tiled = false;
   uint64_t probs_cache_bytes = 0;
+  // E12: the eval program reads the student's frozen weights from the
+  // source model file (the shipped f32), not the plan's narrow copies.
+  bool scores_shipped = false;
 };
 
 class UpdateCompiler {

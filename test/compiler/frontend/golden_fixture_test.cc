@@ -6,6 +6,7 @@
 // writer cannot drift from the reader without one of the two suites failing.
 // =============================================================================
 
+#include <bit>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -101,6 +102,22 @@ TEST(GoldenFixture, TheExportersTokenCorpusServesShiftedLabels) {
       EXPECT_EQ(ids[r * 4 + k], (r * 5 + k) % 7);
       EXPECT_EQ(labels[r * 4 + k], (r * 5 + k + 1) % 7);
     }
+}
+
+TEST(GoldenFixture, TheExportersEpsilonReachesEveryNorm) {
+  // P7 (#96): the exporter wrote a Qwen2-style 1e-6 into every RmsNorm's
+  // attr2 (SMF v6); the reader hands it to the compiler unchanged.
+  ASSERT_OK_AND_ASSIGN(SmfModel model, LoadSmf(Golden("eps6.smf")));
+  size_t norms = 0;
+  for (const SmfOp& op : model.ops) {
+    if (op.kind == SmfOpKind::kRmsNorm) {
+      ++norms;
+      EXPECT_EQ(std::bit_cast<float>(op.attr2), 1e-6f);
+    } else {
+      EXPECT_EQ(op.attr2, 0u);
+    }
+  }
+  EXPECT_EQ(norms, 3u);  // ln1, ln2, the final norm
 }
 
 }  // namespace

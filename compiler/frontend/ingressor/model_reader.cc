@@ -1,6 +1,8 @@
 #include "compiler/frontend/ingressor/model_reader.h"
 
 #include <algorithm>
+#include <bit>
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <memory>
@@ -261,6 +263,7 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
     op.output = r.ReadStr();
     if (version >= 3) op.attr0 = r.Read<uint32_t>();
     if (version >= 5) op.attr1 = r.Read<uint32_t>();
+    if (version >= 6) op.attr2 = r.Read<uint32_t>();
     // attr1 is defined only for kRope (the rotary base); on every other
     // kind it is reserved and must be zero, so a future meaning can never
     // be silently misread by a reader that predates it.
@@ -268,6 +271,21 @@ std::expected<SmfModel, std::string> LoadSmf(const std::string& path) {
       return tokenizing::Error("op '" + op.name + "' carries a nonzero attr1, "
                                "which its kind does not define, in '" + path +
                                "'");
+    // attr2 (v6) is the epsilon of a LayerNorm / RmsNorm, nothing else's;
+    // when set it must be a finite positive float.
+    if (op.attr2 != 0) {
+      const bool norm = op.kind == SmfOpKind::kLayerNorm ||
+                        op.kind == SmfOpKind::kRmsNorm;
+      const float eps = std::bit_cast<float>(op.attr2);
+      if (!norm)
+        return tokenizing::Error("op '" + op.name + "' carries a nonzero "
+                                 "attr2, which its kind does not define, in '" +
+                                 path + "'");
+      if (!std::isfinite(eps) || !(eps > 0.0f))
+        return tokenizing::Error("op '" + op.name + "' has a normalization "
+                                 "epsilon that is not a finite positive "
+                                 "float, in '" + path + "'");
+    }
     model.ops.push_back(std::move(op));
   }
 

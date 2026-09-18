@@ -94,6 +94,7 @@ std::expected<void, std::string> SaveSmf(const std::string& path,
       w.WriteStr(op.output);
       w.Write<uint32_t>(op.attr0);
       w.Write<uint32_t>(op.attr1);
+      w.Write<uint32_t>(op.attr2);
     }
   };
 

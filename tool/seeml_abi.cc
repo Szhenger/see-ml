@@ -14,6 +14,7 @@
 // cannot merge. No arguments; deterministic output (no host facts).
 // =============================================================================
 
+#include <bit>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -54,7 +55,7 @@ void Field(const char* name, size_t offset, size_t size) {
   X(eval_instr_count) X(source_model_hash) X(plan_hash) X(lr_schedule)        \
   X(gemm_tile_n) X(warmup_steps) X(min_lr_factor) X(clip_norm) X(input_kind)  \
   X(grad_accum_steps) X(seq_len) X(step_instr_offset) X(step_instr_count)
-#define INSTRUCTION_FIELDS(X) X(opcode) X(flags) X(pad) X(in) X(out)
+#define INSTRUCTION_FIELDS(X) X(opcode) X(flags) X(imm) X(in) X(out)
 #define EMIT_ENTRY_FIELDS(X) X(smf_data_offset) X(byte_size) X(arena_offset)
 #define CKPT_FIELDS(X) \
   X(magic) X(version) X(plan_hash) X(step) X(persistent_size) X(payload_hash)
@@ -133,17 +134,21 @@ int main(int argc, char**) {
               rt::kSdsLabelKindMax);
 
   std::printf("  \"seeu\": {\n    \"magic\": %u, \"version\": %u, "
-              "\"oldest_readable\": %u,\n    \"rodata_bit\": 63, "
+              "\"oldest_readable\": %u,\n    \"rodata_bit\": %d, "
+              "\"source_bit\": %d, "
               "\"rodata_alignment\": %llu, \"gemm_panel_floats\": %llu,\n",
               up::kSeeuMagic, up::kSeeuVersion, up::kSeeuOldestReadable,
+              std::countr_zero(up::kRodataBit), std::countr_zero(up::kSourceBit),
               static_cast<unsigned long long>(up::kSeeuRodataAlignment),
               static_cast<unsigned long long>(up::kDefaultGemmPanelFloats));
   std::printf("    \"flags\": {\"epilogue_bias\": %u, \"epilogue_act_shift\": "
-              "%u, \"epilogue_act_mask\": %u, \"gemm_addend\": %u},\n",
+              "%u, \"epilogue_act_mask\": %u, \"gemm_addend\": %u, "
+              "\"q8_col_scale\": %u},\n",
               unsigned(up::kFlagEpilogueBias),
               unsigned(up::kFlagEpilogueActShift),
               unsigned(up::kFlagEpilogueActMask),
-              unsigned(up::kFlagGemmAddend));
+              unsigned(up::kFlagGemmAddend),
+              unsigned(up::kFlagQ8ColScale));
   Enum("fused_stages", fused, sizeof(fused) / sizeof(fused[0]), false);
   std::printf("    \"fused_stage\": {\"kind_mask\": %u, \"arg_shift\": %u, "
               "\"arg_mask\": %u, \"run_is_right\": %u, \"max_stages\": %zu},\n",

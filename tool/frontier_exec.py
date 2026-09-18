@@ -80,6 +80,12 @@ from seeml import formats  # noqa: E402
 SEEU_MAGIC = formats.SEEU_MAGIC
 SEEU_OLDEST, SEEU_NEWEST = formats.SEEU_OLDEST_READABLE, formats.SEEU_VERSION
 RODATA_BIT = formats.RODATA_BIT
+SOURCE_BIT = formats.SOURCE_BIT
+
+
+def is_source_ref(ref):
+    """A v17 source-model ref: bit 62 set, bit 63 clear."""
+    return ref & (RODATA_BIT | SOURCE_BIT) == SOURCE_BIT
 NULL_REF = formats.NULL_REF
 
 _HEADER = formats.PLAN_HEADER.struct
@@ -89,7 +95,7 @@ _INSTRUCTION = formats.INSTRUCTION.struct
 OPCODES = formats.OPCODES
 GEMM_OPCODES = (1, 2, 3, 4, 29, 30, 43, 44)
 SECTIONS = ("train", "step", "eval", "merge")
-NORM_EPS = 1e-5  # runtime/executor/normalization.cc; SMF carries none (#96)
+NORM_EPS = 1e-5  # what a normalization forward's zero imm word means (v16)
 GELU_C, GELU_A = 0.7978845608028654, 0.044715  # the tanh approximation
 
 
@@ -98,10 +104,11 @@ class PlanError(Exception):
 
 
 class Instruction:
-    __slots__ = ("opcode", "flags", "src", "out")
+    __slots__ = ("opcode", "flags", "src", "out", "imm")
 
-    def __init__(self, opcode, flags, src, out):
+    def __init__(self, opcode, flags, src, out, imm=0):
         self.opcode, self.flags, self.src, self.out = opcode, flags, src, out
+        self.imm = imm  # v16: opcode-defined immediate (norm epsilon bits)
 
 
 def bits_f32(word):
@@ -144,8 +151,8 @@ class Plan:
             count = getattr(self, name + "_instr_count")
             self._bounds(name, off, count * _INSTRUCTION.size)
             self.sections[name] = [
-                Instruction(op, flags, (a, b, c, d), (x, y, z))
-                for op, flags, _, a, b, c, d, x, y, z in
+                Instruction(op, flags, (a, b, c, d), (x, y, z), imm)
+                for op, flags, imm, a, b, c, d, x, y, z in
                 _INSTRUCTION.iter_unpack(
                     blob[off:off + count * _INSTRUCTION.size])]
         self._bounds("rodata", self.rodata_offset, self.rodata_size)
@@ -679,20 +686,39 @@ class Memory:
         self.arena = plan.initial_arena()
         self.recorder = None
         self._frozen = {}
+        self.source = None  # v17: the source model file's bytes (E12)
 
     # Frozen weights: f32 as stored, int8 and bf16 widened once. A frontier
     # framework holds its weights in a dtype it can multiply; the on-the-fly
     # dequantization is the C++ runtime's memory trade, not part of the
     # arithmetic being checked or priced.
-    def frozen(self, ref, shape, kind="<f4", scale=1.0):
-        key = (ref, shape, kind, scale)
+    def frozen(self, ref, shape, kind="<f4", scale=1.0, colscale=None):
+        key = (ref, shape, kind, scale, colscale)
         if key not in self._frozen:
-            np, off = self.np, self.plan.rodata_offset + (ref & ~RODATA_BIT)
-            n = _count(shape)
-            if off + n * _DTYPE_BYTES[kind] > len(self.plan.blob):
-                raise PlanError("a rodata operand lies outside the plan")
-            raw = np.frombuffer(self.plan.blob, kind, n, off)
-            if kind == "<i1":
+            np, n = self.np, _count(shape)
+            if is_source_ref(ref):
+                # v17: the eval program reads the shipped f32 weights from
+                # the source model file, at their absolute SMF offsets.
+                if self.source is None:
+                    raise PlanError("the eval program reads the source "
+                                    "model: pass --source model.smf")
+                blob, off = self.source, ref & ~SOURCE_BIT
+                if off + n * _DTYPE_BYTES[kind] > len(blob):
+                    raise PlanError("a source operand lies outside the "
+                                    "model file")
+            else:
+                blob = self.plan.blob
+                off = self.plan.rodata_offset + (ref & ~RODATA_BIT)
+                if off + n * _DTYPE_BYTES[kind] > len(blob):
+                    raise PlanError("a rodata operand lies outside the plan")
+            raw = np.frombuffer(blob, kind, n, off)
+            if kind == "<i1" and colscale is not None:
+                cols = shape[-1]
+                off_s = self.plan.rodata_offset + (colscale & ~RODATA_BIT)
+                cs = np.frombuffer(self.plan.blob, "<f4", cols, off_s)
+                host = (raw.astype(np.float32).reshape(shape) *
+                        cs.reshape((1, cols))).reshape(-1)
+            elif kind == "<i1":
                 host = raw.astype(np.float32) * np.float32(scale)
             elif kind == "<u2":  # bfloat16: f32's top 16 bits, exactly
                 host = (raw.astype(np.uint32) << 16).view(np.float32)
@@ -709,7 +735,7 @@ class Memory:
             raise PlanError("an arena operand lies outside the arena")
 
     def read(self, ref, shape, kind="<f4"):
-        if ref != NULL_REF and ref & RODATA_BIT:
+        if ref != NULL_REF and (ref & RODATA_BIT or is_source_ref(ref)):
             return self.frozen(ref, tuple(shape), kind)
         return self._read(ref, tuple(shape), kind)
 
@@ -883,6 +909,10 @@ def _gemm_operands(m, ins, kind, transposed_b):
     shape = (cols, inner) if transposed_b else (inner, cols)
     if kind == "<f4":
         b = m.read(ins.src[1], shape)
+    elif kind == "<i1" and ins.flags & formats.FLAG_Q8_COL_SCALE:
+        # v17: one scale per output column of W — the last axis of B in
+        # both the NN ([K, M]) and the NT ([N = K, M]) reading.
+        b = m.frozen(ins.src[1], shape, kind, 1.0, colscale=ins.src[3])
     else:
         scale = bits_f32(ins.src[3]) if kind == "<i1" else 1.0
         b = m.frozen(ins.src[1], shape, kind, scale)
@@ -1077,13 +1107,19 @@ def _step_gradient(m, x, ins):
     return g * _clip_factor(x, g, bits_f32(ins.out[1])) if ins.out[1] else g
 
 
+def _norm_eps(ins):
+    """The epsilon a normalization forward carries in its imm word (v16):
+    the f32 bits of the model's own, or 0 for 1e-5."""
+    return bits_f32(ins.imm) if ins.imm else NORM_EPS
+
+
 def _layer_norm_fwd(m, x, ins, step):
     n, d = hi_lo(ins.out[0])
     t = m.read(ins.src[0], (n, d))
     mean = x.mean(t, -1, keepdims=True)
     centered = t - mean
     rstd = 1.0 / x.sqrt(x.mean(centered * centered, -1, keepdims=True) +
-                        NORM_EPS)
+                        _norm_eps(ins))
     m.write(ins.src[3], centered * rstd * m.read(ins.src[1], (d,)) +
             m.read(ins.src[2], (d,)))
     m.write(ins.out[1], mean.reshape((n,)))
@@ -1103,7 +1139,7 @@ def _layer_norm_bwd(m, x, ins, step):
 def _rms_norm_fwd(m, x, ins, step):
     n, d = hi_lo(ins.out[0])
     t = m.read(ins.src[0], (n, d))
-    rstd = 1.0 / x.sqrt(x.mean(t * t, -1, keepdims=True) + NORM_EPS)
+    rstd = 1.0 / x.sqrt(x.mean(t * t, -1, keepdims=True) + _norm_eps(ins))
     m.write(ins.src[2], t * rstd * m.read(ins.src[1], (d,)))
     m.write(ins.src[3], rstd.reshape((n,)))
 
@@ -1328,10 +1364,13 @@ assert sorted(INTERPRETER) == sorted(OPCODES)
 class Executor:
     """One plan bound to one backend: the engine's loop, minus the gate."""
 
-    def __init__(self, plan, backend):
+    def __init__(self, plan, backend, source=None):
         self.plan, self.x = plan, backend
         mem = ArenaMemory if backend.arena_views else SlotMemory
         self.mem = mem(plan, backend)
+        if source:
+            with open(source, "rb") as f:
+                self.mem.source = f.read()
         self.step = 0
         self.horizon = 0  # the run's LR horizon; 0 = the plan's default
         unknown = sorted({i.opcode for s in plan.sections.values() for i in s}
@@ -1476,13 +1515,15 @@ def read_trace(np, path):
 class Probe:
     """seeml-plan-probe, the C++ side of the comparison."""
 
-    def __init__(self, path, plan_path, backend="cpu", threads=None):
+    def __init__(self, path, plan_path, backend="cpu", threads=None,
+                 source=None):
         if not (path and os.path.isfile(path) and os.access(path, os.X_OK)):
             raise PlanError(f"no seeml-plan-probe at {path!r} — build the "
                             "tree (sh build/build.sh) or pass --probe")
         self.base = [path, "--plan", plan_path, "--backend", backend]
         if threads:
             self.base += ["--threads", str(threads)]
+        self.source = source  # v17: passed to eval sections
         self.tmp = tempfile.TemporaryDirectory(prefix="seeml-frontier-")
 
     def close(self):
@@ -1497,6 +1538,8 @@ class Probe:
                            "--arena-out", a_out,
                            "--lr-bits", f"{f32_bits(scalars['lr']):08x}",
                            "--step", str(scalars["step"])] + extra
+        if section == "eval" and self.source:
+            cmd += ["--source", self.source]
         done = subprocess.run(cmd, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True)
         if done.returncode != 0:
@@ -1583,8 +1626,9 @@ def cmd_diff(args):
     corpus = (Corpus(np, args.corpus) if args.corpus
               else SyntheticCorpus(np, plan, args.seed))
     corpus.check(plan)
-    ex = Executor(plan, backend)
-    probe = Probe(args.probe, args.plan, args.cpp_backend, args.threads)
+    ex = Executor(plan, backend, args.source)
+    probe = Probe(args.probe, args.plan, args.cpp_backend, args.threads,
+                  args.source)
     differ = Differ(np, args.rtol, args.atol)
 
     def both(label, section, scalars):
@@ -1670,7 +1714,7 @@ def cmd_run(args):
         corpus, val = corpus.split_validation(args.val_fraction)
     if not args.no_shuffle:
         corpus.enable_shuffle(args.seed)
-    ex = Executor(plan, backend)
+    ex = Executor(plan, backend, args.source)
     steps = args.steps or plan.default_steps
     ex.horizon = steps  # a fresh run anneals over its own length
     report = {"plan": args.plan, "backend": backend.name,
@@ -1876,6 +1920,9 @@ def build_parser():
         sp.add_argument("--threads", type=int, default=None,
                         help="SEEML thread count for the C++ probe")
         sp.add_argument("--report", metavar="JSON", default=None)
+        sp.add_argument("--source", metavar="SMF", default=None,
+                        help="the model the plan was compiled from — a v17 "
+                             "plan's eval program reads its f32 weights")
 
     diff = sub.add_parser("diff", help="compare every write against the "
                                        "C++ runtime")

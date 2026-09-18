@@ -71,12 +71,18 @@ void GemmNNQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
               size_t K, float scale,
               seeml::update::EpilogueAct act =
                   seeml::update::EpilogueAct::kNone,
-              const GemmTiles& tiles = kDefaultGemmTiles);
+              const GemmTiles& tiles = kDefaultGemmTiles,
+              const float* col_scale = nullptr);
                                             // C = A[M,K] @ (scale*B)[K,N]
 void GemmNTQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
               size_t K, float scale,
-              const GemmTiles& tiles = kDefaultGemmTiles);
+              const GemmTiles& tiles = kDefaultGemmTiles,
+              const float* k_scale = nullptr);
                                             // C = A[M,K] @ (scale*B)[N,K]^T
+// Per-column scales (plan v17, kFlagQ8ColScale): with `col_scale` (float[N])
+// the NN form computes C[m, n] = act(col_scale[n] * sum_k A[m, k] * q[k, n]);
+// with `k_scale` (float[K]) the NT form computes
+// C[m, n] = sum_k A[m, k] * (q[n, k] * k_scale[k]). `scale` is then unused.
 
 // --- bf16 GEMM (plan v10): B is bfloat16 rodata, widened exactly to f32 on
 // the way into the tile; compute is f32. GemmNNBF16 takes the full fused
@@ -114,8 +120,10 @@ void ReduceRows(const float* dy, float* db, size_t rows, size_t cols);
 
 // --- LayerNorm over the last dim of x[N,D], affine gamma/beta[D] --------------
 // Forward caches per-row mean and reciprocal stddev for the backward kernel.
+// `eps` is the plan's (v16: the instruction's imm word; 1e-5 by default).
 void LayerNormFwd(const float* x, const float* gamma, const float* beta,
-                  float* y, float* mean, float* rstd, size_t rows, size_t cols);
+                  float* y, float* mean, float* rstd, size_t rows, size_t cols,
+                  float eps = seeml::update::kDefaultNormEps);
 void LayerNormBwd(const float* dy, const float* x, const float* gamma,
                   const float* mean, const float* rstd, float* dx, size_t rows,
                   size_t cols);
@@ -124,7 +132,8 @@ void LayerNormBwd(const float* dy, const float* x, const float* gamma,
 // y = x * rstd * gamma with rstd = 1/sqrt(mean(x^2) + eps); forward caches
 // per-row rstd for the backward kernel. No bias, no mean subtraction.
 void RmsNormFwd(const float* x, const float* gamma, float* y, float* rstd,
-                size_t rows, size_t cols);
+                size_t rows, size_t cols,
+                float eps = seeml::update::kDefaultNormEps);
 void RmsNormBwd(const float* dy, const float* x, const float* gamma,
                 const float* rstd, float* dx, size_t rows, size_t cols);
 
