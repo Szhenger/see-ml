@@ -164,6 +164,8 @@ FLAG_EPILOGUE_ACT_SHIFT = 1
 FLAG_EPILOGUE_ACT_MASK = 6
 # The f32 GEMMs (v14): C = D + A@B, D's ref in in[3]; excludes the epilogue.
 FLAG_GEMM_ADDEND = 8
+# The int8 GEMMs (v17): in[3] is a rodata ref to per-output-column scales.
+FLAG_Q8_COL_SCALE = 16
 
 # kFusedMap micro-program: one byte per stage, packed into an operand word.
 FUSED_STAGES = {"end": 0, "add": 1, "mul": 2, "scale": 3, "relu": 4,
@@ -241,7 +243,8 @@ def check_against(abi: Dict[str, Any]) -> List[str]:
     same("seeu.flags", {"epilogue_bias": FLAG_EPILOGUE_BIAS,
                         "epilogue_act_shift": FLAG_EPILOGUE_ACT_SHIFT,
                         "epilogue_act_mask": FLAG_EPILOGUE_ACT_MASK,
-                        "gemm_addend": FLAG_GEMM_ADDEND},
+                        "gemm_addend": FLAG_GEMM_ADDEND,
+                        "q8_col_scale": FLAG_Q8_COL_SCALE},
          seeu["flags"])
     same("seeu.fused_stages", FUSED_STAGES, seeu["fused_stages"])
     same("seeu.fused_stage", {"kind_mask": FUSED_KIND_MASK,

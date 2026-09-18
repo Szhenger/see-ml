@@ -139,11 +139,13 @@ int main(int argc, char**) {
               static_cast<unsigned long long>(up::kSeeuRodataAlignment),
               static_cast<unsigned long long>(up::kDefaultGemmPanelFloats));
   std::printf("    \"flags\": {\"epilogue_bias\": %u, \"epilogue_act_shift\": "
-              "%u, \"epilogue_act_mask\": %u, \"gemm_addend\": %u},\n",
+              "%u, \"epilogue_act_mask\": %u, \"gemm_addend\": %u, "
+              "\"q8_col_scale\": %u},\n",
               unsigned(up::kFlagEpilogueBias),
               unsigned(up::kFlagEpilogueActShift),
               unsigned(up::kFlagEpilogueActMask),
-              unsigned(up::kFlagGemmAddend));
+              unsigned(up::kFlagGemmAddend),
+              unsigned(up::kFlagQ8ColScale));
   Enum("fused_stages", fused, sizeof(fused) / sizeof(fused[0]), false);
   std::printf("    \"fused_stage\": {\"kind_mask\": %u, \"arg_shift\": %u, "
               "\"arg_mask\": %u, \"run_is_right\": %u, \"max_stages\": %zu},\n",

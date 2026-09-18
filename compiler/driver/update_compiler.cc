@@ -595,7 +595,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   std::vector<sir::Operation*> train_ops;
   train_ops.reserve(block.numOps());
   block.walk([&](sir::Operation* op) { train_ops.push_back(op); });
-  auto train_instrs = LowerOps(train_ops, resolve_train, quant_scales, bf16_weights);
+  auto train_instrs = LowerOps(train_ops, resolve_train, quant_scales,
+                               bf16_weights, binding->quant_column_scales);
   if (!train_instrs) return std::unexpected(train_instrs.error());
 
   // Under gradient accumulation the lowered stream is two programs: the
@@ -666,7 +667,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   std::unordered_set<const sir::Value*> eval_bf16;
   for (const sir::Value* w : bf16_weights)
     if (!shipped.contains(w)) eval_bf16.insert(w);
-  auto eval_instrs = LowerOps(primal_ops, resolve_eval, eval_quant, eval_bf16);
+  auto eval_instrs = LowerOps(primal_ops, resolve_eval, eval_quant, eval_bf16,
+                              binding->quant_column_scales);
   if (!eval_instrs) return std::unexpected(eval_instrs.error());
 
   auto resolve_merge =
@@ -680,7 +682,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   std::vector<sir::Operation*> merge_ops;
   merge_ops.reserve(merge->block->numOps());
   merge->block->walk([&](sir::Operation* op) { merge_ops.push_back(op); });
-  auto merge_instrs = LowerOps(merge_ops, resolve_merge, quant_scales, bf16_weights);
+  auto merge_instrs = LowerOps(merge_ops, resolve_merge, quant_scales,
+                               bf16_weights, binding->quant_column_scales);
   if (!merge_instrs) return std::unexpected(merge_instrs.error());
 
   phase("lower", block.numOps());

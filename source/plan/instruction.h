@@ -260,8 +260,19 @@ inline constexpr uint16_t kEpilogueFlagsMask =
 // never bits. It excludes the bias / activation epilogue (kGemmNN's in[3]
 // holds one ref), and the narrow-weight GEMMs do not take it.
 inline constexpr uint16_t kFlagGemmAddend = 1u << 3;  // in[3] = addend ref [M,N]
+// --- Per-column int8 scales (plan v17, E12 #95). ------------------------------
+// kGemmNNQ8 / kGemmNTQ8 only: in[3] is a rodata ref to one f32 scale per
+// OUTPUT COLUMN of the quantized weight W [K, M] (float[M]) instead of the
+// per-tensor scale's bits. A per-tensor max-abs scale lets one outlier
+// column (LLM projections carry |w| outliers 10-50x the bulk) collapse
+// every other column to a few int8 levels; a column's own scale keeps its
+// resolution. In the forward (NN) the scale is the output column's —
+// C[m, n] = act(s[n] * sum_k A[m, k] * q[k, n]); in the dX GEMM (NT, W read
+// as [N = K, M]) it is the REDUCTION index's, applied as each int8 element
+// widens — C[m, n] = sum_k A[m, k] * (q[n, k] * s[k]).
+inline constexpr uint16_t kFlagQ8ColScale = 1u << 4;  // in[3] = scales ref
 inline constexpr uint16_t kKnownFlagsMask =
-    kEpilogueFlagsMask | kFlagGemmAddend;
+    kEpilogueFlagsMask | kFlagGemmAddend | kFlagQ8ColScale;
 
 enum class EpilogueAct : uint16_t { kNone = 0, kRelu = 1, kGelu = 2, kSilu = 3 };
 

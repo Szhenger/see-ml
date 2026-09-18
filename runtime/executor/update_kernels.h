@@ -71,12 +71,18 @@ void GemmNNQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
               size_t K, float scale,
               seeml::update::EpilogueAct act =
                   seeml::update::EpilogueAct::kNone,
-              const GemmTiles& tiles = kDefaultGemmTiles);
+              const GemmTiles& tiles = kDefaultGemmTiles,
+              const float* col_scale = nullptr);
                                             // C = A[M,K] @ (scale*B)[K,N]
 void GemmNTQ8(const float* A, const int8_t* B, float* C, size_t M, size_t N,
               size_t K, float scale,
-              const GemmTiles& tiles = kDefaultGemmTiles);
+              const GemmTiles& tiles = kDefaultGemmTiles,
+              const float* k_scale = nullptr);
                                             // C = A[M,K] @ (scale*B)[N,K]^T
+// Per-column scales (plan v17, kFlagQ8ColScale): with `col_scale` (float[N])
+// the NN form computes C[m, n] = act(col_scale[n] * sum_k A[m, k] * q[k, n]);
+// with `k_scale` (float[K]) the NT form computes
+// C[m, n] = sum_k A[m, k] * (q[n, k] * k_scale[k]). `scale` is then unused.
 
 // --- bf16 GEMM (plan v10): B is bfloat16 rodata, widened exactly to f32 on
 // the way into the tile; compute is f32. GemmNNBF16 takes the full fused

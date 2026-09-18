@@ -780,8 +780,16 @@ std::expected<void, std::string> MetalBackend::Encode(
     case up::OpCode::kGemmNTQ8:
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]);
       a.m = u32(ins.out[0]); a.n = u32(ins.out[1]); a.k = u32(ins.out[2]);
-      a.f[0] = BitsToF32(ins.in[3]);  // dequant scale
       a.flags = static_cast<uint32_t>(up::EpilogueActOf(ins.flags));
+      if (ins.flags & up::kFlagQ8ColScale) {
+        // v17: per-column scales in slot 3 — the NN form scales output
+        // columns in the epilogue (128), the NT form scales B as it widens.
+        ref(3, ins.in[3]);
+        a.f[0] = 1.0f;
+        a.flags |= op == up::OpCode::kGemmNNQ8 ? 128u : 256u;
+      } else {
+        a.f[0] = BitsToF32(ins.in[3]);  // the per-tensor dequant scale
+      }
       if (op == up::OpCode::kGemmNNQ8)
         DispatchGemm(kPGemmNNQ8, a, false, false, 1);
       else

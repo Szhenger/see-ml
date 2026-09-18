@@ -78,12 +78,16 @@ std::expected<void, std::string> ValidateInstructionImpl(
         plan_version >= up::kSeeuGemmAddendVersion &&
         (opcode == up::OpCode::kGemmNN || opcode == up::OpCode::kGemmNT ||
          opcode == up::OpCode::kGemmTN);
+    const bool colscale_ok =
+        plan_version >= up::kSeeuShippedEvalVersion &&
+        (opcode == up::OpCode::kGemmNNQ8 || opcode == up::OpCode::kGemmNTQ8);
     const uint16_t allowed = static_cast<uint16_t>(
         ((opcode == up::OpCode::kGemmNN || opcode == up::OpCode::kGemmNNBF16)
              ? up::kEpilogueFlagsMask
          : opcode == up::OpCode::kGemmNNQ8 ? up::kFlagEpilogueActMask
                                            : uint16_t{0}) |
-        (addend_ok ? up::kFlagGemmAddend : uint16_t{0}));
+        (addend_ok ? up::kFlagGemmAddend : uint16_t{0}) |
+        (colscale_ok ? up::kFlagQ8ColScale : uint16_t{0}));
     if (ins.flags & static_cast<uint16_t>(~allowed))
       return diag::validating::Error(
           "unknown or misplaced instruction flags " +
@@ -309,6 +313,15 @@ std::expected<void, std::string> ValidateInstructionImpl(
       // against the written C range.
       if ((ins.flags & up::kFlagEpilogueBias) && !ref_ok(ins.in[3], d1, false))
         return fail();
+      // Per-column int8 scales (v17): a rodata vector, one float per
+      // output column of W — N in the forward (NN), the reduction extent K
+      // in the dX GEMM (NT), where W is read as [N, K].
+      if (ins.flags & up::kFlagQ8ColScale) {
+        const bool nt = oc == up::OpCode::kGemmNTQ8;
+        if (!up::IsRodataRef(ins.in[3]) ||
+            !ref_ok(ins.in[3], nt ? d2 : d1, false))
+          return fail();
+      }
       // The addend (v14, f32 GEMMs only — proved above): in[3] is a read of
       // M*N floats, disjoint from the written C like every other operand.
       if ((ins.flags & up::kFlagGemmAddend) && !ref_ok(ins.in[3], mn, false))

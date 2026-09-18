@@ -692,8 +692,8 @@ class Memory:
     # framework holds its weights in a dtype it can multiply; the on-the-fly
     # dequantization is the C++ runtime's memory trade, not part of the
     # arithmetic being checked or priced.
-    def frozen(self, ref, shape, kind="<f4", scale=1.0):
-        key = (ref, shape, kind, scale)
+    def frozen(self, ref, shape, kind="<f4", scale=1.0, colscale=None):
+        key = (ref, shape, kind, scale, colscale)
         if key not in self._frozen:
             np, n = self.np, _count(shape)
             if is_source_ref(ref):
@@ -712,7 +712,13 @@ class Memory:
                 if off + n * _DTYPE_BYTES[kind] > len(blob):
                     raise PlanError("a rodata operand lies outside the plan")
             raw = np.frombuffer(blob, kind, n, off)
-            if kind == "<i1":
+            if kind == "<i1" and colscale is not None:
+                cols = shape[-1]
+                off_s = self.plan.rodata_offset + (colscale & ~RODATA_BIT)
+                cs = np.frombuffer(self.plan.blob, "<f4", cols, off_s)
+                host = (raw.astype(np.float32).reshape(shape) *
+                        cs.reshape((1, cols))).reshape(-1)
+            elif kind == "<i1":
                 host = raw.astype(np.float32) * np.float32(scale)
             elif kind == "<u2":  # bfloat16: f32's top 16 bits, exactly
                 host = (raw.astype(np.uint32) << 16).view(np.float32)
@@ -903,6 +909,10 @@ def _gemm_operands(m, ins, kind, transposed_b):
     shape = (cols, inner) if transposed_b else (inner, cols)
     if kind == "<f4":
         b = m.read(ins.src[1], shape)
+    elif kind == "<i1" and ins.flags & formats.FLAG_Q8_COL_SCALE:
+        # v17: one scale per output column of W — the last axis of B in
+        # both the NN ([K, M]) and the NT ([N = K, M]) reading.
+        b = m.frozen(ins.src[1], shape, kind, 1.0, colscale=ins.src[3])
     else:
         scale = bits_f32(ins.src[3]) if kind == "<i1" else 1.0
         b = m.frozen(ins.src[1], shape, kind, scale)
