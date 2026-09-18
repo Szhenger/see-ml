@@ -20,6 +20,15 @@
 // caches of all of them together exceed `probs_cache_budget_bytes`, at
 // roughly twice the attention arithmetic, and keeps the cache otherwise.
 //
+// Two sites take part, on purpose. The driver's step-0 memory gate decides
+// first, from the SMF-level footprint estimate, because the gate must price
+// the choice before any SIR exists; it hands that verdict in as
+// `gate_tiled`. This pass then re-checks kAuto against the EXACT cache
+// shapes the SIR carries and tiles if either says so — tiling only ever
+// lowers memory, so overriding a "cached" verdict the estimate got wrong is
+// always safe. The decision the pass returns is the one the plan carries
+// and the compile report records.
+//
 // The rewrite is in place, before the primal snapshot and before autodiff:
 // each `sc_high.attention` gains the attribute "tiled" and its second
 // result — the cache the backward reads — becomes the [B*H*S, 4] stats
@@ -36,13 +45,15 @@ struct AttilingDecision {
 
 class AttentionTiling {
  public:
-  explicit AttentionTiling(AttentionKind kind, uint64_t probs_cache_budget)
-      : kind_(kind), budget_(probs_cache_budget) {}
+  AttentionTiling(AttentionKind kind, bool gate_tiled,
+                  uint64_t probs_cache_budget)
+      : kind_(kind), gate_tiled_(gate_tiled), budget_(probs_cache_budget) {}
   [[nodiscard]] std::expected<AttilingDecision, std::string> Run(
       seeml::sir::Block& block);
 
  private:
   AttentionKind kind_;
+  bool gate_tiled_;
   uint64_t budget_;
 };
 

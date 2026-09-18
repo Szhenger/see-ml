@@ -103,7 +103,7 @@ A 40-byte header, then fixed-size records — which means sample k lives at a *c
 
 ## SEEU — Update Plan (`.seeu`, v15)
 
-The star of the show: the fully AOT-compiled update. One file containing three instruction streams (train / eval / merge) — four under gradient accumulation, when the train section is the grad program and a step section holds the optimizer program — the frozen weights, the persistent segment's initial image, and the emit table — every section addressed by a single `PlanHeader` at offset 0 (authoritative definition: `source/plan/schema.h`; every section 64-byte aligned). Versioning is additive: see the version history below (currently v13).
+The star of the show: the fully AOT-compiled update. One file containing three instruction streams (train / eval / merge) — four under gradient accumulation, when the train section is the grad program and a step section holds the optimizer program — the frozen weights, the persistent segment's initial image, and the emit table — every section addressed by a single `PlanHeader` at offset 0 (authoritative definition: `source/plan/schema.h`; every section 64-byte aligned). Versioning is additive: see the version history below (currently v15).
 
 Key header fields:
 

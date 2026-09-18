@@ -1196,11 +1196,19 @@ def _attn_geometry(ins):
 
 def _attn_probs(x, q, k, s, d, stats, b, h):
     """P from Q, K and the stored (row max, 1/denominator) — the cached
-    family's probabilities, recomputed (masked entries exactly zero)."""
+    family's probabilities, recomputed (masked entries exactly zero).
+
+    The masked scores are replaced BEFORE the exponential, as the forward
+    does: the stored max covers the causal prefix only, so a future key's
+    raw score can exceed it by more than exp's range, and inf * 0 is NaN —
+    which a mask applied afterwards cannot undo. The C++ kernels never
+    evaluate a masked entry at all."""
+    mask = x.causal(s)
     scores = x.matmul(q, x.perm(k, (0, 1, 3, 2))) / math.sqrt(d)
+    scores = x.where(mask > 0.0, scores, scores * 0.0 - 1e30)
     mx = stats[:, 0].reshape((b, h, s, 1))
     inv = stats[:, 1].reshape((b, h, s, 1))
-    return x.exp(scores - mx) * inv * x.causal(s)
+    return x.exp(scores - mx) * inv * mask
 
 
 def _attn_fwd_tiled(m, x, ins, step):

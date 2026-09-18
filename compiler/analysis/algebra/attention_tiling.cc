@@ -32,7 +32,7 @@ std::expected<AttilingDecision, std::string> AttentionTiling::Run(
   }
   decision.tiled = kind_ == AttentionKind::kTiled ||
                    (kind_ == AttentionKind::kAuto &&
-                    decision.probs_cache_bytes > budget_);
+                    (gate_tiled_ || decision.probs_cache_bytes > budget_));
   if (!decision.tiled || ops.empty()) return decision;
 
   for (sir::Operation* op : ops) {

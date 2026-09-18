@@ -171,7 +171,6 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   // family holds a stats row per query instead, at about twice the
   // attention arithmetic and identical bits). --attention forces either.
   AttentionKind attention = config_.attention;
-  const uint64_t cached_probs_bytes = footprint.probs_cache_bytes;
   if (attention == AttentionKind::kAuto) {
     const bool over_budget =
         footprint.probs_cache_bytes > config_.attention_cache_budget_bytes;
@@ -315,6 +314,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   build.output = nullptr;
 
   phase("frontend", block.numOps());
+  AttilingDecision attention_decision;
   // --- 3. Structural passes (phase A): convolution lowering, then LoRA
   // grafting — everything that must precede the primal snapshot. The pass
   // manager re-verifies the block after each pass, so a corrupting rewrite
@@ -330,10 +330,12 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
     pm.Add("attention-tiling",
            [&](sir::Block& b) -> std::expected<void, std::string> {
              auto decided =
-                 AttentionTiling(attention,
+                 AttentionTiling(config_.attention,
+                                 attention == AttentionKind::kTiled,
                                  config_.attention_cache_budget_bytes)
                      .Run(b);
              if (!decided) return std::unexpected(decided.error());
+             attention_decision = *decided;
              return {};
            });
     pm.Add("lora-graft",
@@ -907,9 +909,10 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   result.merge_instruction_count = header.merge_instr_count;
   result.eval_instruction_count = header.eval_instr_count;
   result.rodata_size = header.rodata_size;
-  result.attention_tiled = attention == AttentionKind::kTiled &&
-                           cached_probs_bytes > 0;
-  result.probs_cache_bytes = cached_probs_bytes;
+  // What the plan carries, from the pass that decided on exact shapes.
+  result.attention_tiled =
+      attention_decision.tiled && attention_decision.attention_ops > 0;
+  result.probs_cache_bytes = attention_decision.probs_cache_bytes;
   result.gemm_tile_k = header.gemm_tile_k;
   result.gemm_tile_n = header.gemm_tile_n;
 
