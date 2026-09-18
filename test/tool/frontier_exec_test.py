@@ -633,6 +633,9 @@ class DifferentialSuite(unittest.TestCase):
             [binary, "--model", os.path.join(self.dir, "decoder.smf"),
              "--data", corpus, "--out", os.path.join(out, "updated.smf"),
              "--steps", "25", "--seed", "11", "--val-frac", "0.25",
+             # The last state, as `frontier_exec run` trains it: the
+             # best-state gate (E9) would commit an earlier one.
+             "--eval-every", "0",
              "--loss-log", log, "--force"], stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True)
         self.assertEqual(trained.returncode, 0, trained.stdout)
