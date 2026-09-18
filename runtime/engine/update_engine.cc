@@ -51,11 +51,9 @@ kernels::GemmTiles UpdateEngine::gemm_tiles() const {
 UpdateEngine::SourceMapping::~SourceMapping() { Release(); }
 
 void UpdateEngine::SourceMapping::Release() {
-  if (data && heap.empty())
-    ::munmap(const_cast<uint8_t*>(data), static_cast<size_t>(bytes));
+  if (data) ::munmap(const_cast<uint8_t*>(data), static_cast<size_t>(bytes));
   data = nullptr;
   bytes = 0;
-  heap.clear();
 }
 
 std::expected<void, std::string> UpdateEngine::BindSourceModel(

@@ -371,12 +371,11 @@ class UpdateEngine {
   std::unique_ptr<ExecutorBackend> backend_;
   BackendKind backend_kind_ = BackendKind::kCpu;
   std::string backend_note_;
-  // The bound source model (v17): a read-only mapping of the file, and the
+  // The bound source model (v17): a read-only mmap of the file, and the
   // byte extent the eval program's source refs need from it (0 = none).
   struct SourceMapping {
     const uint8_t* data = nullptr;
     uint64_t bytes = 0;
-    std::vector<uint8_t> heap;  // the non-mmap fallback
     ~SourceMapping();
     void Release();
   } source_;

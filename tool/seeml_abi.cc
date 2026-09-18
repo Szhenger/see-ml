@@ -14,6 +14,7 @@
 // cannot merge. No arguments; deterministic output (no host facts).
 // =============================================================================
 
+#include <bit>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -133,9 +134,11 @@ int main(int argc, char**) {
               rt::kSdsLabelKindMax);
 
   std::printf("  \"seeu\": {\n    \"magic\": %u, \"version\": %u, "
-              "\"oldest_readable\": %u,\n    \"rodata_bit\": 63, "
+              "\"oldest_readable\": %u,\n    \"rodata_bit\": %d, "
+              "\"source_bit\": %d, "
               "\"rodata_alignment\": %llu, \"gemm_panel_floats\": %llu,\n",
               up::kSeeuMagic, up::kSeeuVersion, up::kSeeuOldestReadable,
+              std::countr_zero(up::kRodataBit), std::countr_zero(up::kSourceBit),
               static_cast<unsigned long long>(up::kSeeuRodataAlignment),
               static_cast<unsigned long long>(up::kDefaultGemmPanelFloats));
   std::printf("    \"flags\": {\"epilogue_bias\": %u, \"epilogue_act_shift\": "

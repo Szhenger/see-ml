@@ -236,6 +236,7 @@ def check_against(abi: Dict[str, Any]) -> List[str]:
     same("seeu.oldest_readable", SEEU_OLDEST_READABLE,
          seeu["oldest_readable"])
     same("seeu.rodata_bit", RODATA_BIT, 1 << seeu["rodata_bit"])
+    same("seeu.source_bit", SOURCE_BIT, 1 << seeu["source_bit"])
     same("seeu.rodata_alignment", RODATA_ALIGNMENT, seeu["rodata_alignment"])
     same("seeu.gemm_panel_floats", GEMM_PANEL_FLOATS,
          seeu["gemm_panel_floats"])
