@@ -143,14 +143,29 @@ TEST(UpdateSystem, Step0Identity) {
 /// the compiled forward pass (the plan must be built emit_optimizer=false so
 /// executions do not mutate the parameters). Nudges lora_B off zero first so
 /// gradients w.r.t. A are non-degenerate.
+///
+/// A central difference only estimates the derivative where the loss is
+/// smooth across the step; a ReLU pre-activation inside it (a kink) fails
+/// the check with no bug present. Where the kinks fall depends on the data,
+/// and std::normal_distribution is implemented differently by libstdc++ and
+/// libc++ — so a check on normal_distribution data that passes on macOS can
+/// land on a kink on Linux. `portable` nudges with raw mt19937_64 bits
+/// (fully specified by the standard), for callers whose data is portable
+/// too (PortableUniform), so both platforms check the same coordinates.
+float PortableUniform(std::mt19937_64& rng) {  // [-1, 1), same everywhere
+  return static_cast<float>(static_cast<double>(rng() >> 11) * 0x1p-52 - 1.0);
+}
+
 void GradientCheck(const CompiledUpdate& compiled, UpdateEngine& engine,
-                   uint64_t nudge_seed, double tol = 2e-2) {
+                   uint64_t nudge_seed, double tol = 2e-2,
+                   bool portable = false) {
   std::mt19937_64 rng(nudge_seed);
   std::normal_distribution<float> dist(0.0f, 1.0f);
   for (const auto& p : compiled.params)
     for (uint64_t i = 0; i < p.count; ++i)
       if (p.id.find(".lora_B") != std::string::npos)
-        WriteArenaF32(engine, p.param_ref, i, 0.05f * dist(rng));
+        WriteArenaF32(engine, p.param_ref, i,
+                      0.05f * (portable ? PortableUniform(rng) : dist(rng)));
 
   engine.ExecuteTrainOnce();
   const double eps = 2e-3;
@@ -828,21 +843,31 @@ TEST(UpdateSystem, QuantizedBaseTrainsAndCommitsWithoutBakingError) {
 
   // The quantized network is the function being trained: its compiled
   // backward must still match finite differences of its compiled forward.
+  // Weights, inputs and nudges are portable bits: this network has 128
+  // ReLU pre-activations per batch, and on normal_distribution data a
+  // finite-difference step lands on one of them for some platforms and not
+  // others (see GradientCheck).
   {
+    std::mt19937_64 rng(7);
+    SmfModel gmodel = MakeMlp(in_dim, hidden, out_dim, 5);
+    for (auto& t : gmodel.tensors) {
+      if (!t.is_const) continue;
+      std::vector<float> w(t.data.size() / sizeof(float));
+      for (auto& v : w) v = 0.5f * PortableUniform(rng);
+      std::memcpy(t.data.data(), w.data(), t.data.size());
+    }
     UpdateConfig gc = config;
     gc.emit_optimizer = false;
     ASSERT_OK_AND_ASSIGN(CompiledUpdate gplan,
-                         UpdateCompiler(gc).Compile(model));
+                         UpdateCompiler(gc).Compile(gmodel));
     UpdateEngine ge;
     ASSERT_OK(ge.LoadFromMemory(gplan.plan.data(), gplan.plan.size()));
-    std::mt19937_64 rng(7);
-    std::normal_distribution<float> dist(0.0f, 1.0f);
     std::vector<float> x(batch * in_dim);
-    for (auto& v : x) v = dist(rng);
+    for (auto& v : x) v = PortableUniform(rng);
     std::vector<int32_t> labels(batch);
     for (auto& l : labels) l = static_cast<int32_t>(rng() % out_dim);
     FillSlots(ge, x, labels);
-    GradientCheck(gplan, ge, 7);
+    GradientCheck(gplan, ge, 7, /*tol=*/2e-2, /*portable=*/true);
   }
 
   // End-to-end on the saved artifact: train, merge, commit. The committed
