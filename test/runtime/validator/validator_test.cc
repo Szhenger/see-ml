@@ -457,6 +457,68 @@ up::UpdateInstruction GemmNN(uint64_t a, uint64_t b, uint64_t c, uint64_t m,
   return ins;
 }
 
+TEST(PlanValidator, ASourceRefIsReadOnlyAndBelongsToTheEvalProgram) {
+  // v17 (E12, #95): bit 62 addresses the source model file. The eval
+  // program may read f32 weights through it; no other program may, no
+  // plan below v17 may, and nothing may write through it.
+  up::UpdateInstruction gemm = GemmNN(up::MakeArenaRef(0),
+                                      up::MakeSourceRef(4096),
+                                      up::MakeArenaRef(512), 4, 4, 4);
+  EXPECT_OK(ValidateInstruction(gemm, kArena, kRodata, up::kSeeuVersion,
+                                /*allow_source=*/true));
+  auto ex = DescribeInstruction(gemm, kArena, kRodata, up::kSeeuVersion,
+                                /*allow_source=*/true);
+  ASSERT_TRUE(ex.has_value());
+  bool saw = false;
+  for (size_t i = 0; i < ex->count; ++i)
+    if (ex->ranges[i].source) {
+      saw = true;
+      EXPECT_EQ(ex->ranges[i].off, 4096u);
+      EXPECT_EQ(ex->ranges[i].bytes, 4u * 4u * sizeof(float));
+      EXPECT_FALSE(ex->ranges[i].write);
+    }
+  EXPECT_TRUE(saw);
+  EXPECT_ERROR(ValidateInstruction(gemm, kArena, kRodata, up::kSeeuVersion));
+  EXPECT_ERROR(ValidateInstruction(gemm, kArena, kRodata,
+                                   up::kSeeuShippedEvalVersion - 1, true));
+  up::UpdateInstruction into = GemmNN(up::MakeArenaRef(0), up::MakeArenaRef(64),
+                                      up::MakeSourceRef(0), 4, 4, 4);
+  EXPECT_ERROR(ValidateInstruction(into, kArena, kRodata, up::kSeeuVersion,
+                                   true));
+  // A source extent never aliases an arena write at the same offset.
+  up::UpdateInstruction same = GemmNN(up::MakeArenaRef(0),
+                                      up::MakeSourceRef(512),
+                                      up::MakeArenaRef(512), 4, 4, 4);
+  EXPECT_OK(ValidateInstruction(same, kArena, kRodata, up::kSeeuVersion,
+                                true));
+}
+
+TEST(PlanValidator, PerColumnInt8ScalesAreARodataVectorFromV17) {
+  // kFlagQ8ColScale: in[3] is a rodata ref to N floats (NN) or K floats
+  // (NT), only on the q8 GEMMs, only from v17.
+  const size_t M = 4, N = 8, K = 16;
+  up::UpdateInstruction q8;
+  q8.opcode = static_cast<uint16_t>(up::OpCode::kGemmNNQ8);
+  q8.flags = up::kFlagQ8ColScale;
+  q8.in[0] = up::MakeArenaRef(0);
+  q8.in[1] = up::MakeRodataRef(0);          // K*N int8 = 128 B
+  q8.in[2] = up::MakeArenaRef(512);
+  q8.in[3] = up::MakeRodataRef(128);        // N floats = 32 B
+  q8.out[0] = M; q8.out[1] = N; q8.out[2] = K;
+  EXPECT_OK(ValidateInstruction(q8, kArena, kRodata, up::kSeeuVersion));
+  EXPECT_ERROR(ValidateInstruction(q8, kArena, kRodata,
+                                   up::kSeeuShippedEvalVersion - 1));
+  q8.in[3] = up::MakeArenaRef(256);  // the scales must be rodata
+  EXPECT_ERROR(ValidateInstruction(q8, kArena, kRodata, up::kSeeuVersion));
+  q8.in[3] = up::MakeRodataRef(kRodata - 16);  // runs off the section
+  EXPECT_ERROR(ValidateInstruction(q8, kArena, kRodata, up::kSeeuVersion));
+  q8.opcode = static_cast<uint16_t>(up::OpCode::kGemmNTQ8);
+  q8.in[3] = up::MakeRodataRef(128);        // K floats = 64 B for NT
+  EXPECT_OK(ValidateInstruction(q8, kArena, kRodata, up::kSeeuVersion));
+  q8.opcode = static_cast<uint16_t>(up::OpCode::kGemmNN);
+  EXPECT_ERROR(ValidateInstruction(q8, kArena, kRodata, up::kSeeuVersion));
+}
+
 TEST(PlanValidator, TheImmWordIsANormEpsilonAndNothingElse) {
   // v16 (P7, #96): the former pad word carries a normalization forward's
   // epsilon; anywhere else, or below v16, a nonzero imm is corruption.
