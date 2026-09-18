@@ -1,5 +1,7 @@
 #include "compiler/frontend/parser/parser.h"
 
+#include <bit>
+
 #include "compiler/diagnostics/parsing/error.h"
 #include "compiler/frontend/parser/sema.h"
 #include "compiler/frontend/parser/value_resolver.h"
@@ -147,6 +149,7 @@ std::expected<sir::Value*, std::string> BuildForward(
         if (auto ok = sema::CheckRmsNorm(op, **x, **gamma); !ok)
           return std::unexpected(ok.error());
         sir::Operation* rn = block.appendOp("sc_high.rms_norm");
+        if (op.attr2 != 0) rn->setAttribute("eps", std::bit_cast<float>(op.attr2));
         rn->addOperand(*x);
         rn->addOperand(*gamma);
         resolver.Bind(op.output,
@@ -224,6 +227,9 @@ std::expected<sir::Value*, std::string> BuildForward(
           return std::unexpected(ok.error());
         const int64_t rows = (*x)->shape().dims.at(0);
         sir::Operation* ln = block.appendOp("sc_high.layer_norm");
+        // SMF v6 attr2: the model's epsilon. Default-valued ones set no
+        // attribute, so a v5 model's SIR (and plan) is what it always was.
+        if (op.attr2 != 0) ln->setAttribute("eps", std::bit_cast<float>(op.attr2));
         ln->addOperand(*x);
         ln->addOperand(*gamma);
         ln->addOperand(*beta);

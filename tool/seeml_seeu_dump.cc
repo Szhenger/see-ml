@@ -150,9 +150,11 @@ int DumpJson(const std::vector<uint8_t>& plan, const PlanHeader& h,
       std::memcpy(&ins, plan.data() + sections[s].off + i * sizeof(ins),
                   sizeof(ins));
       std::printf("%s\n      {\"opcode\": %u, \"name\": \"%s\", \"flags\": %u, "
+                  "\"imm\": %u, "
                   "\"in\": [%" PRIu64 ", %" PRIu64 ", %" PRIu64 ", %" PRIu64
                   "], \"out\": [%" PRIu64 ", %" PRIu64 ", %" PRIu64 "]}",
                   i ? "," : "", ins.opcode, OpName(ins.opcode), ins.flags,
+                  ins.imm,
                   ins.in[0], ins.in[1], ins.in[2], ins.in[3], ins.out[0],
                   ins.out[1], ins.out[2]);
     }
@@ -198,8 +200,9 @@ void Disassemble(const char* title, const UpdateInstruction* instrs,
         std::printf("   stats:");
         PrintRef(ins.out[1]);
         PrintRef(ins.out[2]);
-        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
-                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
+        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "  eps %g\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                    static_cast<double>(NormEpsOf(ins.imm)));
         break;
       case OpCode::kLayerNormBwd:
         std::printf("   stats:");
@@ -223,8 +226,9 @@ void Disassemble(const char* title, const UpdateInstruction* instrs,
                     KlScaleOf(ins.out[1]));
         break;
       case OpCode::kRmsNormFwd:
-        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
-                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
+        std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "  eps %g\n",
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                    static_cast<double>(NormEpsOf(ins.imm)));
         break;
       case OpCode::kRmsNormBwd:
         std::printf("   rstd:");

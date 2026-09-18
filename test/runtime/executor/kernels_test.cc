@@ -782,6 +782,41 @@ TEST(RmsNorm, ForwardMatchesNaiveFormula) {
   }
 }
 
+TEST(Normalization, TheEpsilonIsTheModelsAndTheDefaultIsTheOldBits) {
+  // P7 (#96): the forwards take the plan's epsilon. The default argument is
+  // the same 1e-5f the kernels hard-coded, so an unchanged model computes
+  // the same bits; a Qwen2-class 1e-6 changes rstd exactly as the formula
+  // says. Rows with a small mean square make the epsilon visible.
+  const size_t rows = 3, cols = 7;
+  std::vector<float> x = RandnVector(rows * cols, 65);
+  for (float& v : x) v *= 1e-3f;
+  const std::vector<float> gamma = RandnVector(cols, 66);
+  const std::vector<float> beta = RandnVector(cols, 67);
+  std::vector<float> y0(rows * cols), y1(rows * cols), r0(rows), r1(rows);
+  std::vector<float> m0(rows), m1(rows);
+  k::RmsNormFwd(x.data(), gamma.data(), y0.data(), r0.data(), rows, cols);
+  k::RmsNormFwd(x.data(), gamma.data(), y1.data(), r1.data(), rows, cols,
+                1e-5f);
+  EXPECT_BITWISE_EQ_F32(y0, y1);
+  k::RmsNormFwd(x.data(), gamma.data(), y1.data(), r1.data(), rows, cols,
+                1e-6f);
+  for (size_t r = 0; r < rows; ++r) {
+    double ss = 0.0;
+    for (size_t c = 0; c < cols; ++c)
+      ss += static_cast<double>(x[r * cols + c]) * x[r * cols + c];
+    EXPECT_NEAR(r1[r], 1.0 / std::sqrt(ss / cols + 1e-6), 1e-4 * r1[r]);
+    EXPECT_GT(r1[r], r0[r] * 1.2f);  // the epsilon dominates these rows
+  }
+  k::LayerNormFwd(x.data(), gamma.data(), beta.data(), y0.data(), m0.data(),
+                  r0.data(), rows, cols);
+  k::LayerNormFwd(x.data(), gamma.data(), beta.data(), y1.data(), m1.data(),
+                  r1.data(), rows, cols, 1e-5f);
+  EXPECT_BITWISE_EQ_F32(y0, y1);
+  k::LayerNormFwd(x.data(), gamma.data(), beta.data(), y1.data(), m1.data(),
+                  r1.data(), rows, cols, 1e-6f);
+  EXPECT_GT(r1[0], r0[0] * 1.2f);
+}
+
 TEST(RmsNorm, BackwardMatchesFiniteDifferences) {
   const size_t rows = 2, cols = 4, n = rows * cols;
   const std::vector<float> x = RandnVector(n, 62);

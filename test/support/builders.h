@@ -84,6 +84,11 @@ update::SmfModel MakeTokenDecoderStack(int64_t vocab, int64_t dim,
 /// A one-block token-native decoder (SMF v4): rank-1 dynamic i32 input →
 /// Embedding[vocab, dim] → the pre-norm attention/SwiGLU block of
 /// MakeTinyDecoder → logits over `vocab`. m.seq_len = seq.
+/// The token decoder with its LM head tied to the embedding table (the
+/// vocabulary equals `dim`, so one [V, D] tensor serves both): LoRA cannot
+/// adapt the head, and the compiler must say so (P7, #96).
+update::SmfModel MakeTiedTokenDecoder(int64_t dim, int64_t heads, int64_t seq,
+                                      int64_t ffn, uint64_t seed);
 update::SmfModel MakeTinyTokenDecoder(int64_t vocab, int64_t dim,
                                       int64_t heads, int64_t seq,
                                       int64_t ffn, uint64_t seed);

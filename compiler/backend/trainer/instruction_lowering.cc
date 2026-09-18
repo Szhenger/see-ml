@@ -15,6 +15,16 @@ namespace generating = seeml::diag::generating;
 namespace {
 
 uint64_t F32Bits(float f) { return std::bit_cast<uint32_t>(f); }
+
+/// A normalization forward's imm word (plan v16): the op's epsilon bits, or
+/// 0 for the default 1e-5 — so a model without one lowers byte-identically.
+uint32_t NormEpsImm(const sir::Operation& op) {
+  const float eps = op.getAttrAs<float>("eps").value_or(kDefaultNormEps);
+  return std::bit_cast<uint32_t>(eps) ==
+                 std::bit_cast<uint32_t>(kDefaultNormEps)
+             ? 0u
+             : std::bit_cast<uint32_t>(eps);
+}
 // Two immediates in one word: (hi bits << 32) | lo bits. Used for the KL
 // temperature word, whose high half is the v8 loss scale (instruction.h).
 uint64_t F32BitsPair(float hi, float lo) {
@@ -211,6 +221,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
     } else if (m == "sc_high.layer_norm") {
       const sir::Value* y = op->result(0);
       set(OpCode::kLayerNormFwd);
+      ins.imm = NormEpsImm(*op);
       ins.in[0] = ref(op->operand(0));   // x
       ins.in[1] = ref(op->operand(1));   // gamma
       ins.in[2] = ref(op->operand(2));   // beta
@@ -241,6 +252,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
     } else if (m == "sc_high.rms_norm") {
       const sir::Value* y = op->result(0);
       set(OpCode::kRmsNormFwd);
+      ins.imm = NormEpsImm(*op);
       ins.in[0] = ref(op->operand(0));   // x
       ins.in[1] = ref(op->operand(1));   // gamma
       ins.in[2] = ref(y);

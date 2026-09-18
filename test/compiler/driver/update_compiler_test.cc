@@ -607,6 +607,29 @@ TEST(UpdateCompiler, PropagatesGrafterFailure) {
   EXPECT_ERROR_CONTAINS(UpdateCompiler(config).Compile(model), "no eligible");
 }
 
+TEST(UpdateCompiler, ATargetThatNamesOnlyATiedHeadIsAnError) {
+  // P7 (#96): the tied embedding / LM head is ineligible (the gather reads
+  // the same tensor), so --targets emb cannot be honoured: a compile error
+  // that says why, not a silently unmet filter. A filter naming nothing,
+  // beside one that does match, is an error too.
+  SmfModel tied = seeml::testing::MakeTiedTokenDecoder(8, 2, 4, 12, 3);
+  UpdateConfig config = BaseConfig(8);
+  config.lora.target_filters = {"emb"};
+  auto r = UpdateCompiler(config).Compile(tied);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_STR_CONTAINS(r.error(), "--targets 'emb'");
+  EXPECT_STR_CONTAINS(r.error(), "tied embedding / LM head");
+  config.lora.target_filters = {"wq", "no_such_weight"};
+  EXPECT_ERROR_CONTAINS(UpdateCompiler(config).Compile(tied),
+                        "--targets 'no_such_weight' matches no eligible");
+  // Without a filter the tied model compiles, adapting everything else.
+  config.lora.target_filters = {};
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(tied));
+  for (const auto& a : compiled.adapters) EXPECT_NE(a.weight_name, "emb");
+  EXPECT_FALSE(compiled.adapters.empty());
+}
+
 TEST(UpdateCompiler, PlanBytesAreThreadCountInvariant) {
   // Compilation parallelizes its byte-heavy passes (int8 quantization,
   // seeded randn init of the persistent image); the emitted plan must be

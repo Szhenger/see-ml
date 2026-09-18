@@ -6,9 +6,10 @@
 // =============================================================================
 
 #include <bit>
-#include <limits>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "compiler/driver/update_compiler.h"
@@ -454,6 +455,36 @@ up::UpdateInstruction GemmNN(uint64_t a, uint64_t b, uint64_t c, uint64_t m,
   ins.out[1] = n;
   ins.out[2] = k;
   return ins;
+}
+
+TEST(PlanValidator, TheImmWordIsANormEpsilonAndNothingElse) {
+  // v16 (P7, #96): the former pad word carries a normalization forward's
+  // epsilon; anywhere else, or below v16, a nonzero imm is corruption.
+  // RMSNorm over 4 rows x 4 cols: x at 0, gamma at 64, y at 128, rstd 192.
+  up::UpdateInstruction rms;
+  rms.opcode = static_cast<uint16_t>(up::OpCode::kRmsNormFwd);
+  rms.in[0] = up::MakeArenaRef(0);
+  rms.in[1] = up::MakeArenaRef(64);
+  rms.in[2] = up::MakeArenaRef(128);
+  rms.in[3] = up::MakeArenaRef(192);
+  rms.out[0] = (uint64_t{4} << 32) | 4;
+  EXPECT_OK(ValidateInstruction(rms, kArena, kRodata, up::kSeeuVersion));
+  rms.imm = std::bit_cast<uint32_t>(1e-6f);
+  EXPECT_OK(ValidateInstruction(rms, kArena, kRodata, up::kSeeuVersion));
+  const auto old = ValidateInstruction(rms, kArena, kRodata,
+                                       up::kSeeuNormEpsVersion - 1);
+  ASSERT_FALSE(old.has_value());
+  EXPECT_STR_CONTAINS(old.error(), "imm");
+  for (const float bad : {-1e-6f, INFINITY, NAN}) {
+    rms.imm = std::bit_cast<uint32_t>(bad);
+    EXPECT_ERROR(ValidateInstruction(rms, kArena, kRodata, up::kSeeuVersion));
+  }
+  up::UpdateInstruction add = AddEw(up::MakeArenaRef(0), up::MakeArenaRef(256),
+                                    up::MakeArenaRef(512), 16);
+  add.imm = std::bit_cast<uint32_t>(1e-6f);
+  const auto r = ValidateInstruction(add, kArena, kRodata, up::kSeeuVersion);
+  ASSERT_FALSE(r.has_value());
+  EXPECT_STR_CONTAINS(r.error(), "imm");
 }
 
 TEST(PlanValidator, RejectsFlagsOnPreFlagsPlans) {

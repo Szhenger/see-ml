@@ -54,7 +54,7 @@ void Field(const char* name, size_t offset, size_t size) {
   X(eval_instr_count) X(source_model_hash) X(plan_hash) X(lr_schedule)        \
   X(gemm_tile_n) X(warmup_steps) X(min_lr_factor) X(clip_norm) X(input_kind)  \
   X(grad_accum_steps) X(seq_len) X(step_instr_offset) X(step_instr_count)
-#define INSTRUCTION_FIELDS(X) X(opcode) X(flags) X(pad) X(in) X(out)
+#define INSTRUCTION_FIELDS(X) X(opcode) X(flags) X(imm) X(in) X(out)
 #define EMIT_ENTRY_FIELDS(X) X(smf_data_offset) X(byte_size) X(arena_offset)
 #define CKPT_FIELDS(X) \
   X(magic) X(version) X(plan_hash) X(step) X(persistent_size) X(payload_hash)

@@ -69,9 +69,10 @@ class Layout:
 # --- SMF: the model container (source/language/model_format.h) ---------------
 
 SMF_MAGIC = 0x31464D53  # "SMF1"
-SMF_VERSION = 5         # v5: per-op attr1 (RoPE base as f32 bits) after attr0
+SMF_VERSION = 6         # v6: per-op attr2 (norm epsilon as f32 bits) after attr1
 SMF_MIN_VERSION = 1
 SMF_DEFAULT_ROPE_BASE = 10000.0  # what attr1 == 0 means on a Rope op
+SMF_DEFAULT_NORM_EPS = 1e-5  # what attr2 == 0 means on a LayerNorm / RmsNorm
 SMF_OP_KINDS = {
     "matmul": 0, "add_bias": 1, "relu": 2, "gelu": 3, "silu": 4, "mul": 5,
     "layer_norm": 6, "add": 7, "rms_norm": 8, "rope": 9, "attention": 10,
@@ -96,7 +97,7 @@ SDS_HEADER_BYTES = SDS_HEADER.size
 # --- SEEU: the update plan (source/plan/schema.h, instruction.h) -------------
 
 SEEU_MAGIC = 0x55454553  # "SEEU"
-SEEU_VERSION = 15
+SEEU_VERSION = 16
 SEEU_OLDEST_READABLE = 4
 RODATA_BIT = 1 << 63
 NULL_REF = (1 << 64) - 1
@@ -128,9 +129,10 @@ PLAN_HEADER = Layout("PlanHeader", [
     ("seq_len", "Q"),
     ("step_instr_offset", "Q"), ("step_instr_count", "Q")])
 
-# `pad` is written as zero and never read; `in`/`out` are operand words.
+# `imm` (v16) is an opcode-defined immediate — the normalization forwards'
+# epsilon bits, zero elsewhere; `in`/`out` are operand words.
 INSTRUCTION = Layout("UpdateInstruction", [
-    ("opcode", "H"), ("flags", "H"), ("pad", "I"), ("in", "4Q"),
+    ("opcode", "H"), ("flags", "H"), ("imm", "I"), ("in", "4Q"),
     ("out", "3Q")])
 EMIT_ENTRY = Layout("EmitEntry", [
     ("smf_data_offset", "Q"), ("byte_size", "Q"), ("arena_offset", "Q")])

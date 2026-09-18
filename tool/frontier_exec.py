@@ -89,7 +89,7 @@ _INSTRUCTION = formats.INSTRUCTION.struct
 OPCODES = formats.OPCODES
 GEMM_OPCODES = (1, 2, 3, 4, 29, 30, 43, 44)
 SECTIONS = ("train", "step", "eval", "merge")
-NORM_EPS = 1e-5  # runtime/executor/normalization.cc; SMF carries none (#96)
+NORM_EPS = 1e-5  # what a normalization forward's zero imm word means (v16)
 GELU_C, GELU_A = 0.7978845608028654, 0.044715  # the tanh approximation
 
 
@@ -98,10 +98,11 @@ class PlanError(Exception):
 
 
 class Instruction:
-    __slots__ = ("opcode", "flags", "src", "out")
+    __slots__ = ("opcode", "flags", "src", "out", "imm")
 
-    def __init__(self, opcode, flags, src, out):
+    def __init__(self, opcode, flags, src, out, imm=0):
         self.opcode, self.flags, self.src, self.out = opcode, flags, src, out
+        self.imm = imm  # v16: opcode-defined immediate (norm epsilon bits)
 
 
 def bits_f32(word):
@@ -144,8 +145,8 @@ class Plan:
             count = getattr(self, name + "_instr_count")
             self._bounds(name, off, count * _INSTRUCTION.size)
             self.sections[name] = [
-                Instruction(op, flags, (a, b, c, d), (x, y, z))
-                for op, flags, _, a, b, c, d, x, y, z in
+                Instruction(op, flags, (a, b, c, d), (x, y, z), imm)
+                for op, flags, imm, a, b, c, d, x, y, z in
                 _INSTRUCTION.iter_unpack(
                     blob[off:off + count * _INSTRUCTION.size])]
         self._bounds("rodata", self.rodata_offset, self.rodata_size)
@@ -1077,13 +1078,19 @@ def _step_gradient(m, x, ins):
     return g * _clip_factor(x, g, bits_f32(ins.out[1])) if ins.out[1] else g
 
 
+def _norm_eps(ins):
+    """The epsilon a normalization forward carries in its imm word (v16):
+    the f32 bits of the model's own, or 0 for 1e-5."""
+    return bits_f32(ins.imm) if ins.imm else NORM_EPS
+
+
 def _layer_norm_fwd(m, x, ins, step):
     n, d = hi_lo(ins.out[0])
     t = m.read(ins.src[0], (n, d))
     mean = x.mean(t, -1, keepdims=True)
     centered = t - mean
     rstd = 1.0 / x.sqrt(x.mean(centered * centered, -1, keepdims=True) +
-                        NORM_EPS)
+                        _norm_eps(ins))
     m.write(ins.src[3], centered * rstd * m.read(ins.src[1], (d,)) +
             m.read(ins.src[2], (d,)))
     m.write(ins.out[1], mean.reshape((n,)))
@@ -1103,7 +1110,7 @@ def _layer_norm_bwd(m, x, ins, step):
 def _rms_norm_fwd(m, x, ins, step):
     n, d = hi_lo(ins.out[0])
     t = m.read(ins.src[0], (n, d))
-    rstd = 1.0 / x.sqrt(x.mean(t * t, -1, keepdims=True) + NORM_EPS)
+    rstd = 1.0 / x.sqrt(x.mean(t * t, -1, keepdims=True) + _norm_eps(ins))
     m.write(ins.src[2], t * rstd * m.read(ins.src[1], (d,)))
     m.write(ins.src[3], rstd.reshape((n,)))
 

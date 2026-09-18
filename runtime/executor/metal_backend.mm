@@ -844,6 +844,7 @@ std::expected<void, std::string> MetalBackend::Encode(
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]); ref(3, ins.in[3]);
       ref(4, ins.out[1]); ref(5, ins.out[2]);
       a.rows = hi(ins.out[0]); a.cols = lo(ins.out[0]);
+      a.f[0] = up::NormEpsOf(ins.imm);  // v16; 1e-5 by default
       Dispatch(kPLnFwd, a, a.rows * 32u, kElementwiseGroup);
       return {};
     case up::OpCode::kLayerNormBwd:
@@ -855,6 +856,7 @@ std::expected<void, std::string> MetalBackend::Encode(
     case up::OpCode::kRmsNormFwd:
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]); ref(3, ins.in[3]);
       a.rows = hi(ins.out[0]); a.cols = lo(ins.out[0]);
+      a.f[0] = up::NormEpsOf(ins.imm);
       Dispatch(kPRmsFwd, a, a.rows * 32u, kElementwiseGroup);
       return {};
     case up::OpCode::kRmsNormBwd:

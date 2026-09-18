@@ -26,6 +26,16 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
   if (spec_.rank <= 0)
     return updating::Error(updating::kLoraGrafter, "rank must be positive");
 
+  // Every --targets substring must end up naming at least one weight LoRA
+  // can adapt (P7, #96): a filter that matches nothing, or only weights
+  // the eligibility rule skips — a tied embedding / LM head is the common
+  // one — used to be silently unmet whenever another filter matched.
+  auto matches = [&](std::string_view id, const std::string& f) {
+    return id.find(f) != std::string_view::npos;
+  };
+  std::vector<size_t> eligible_hits(spec_.target_filters.size(), 0);
+  std::vector<std::string> ineligible_hits(spec_.target_filters.size());
+
   // Snapshot the target ops first: grafting mutates the op list.
   std::vector<sir::Operation*> targets;
   block.walk([&](sir::Operation* op) {
@@ -43,20 +53,50 @@ std::expected<std::vector<GraftedAdapter>, std::string> LoraGrafter::Run(
     for (const sir::Operation* user : w->users())
       if (user->mnemonic() != "sc_high.matmul" || user->numOperands() != 2 ||
           user->operand(1) != w || user->operand(0) == w) {
+        // Name the consumer: "a tied embedding / LM head" is what a user
+        // needs to hear, not an opcode.
+        const std::string_view um = user->mnemonic();
+        const std::string reason =
+            um == "sc_high.embedding"
+                ? "it is also the embedding table (a tied embedding / LM "
+                  "head): the gather reads its rows, so committing W+delta "
+                  "would change every token's input, not just the head"
+                : "it is consumed outside a MatMul weight slot (by " +
+                      std::string(um) +
+                      "), so committing W+delta would change that site";
         seeml::diag::Note(updating::kLoraGrafter,
-                          "skipping '" + std::string(w->id()) +
-                              "': consumed outside a MatMul weight slot — "
-                              "committing W+delta would change that site");
+                          "skipping '" + std::string(w->id()) + "': " + reason);
+        for (size_t i = 0; i < spec_.target_filters.size(); ++i)
+          if (matches(w->id(), spec_.target_filters[i]) &&
+              ineligible_hits[i].find("'" + std::string(w->id()) + "'") ==
+                  std::string::npos)
+            ineligible_hits[i] += (ineligible_hits[i].empty() ? "" : "; ") +
+                                  ("'" + std::string(w->id()) + "': " + reason);
         return;
       }
     if (!spec_.target_filters.empty()) {
       bool matched = false;
-      for (const auto& f : spec_.target_filters)
-        if (w->id().find(f) != std::string_view::npos) matched = true;
+      for (size_t i = 0; i < spec_.target_filters.size(); ++i)
+        if (matches(w->id(), spec_.target_filters[i])) {
+          matched = true;
+          ++eligible_hits[i];
+        }
       if (!matched) return;
     }
     targets.push_back(op);
   });
+
+  for (size_t i = 0; i < spec_.target_filters.size(); ++i) {
+    if (eligible_hits[i] > 0) continue;
+    const std::string& f = spec_.target_filters[i];
+    return updating::Error(
+        updating::kLoraGrafter,
+        ineligible_hits[i].empty()
+            ? "--targets '" + f + "' matches no eligible weight: no MatMul "
+              "weight's name contains it"
+            : "--targets '" + f + "' matches no eligible weight, only ones "
+              "LoRA cannot adapt — " + ineligible_hits[i]);
+  }
 
   if (targets.empty())
     return updating::Error(updating::kLoraGrafter,
