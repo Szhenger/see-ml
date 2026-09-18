@@ -59,7 +59,9 @@ namespace {
 //
 // The panel is a fixed 32 KiB local — no allocation, within any thread
 // stack the runtime targets — and the N tile is clamped so a tile always
-// fits it; a geometry change is a traversal change, never a bit. Measured
+// fits it; a geometry change is a traversal change, never a bit. (The one
+// buffer a GEMM kernel owns is GemmNTQ8's per-column form: a per-thread
+// vector, at most 1 MiB, that grows once and is reused — see there.) Measured
 // on one Apple M5 core, bit-identical on every shape: 1.6-3.2x on f32
 // (30 -> 54 GFLOP/s at D=512 projections, 14 -> 46 at SmolLM's 49k-vocab
 // head) and 2.2-2.5x on int8 weights.
