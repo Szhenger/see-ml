@@ -1097,6 +1097,103 @@ TEST(UpdateSystem, ANonFiniteGradientNormAbortsTheStep) {
 }
 
 // =============================================================================
+// Tiled attention (E11, #94)
+// =============================================================================
+
+TEST(UpdateSystem, TiledAttentionTrainsTheSameBitsWithoutTheCache) {
+  // The cached and the tiled family compile the same update to plans that
+  // train to the same losses, validation loss and persistent segment, at
+  // one thread and at eight; the tiled plan holds no S x S matrix, and the
+  // FD check passes on it as on the cached one.
+  const int64_t vocab = 16, dim = 8, heads = 2, seq = 8, ffn = 16;
+  const int64_t batch = 16;
+  SmfModel model =
+      seeml::testing::MakeDecoderStack(dim, heads, seq, ffn, vocab, 2, 61);
+  SmfModel tokens =
+      seeml::testing::MakeTinyTokenDecoder(vocab, dim, heads, seq, ffn, 62);
+  for (const SmfModel* m : {&tokens}) {
+    std::vector<float> want_curve;
+    std::vector<uint8_t> want_state;
+    float want_val = 0.0f;
+    uint64_t cached_arena = 0;
+    for (int variant = 0; variant < 4; ++variant) {
+      UpdateConfig config = BaseConfig(batch);
+      config.optimizer.lr = 5e-3f;
+      config.attention = (variant & 1) ? AttentionKind::kTiled
+                                       : AttentionKind::kCached;
+      seeml::update::SetParallelThreadCount((variant & 2) ? 8 : 1);
+      ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                           UpdateCompiler(config).Compile(*m));
+      EXPECT_EQ(compiled.attention_tiled, (variant & 1) != 0);
+      EXPECT_GT(compiled.probs_cache_bytes, 0u);
+      const PlanHeader h = HeaderOf(compiled);
+      if (variant == 0) cached_arena = h.arena_size;
+      if (variant == 1) EXPECT_LT(h.arena_size, cached_arena);
+      UpdateEngine engine;
+      ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(),
+                                      compiled.plan.size()));
+      ASSERT_OK_AND_ASSIGN(Dataset data,
+                           seeml::testing::MakeTokenCorpus(128, seq, vocab, 47));
+      data.EnableShuffle(5);
+      TrainOptions options = Quiet();
+      options.record_loss_curve = true;
+      ASSERT_OK_AND_ASSIGN(auto report, engine.Train(data, 20, options));
+      ASSERT_OK_AND_ASSIGN(float val, engine.Evaluate(data));
+      std::vector<uint8_t> state(engine.arena(),
+                                 engine.arena() + h.persistent_size);
+      if (variant == 0) {
+        want_curve = report.loss_curve;
+        want_state = state;
+        want_val = val;
+        continue;
+      }
+      EXPECT_EQ(val, want_val);
+      ASSERT_EQ(report.loss_curve.size(), want_curve.size());
+      for (size_t i = 0; i < want_curve.size(); ++i)
+        EXPECT_EQ(report.loss_curve[i], want_curve[i]);
+      EXPECT_TRUE(state == want_state);
+    }
+  }
+  seeml::update::SetParallelThreadCount(0);
+
+  // The pre-embedded decoder stack: tiled by the auto rule once its caches
+  // exceed a (deliberately tiny) budget, cached under a roomy one.
+  UpdateConfig roomy = BaseConfig(batch);
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate kept, UpdateCompiler(roomy).Compile(model));
+  EXPECT_FALSE(kept.attention_tiled);
+  UpdateConfig tight = roomy;
+  tight.attention_cache_budget_bytes = kept.probs_cache_bytes - 1;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate tiled, UpdateCompiler(tight).Compile(model));
+  EXPECT_TRUE(tiled.attention_tiled);
+  EXPECT_LT(HeaderOf(tiled).arena_size, HeaderOf(kept).arena_size);
+}
+
+TEST(UpdateSystem, TiledAttentionGradientsMatchFiniteDifferences) {
+  const int64_t vocab = 11, dim = 8, heads = 2, seq = 4, ffn = 10;
+  const int64_t batch = 8;
+  SmfModel model =
+      seeml::testing::MakeTinyTokenDecoder(vocab, dim, heads, seq, ffn, 37);
+  UpdateConfig config = BaseConfig(batch);
+  config.lora.rank = 2;
+  config.emit_optimizer = false;
+  config.attention = AttentionKind::kTiled;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+  EXPECT_TRUE(compiled.attention_tiled);
+  UpdateEngine engine;
+  ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(), compiled.plan.size()));
+  std::vector<int32_t> tokens(batch), labels(batch);
+  int32_t t = 3;
+  for (int64_t i = 0; i < batch; ++i) {
+    tokens[i] = t;
+    t = static_cast<int32_t>((3 * t + 1) % vocab);
+    labels[i] = t;
+  }
+  seeml::testing::FillTokenSlots(engine, tokens, labels);
+  GradientCheck(compiled, engine, 3737, /*tol=*/3e-2);
+}
+
+// =============================================================================
 // The GEMM addend (E10, #93): kFlagGemmAddend
 // =============================================================================
 

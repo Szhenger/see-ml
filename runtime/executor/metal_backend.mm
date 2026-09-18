@@ -375,6 +375,13 @@ bool IsGpuOpcode(up::OpCode op) {
     // angles, as before — so the table is built on the CPU, where the
     // rotations that do read it run.
     case up::OpCode::kRopeTable:
+    // The tiled attention family (v15) runs on the CPU until #63 ports it:
+    // it exists for sequence lengths whose probability cache would not fit
+    // the device at all, and its CPU form is the bit-for-bit reference.
+    case up::OpCode::kAttnFwdTiled:
+    case up::OpCode::kAttnDQTiled:
+    case up::OpCode::kAttnDKTiled:
+    case up::OpCode::kAttnDVTiled:
       return false;
     default:
       return true;

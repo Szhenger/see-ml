@@ -258,7 +258,8 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
     } else if (m == "sc_high.rope" || m == "sc_low.rope_grad" ||
                m == "sc_high.attention" || m == "sc_low.attn_dp" ||
                m == "sc_low.attn_dv" || m == "sc_low.attn_dq" ||
-               m == "sc_low.attn_dk") {
+               m == "sc_low.attn_dk" || m == "sc_low.attn_dq_tiled" ||
+               m == "sc_low.attn_dk_tiled" || m == "sc_low.attn_dv_tiled") {
       // Shared sequence geometry, packed as B<<32|S and H<<32|d. Derived
       // from a designated [T, H*d] activation of the op plus the heads/seq
       // attributes the frontend validated (seq | T, heads | D).
@@ -288,14 +289,29 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
         ins.out[2] = F32Bits(
             op->getAttrAs<float>("base").value_or(kSmfDefaultRopeBase));
       } else if (m == "sc_high.attention") {
-        set(OpCode::kAttnFwd);
+        // Tiled (v15): the same slots, the stats row where the cache was.
+        set(op->hasAttribute("tiled") ? OpCode::kAttnFwdTiled
+                                      : OpCode::kAttnFwd);
         ins.in[0] = ref(op->operand(0));   // q
         ins.in[1] = ref(op->operand(1));   // k
         ins.in[2] = ref(op->operand(2));   // v
         ins.in[3] = ref(op->result(0));    // o
-        ins.out[0] = ref(op->result(1));   // probs cache
+        ins.out[0] = ref(op->result(1));   // probs cache | stats row
         ins.out[1] = bs;
         ins.out[2] = hd;
+      } else if (m.ends_with("_tiled")) {
+        // The tiled backward: q, k, v, dO in; stats and the result in the
+        // out slots with the geometry packed into one word.
+        set(m == "sc_low.attn_dq_tiled"   ? OpCode::kAttnDQTiled
+            : m == "sc_low.attn_dk_tiled" ? OpCode::kAttnDKTiled
+                                          : OpCode::kAttnDVTiled);
+        for (size_t s = 0; s < 4; ++s) ins.in[s] = ref(op->operand(s));
+        ins.out[0] = ref(op->operand(4));  // stats
+        ins.out[1] = ref(op->result(0));
+        ins.out[2] = PackAttnGeometry(static_cast<uint64_t>(rows / seq),
+                                      static_cast<uint64_t>(seq),
+                                      static_cast<uint64_t>(heads),
+                                      static_cast<uint64_t>(width / heads));
       } else {
         set(m == "sc_low.attn_dp"   ? OpCode::kAttnDP
             : m == "sc_low.attn_dv" ? OpCode::kAttnDV

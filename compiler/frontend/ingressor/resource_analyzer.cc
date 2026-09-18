@@ -1,5 +1,7 @@
 #include "compiler/frontend/ingressor/resource_analyzer.h"
 
+#include "source/plan/instruction.h"
+
 #include <string_view>
 #include <unordered_map>
 
@@ -36,13 +38,17 @@ std::string FormatMiB(uint64_t bytes) {
 }  // namespace
 
 uint64_t TrainingFootprint::total_bytes() const {
-  return SatAdd(SatAdd(weight_bytes, activation_bytes), delta_bytes);
+  return SatAdd(SatAdd(SatAdd(weight_bytes, activation_bytes), delta_bytes),
+                probs_cache_bytes);
 }
 
 TrainingFootprint& TrainingFootprint::operator+=(const TrainingFootprint& o) {
   weight_bytes = SatAdd(weight_bytes, o.weight_bytes);
   activation_bytes = SatAdd(activation_bytes, o.activation_bytes);
   delta_bytes = SatAdd(delta_bytes, o.delta_bytes);
+  probs_cache_bytes = SatAdd(probs_cache_bytes, o.probs_cache_bytes);
+  attention_stats_bytes =
+      SatAdd(attention_stats_bytes, o.attention_stats_bytes);
   return *this;
 }
 
@@ -134,10 +140,24 @@ TrainingFootprint EstimateFootprintImpl(const SmfModel& model, int64_t batch,
         // the dominant transformer activation. heads/seq_len of zero mean
         // an invalid model the parser will reject; contribute nothing here
         // so the estimate stays a lower bound.
+        // It is counted on its own (probs_cache_bytes) in the summing
+        // walk — the training footprint, where the compiler decides
+        // whether to keep it — and as an activation at the peak walk (a
+        // frozen forward never holds it past the op).
         if (op.kind == SmfOpKind::kAttention && op.attr0 > 0 &&
-            model.seq_len > 0)
-          charge(SatMul(SatMul(SatMul(r, op.attr0), model.seq_len),
-                        sizeof(float)));
+            model.seq_len > 0) {
+          const uint64_t rows_heads = SatMul(r, op.attr0);
+          const uint64_t cache =
+              SatMul(SatMul(rows_heads, model.seq_len), sizeof(float));
+          if (sum_activations) {
+            fp.probs_cache_bytes = SatAdd(fp.probs_cache_bytes, cache);
+            fp.attention_stats_bytes = SatAdd(
+                fp.attention_stats_bytes,
+                SatMul(SatMul(rows_heads, kAttnStatsWidth), sizeof(float)));
+          } else {
+            charge(cache);
+          }
+        }
         break;
       }
     }
@@ -215,7 +235,8 @@ std::expected<void, std::string> CheckTrainableLocally(
       "model is too big to train locally: weights " +
       FormatMiB(footprint.weight_bytes) + " + activations " +
       FormatMiB(footprint.activation_bytes) + " + merged LoRA deltas " +
-      FormatMiB(footprint.delta_bytes) + " need at least " +
+      FormatMiB(footprint.delta_bytes) + " + attention caches " +
+      FormatMiB(footprint.probs_cache_bytes) + " need at least " +
       FormatMiB(need) + ", but the local memory budget is " +
       FormatMiB(budget));
 }

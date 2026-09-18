@@ -195,6 +195,13 @@ std::expected<void, std::string> ValidateInstructionImpl(
     return diag::validating::Error(
         "bf16 GEMM opcode in a pre-v" +
         std::to_string(up::kSeeuBf16Version) + " plan");
+  if (ins.opcode >= static_cast<uint16_t>(up::OpCode::kAttnFwdTiled) &&
+      ins.opcode <= static_cast<uint16_t>(up::OpCode::kAttnDVTiled) &&
+      plan_version < up::kSeeuTiledAttentionVersion)
+    return diag::validating::Error(
+        "tiled attention opcode " + std::to_string(ins.opcode) +
+        " in a pre-v" + std::to_string(up::kSeeuTiledAttentionVersion) +
+        " plan");
   if (ins.opcode == static_cast<uint16_t>(up::OpCode::kAccumulate) &&
       plan_version < up::kSeeuGradAccumVersion)
     return diag::validating::Error(
@@ -497,6 +504,38 @@ std::expected<void, std::string> ValidateInstructionImpl(
       if (!attn_geometry(d0, d1, &td, &pn)) return fail();
       if (!ref_ok(ins.in[0], pn, false) || !ref_ok(ins.in[1], td, false) ||
           !ref_ok(ins.in[2], td, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kAttnFwdTiled: {
+      // q, k, v read and o written at [B*S, H*d]; stats written at
+      // [B*H*S, kAttnStatsWidth] — the family's geometry words.
+      uint64_t td = 0, pn = 0, st = 0;
+      if (!attn_geometry(d1, d2, &td, &pn)) return fail();
+      const uint64_t bhs = (d1 >> 32) * (d1 & 0xFFFFFFFFu) * (d2 >> 32);
+      if (!MulOk(bhs, up::kAttnStatsWidth, &st)) return fail();
+      if (!ref_ok(ins.in[0], td, false) || !ref_ok(ins.in[1], td, false) ||
+          !ref_ok(ins.in[2], td, false) || !ref_ok(ins.in[3], td, true) ||
+          !ref_ok(ins.out[0], st, true))
+        return fail();
+      return disjoint();
+    }
+    case up::OpCode::kAttnDQTiled:
+    case up::OpCode::kAttnDKTiled:
+    case up::OpCode::kAttnDVTiled: {
+      // q, k, v, dO read; the result written; stats read — and, for dQ,
+      // written too (the delta column), through the one pointer it is.
+      // Geometry is the packed 16-bit word: every field must be nonzero
+      // and the products must be sound.
+      const auto g = up::UnpackAttnGeometry(d2);
+      const uint64_t bs = (g.B << 32) | g.S, hd = (g.H << 32) | g.d;
+      uint64_t td = 0, pn = 0, st = 0;
+      if (!attn_geometry(bs, hd, &td, &pn)) return fail();
+      if (!MulOk(g.B * g.S * g.H, up::kAttnStatsWidth, &st)) return fail();
+      const bool dq = ins.opcode == static_cast<uint16_t>(up::OpCode::kAttnDQTiled);
+      if (!ref_ok(ins.in[0], td, false) || !ref_ok(ins.in[1], td, false) ||
+          !ref_ok(ins.in[2], td, false) || !ref_ok(ins.in[3], td, false) ||
+          !ref_ok(ins.out[0], st, dq) || !ref_ok(ins.out[1], td, true))
         return fail();
       return disjoint();
     }

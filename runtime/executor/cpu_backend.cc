@@ -326,6 +326,34 @@ std::expected<void, std::string> CpuBackend::Execute(
                 ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
                 ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
       break;
+    case up::OpCode::kAttnFwdTiled:
+      k::AttnFwdTiled(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
+                      ReadPtr(ins.in[2]), WritePtr(ins.in[3]),
+                      WritePtr(ins.out[0]), ins.out[1] >> 32,
+                      ins.out[1] & 0xFFFFFFFFu, ins.out[2] >> 32,
+                      ins.out[2] & 0xFFFFFFFFu);
+      break;
+    case up::OpCode::kAttnDQTiled:
+    case up::OpCode::kAttnDKTiled:
+    case up::OpCode::kAttnDVTiled: {
+      const auto g = up::UnpackAttnGeometry(ins.out[2]);
+      const auto op = static_cast<up::OpCode>(ins.opcode);
+      if (op == up::OpCode::kAttnDQTiled)
+        k::AttnDQTiled(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
+                       ReadPtr(ins.in[2]), ReadPtr(ins.in[3]),
+                       WritePtr(ins.out[0]), WritePtr(ins.out[1]), g.B, g.S,
+                       g.H, g.d);
+      else if (op == up::OpCode::kAttnDKTiled)
+        k::AttnDKTiled(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
+                       ReadPtr(ins.in[2]), ReadPtr(ins.in[3]),
+                       ReadPtr(ins.out[0]), WritePtr(ins.out[1]), g.B, g.S,
+                       g.H, g.d);
+      else
+        k::AttnDVTiled(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
+                       ReadPtr(ins.in[3]), ReadPtr(ins.out[0]),
+                       WritePtr(ins.out[1]), g.B, g.S, g.H, g.d);
+      break;
+    }
     case up::OpCode::kEmbedFwd:
       k::EmbedFwd(reinterpret_cast<const int32_t*>(ReadPtr(ins.in[0])),
                   ReadPtr(ins.in[1]), WritePtr(ins.in[2]), ins.out[0],

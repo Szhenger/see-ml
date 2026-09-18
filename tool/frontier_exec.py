@@ -1186,6 +1186,77 @@ def _attn_dqk(transpose):
     return op
 
 
+# --- The tiled family (plan v15): the same attention from a stats row ------
+
+def _attn_geometry(ins):
+    """(b, s, h, d) from the tiled backward's packed 16-bit word."""
+    w = ins.out[2]
+    return (w >> 48) & 0xFFFF, (w >> 32) & 0xFFFF, (w >> 16) & 0xFFFF, w & 0xFFFF
+
+
+def _attn_probs(x, q, k, s, d, stats, b, h):
+    """P from Q, K and the stored (row max, 1/denominator) — the cached
+    family's probabilities, recomputed (masked entries exactly zero)."""
+    scores = x.matmul(q, x.perm(k, (0, 1, 3, 2))) / math.sqrt(d)
+    mx = stats[:, 0].reshape((b, h, s, 1))
+    inv = stats[:, 1].reshape((b, h, s, 1))
+    return x.exp(scores - mx) * inv * x.causal(s)
+
+
+def _attn_fwd_tiled(m, x, ins, step):
+    (b, s), (h, d) = hi_lo(ins.out[1]), hi_lo(ins.out[2])
+    q, k, v = (_heads(x, m.read(ref, (b * s, h * d)), b, s, h, d)
+               for ref in ins.src[:3])
+    mask = x.causal(s)
+    scores = x.matmul(q, x.perm(k, (0, 1, 3, 2))) / math.sqrt(d)
+    scores = x.where(mask > 0.0, scores, scores * 0.0 - 1e30)
+    mx = x.max(scores, -1)
+    e = x.exp(scores - mx) * mask
+    denom = x.sum(e, -1, keepdims=True)
+    probs = e / denom
+    m.write(ins.src[3], _rows(x, x.matmul(probs, v), b, s, h, d))
+    n = b * h * s
+    m.write(ins.out[0], _stats_row(x, mx.reshape((n,)),
+                                   1.0 / denom.reshape((n,)), x.full(n, 0.0)))
+
+
+def _stats_row(x, mx, inv, delta):
+    """[N, 4] = (row max, 1/denominator, delta, 0), flat. stack_last of two
+    [N, 2] pairs interleaves them, so the pairs are (max, delta) and
+    (1/denominator, 0): row i flattens to max, 1/den, delta, 0."""
+    n = mx.shape[0]
+    return x.stack_last(x.stack_last(mx, delta),
+                        x.stack_last(inv, x.full(n, 0.0))).reshape(
+        (n * formats.ATTN_STATS_WIDTH,))
+
+
+def _attn_bwd_tiled(which):
+    def op(m, x, ins, step):
+        b, s, h, d = _attn_geometry(ins)
+        q, k, v, dout = (_heads(x, m.read(ref, (b * s, h * d)), b, s, h, d)
+                         for ref in ins.src[:4])
+        stats = m.read(ins.out[0], (b * h * s, formats.ATTN_STATS_WIDTH))
+        p = _attn_probs(x, q, k, s, d, stats, b, h)
+        if which == "dv":
+            out = x.matmul(x.perm(p, (0, 1, 3, 2)), dout)
+        else:
+            dp = x.matmul(dout, x.perm(v, (0, 1, 3, 2))) * x.causal(s)
+            if which == "dq":
+                delta = x.sum(dp * p, -1, keepdims=True)
+                # The delta column, for the dK pass that follows.
+                m.write(ins.out[0], _stats_row(x, stats[:, 0], stats[:, 1],
+                                               delta.reshape((b * h * s,))))
+            else:
+                delta = stats[:, 2].reshape((b, h, s, 1))
+            ds = p * (dp - delta)
+            if which == "dq":
+                out = x.matmul(ds, k) / math.sqrt(d)
+            else:
+                out = x.matmul(x.perm(ds, (0, 1, 3, 2)), q) / math.sqrt(d)
+        m.write(ins.out[1], _rows(x, out, b, s, h, d))
+    return op
+
+
 def _embed(m, x, ins, step):
     rows = ins.out[0]
     vocab, dim = hi_lo(ins.out[1])
@@ -1238,6 +1309,8 @@ INTERPRETER = {
     32: _rms_norm_bwd, 33: _rope_op(1.0), 34: _rope_op(-1.0), 35: _attn_fwd,
     36: _attn_dp, 37: _attn_dv, 38: _softmax_rows_bwd, 39: _attn_dqk(False),
     40: _attn_dqk(True), 41: _embed, 42: _accumulate,
+    47: _attn_fwd_tiled, 48: _attn_bwd_tiled("dq"), 49: _attn_bwd_tiled("dk"),
+    50: _attn_bwd_tiled("dv"),
     43: _gemm_nn("<u2"), 44: _gemm_nt("<u2"), 45: _rope_table,
     46: _fused_map,
 }

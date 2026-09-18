@@ -196,6 +196,49 @@ TEST(PlanValidator, RmsNormBackwardProvesTheStatsRef) {
   EXPECT_ERROR(ValidateInstruction(bwd, kArena, kRodata, up::kSeeuVersion));
 }
 
+TEST(PlanValidator, TheTiledAttentionFamilyIsVersionedAndBounded) {
+  // B = 1, S = 4, H = 2, d = 4: activations are 32 floats (128 B), the
+  // stats row B*H*S*4 = 32 floats. Slots: q 0, k 128, v 256, o/dO 384,
+  // stats 512, result 640 — all inside the 1024-byte arena.
+  const uint64_t bs = (uint64_t{1} << 32) | 4, hd = (uint64_t{2} << 32) | 4;
+  up::UpdateInstruction fwd;
+  fwd.opcode = static_cast<uint16_t>(up::OpCode::kAttnFwdTiled);
+  fwd.in[0] = up::MakeArenaRef(0);
+  fwd.in[1] = up::MakeArenaRef(128);
+  fwd.in[2] = up::MakeArenaRef(256);
+  fwd.in[3] = up::MakeArenaRef(384);
+  fwd.out[0] = up::MakeArenaRef(512);
+  fwd.out[1] = bs;
+  fwd.out[2] = hd;
+  EXPECT_OK(ValidateInstruction(fwd, kArena, kRodata, up::kSeeuVersion));
+  const auto old = ValidateInstruction(fwd, kArena, kRodata,
+                                       up::kSeeuTiledAttentionVersion - 1);
+  ASSERT_FALSE(old.has_value());
+  EXPECT_STR_CONTAINS(old.error(), "tiled attention");
+  fwd.out[0] = up::MakeArenaRef(1024 - 64);  // stats row runs off the arena
+  EXPECT_ERROR(ValidateInstruction(fwd, kArena, kRodata, up::kSeeuVersion));
+
+  for (const up::OpCode op : {up::OpCode::kAttnDQTiled,
+                              up::OpCode::kAttnDKTiled,
+                              up::OpCode::kAttnDVTiled}) {
+    up::UpdateInstruction bwd;
+    bwd.opcode = static_cast<uint16_t>(op);
+    bwd.in[0] = up::MakeArenaRef(0);
+    bwd.in[1] = up::MakeArenaRef(128);
+    bwd.in[2] = up::MakeArenaRef(256);
+    bwd.in[3] = up::MakeArenaRef(384);
+    bwd.out[0] = up::MakeArenaRef(512);
+    bwd.out[1] = up::MakeArenaRef(640);
+    bwd.out[2] = up::PackAttnGeometry(1, 4, 2, 4);
+    EXPECT_OK(ValidateInstruction(bwd, kArena, kRodata, up::kSeeuVersion));
+    bwd.out[2] = up::PackAttnGeometry(1, 4, 0, 4);  // a zero field
+    EXPECT_ERROR(ValidateInstruction(bwd, kArena, kRodata, up::kSeeuVersion));
+    bwd.out[2] = up::PackAttnGeometry(1, 4, 2, 4);
+    bwd.out[1] = up::MakeArenaRef(512);  // the result aliases the stats row
+    EXPECT_ERROR(ValidateInstruction(bwd, kArena, kRodata, up::kSeeuVersion));
+  }
+}
+
 TEST(PlanValidator, AttentionBackwardExtentsAreProven) {
   // kAttnDP writes the [B*H*S, S] probability-shaped dP; the write extent
   // derives from the packed geometry and must stay inside the arena, and

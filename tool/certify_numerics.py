@@ -83,6 +83,9 @@ SITES = {
     15: "kl_distill.fwd", 26: "layer_norm.fwd", 27: "layer_norm.bwd",
     28: "clip.norm", 31: "rms_norm.fwd", 32: "rms_norm.bwd",
     35: "attn.fwd", 36: "attn.dp", 38: "softmax_rows.bwd",
+    # The tiled family (v15) recomputes the same double reductions.
+    47: "attn.fwd.tiled", 48: "attn.dq.tiled", 49: "attn.dk.tiled",
+    50: "attn.dv.tiled",
 }
 # The optimizer steps reduce only when they carry a fused clip (plan v12,
 # threshold bits in out[1]): then the gradient norm is theirs.

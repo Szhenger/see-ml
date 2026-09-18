@@ -257,6 +257,21 @@ void Disassemble(const char* title, const UpdateInstruction* instrs,
                     ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
                     ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu);
         break;
+      case OpCode::kAttnFwdTiled:
+        std::printf("   B/S: %" PRIu64 " %" PRIu64 "  H/d: %" PRIu64
+                    " %" PRIu64 "  stats: out[0]\n",
+                    ins.out[1] >> 32, ins.out[1] & 0xFFFFFFFFu,
+                    ins.out[2] >> 32, ins.out[2] & 0xFFFFFFFFu);
+        break;
+      case OpCode::kAttnDQTiled:
+      case OpCode::kAttnDKTiled:
+      case OpCode::kAttnDVTiled: {
+        const auto g = UnpackAttnGeometry(ins.out[2]);
+        std::printf("   B/S: %" PRIu64 " %" PRIu64 "  H/d: %" PRIu64
+                    " %" PRIu64 "  stats: out[0]  result: out[1]\n",
+                    g.B, g.S, g.H, g.d);
+        break;
+      }
       case OpCode::kSoftmaxRowsBwd:
         std::printf("   rows/cols: %" PRIu64 " %" PRIu64 "\n",
                     ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);

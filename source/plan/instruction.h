@@ -144,7 +144,38 @@ enum class OpCode : uint16_t {
   // is bit-identical to the instruction sequence it stands for; what it
   // removes is one arena-sized write and read per folded instruction.
   kFusedMap = 46,
+  // --- Tiled attention (plan v15, E11 / #94). --------------------------------
+  // The cached family above keeps P [B*H*S, S] from forward to backward and
+  // materializes dP and dS at that size; the tiled family keeps four floats
+  // per query row (kAttnStatsWidth: score max, 1/denominator, the softmax-
+  // backward rowsum delta, one pad) and recomputes every probability a
+  // backward pass needs — with the cached kernels' expressions, so the two
+  // families compute identical bits and the compiler picks by memory alone.
+  //   kAttnFwdTiled: in = q, k, v, o; out[0] = stats (written), out[1] =
+  //     B<<32|S, out[2] = H<<32|d — the family's geometry words.
+  //   kAttnDQTiled / kAttnDKTiled / kAttnDVTiled: in = q, k, v, dO;
+  //     out[0] = stats (dQ also writes delta into it; dK reads delta, so a
+  //     stream runs dQ before dK), out[1] = the result, out[2] = the
+  //     geometry packed 16 bits each: B<<48 | S<<32 | H<<16 | d.
+  kAttnFwdTiled = 47,
+  kAttnDQTiled = 48,
+  kAttnDKTiled = 49,
+  kAttnDVTiled = 50,
 };
+
+inline constexpr uint64_t kAttnStatsWidth = 4;
+/// The tiled backward's one-word geometry (each field must fit 16 bits).
+inline constexpr uint64_t PackAttnGeometry(uint64_t B, uint64_t S, uint64_t H,
+                                           uint64_t d) {
+  return (B << 48) | (S << 32) | (H << 16) | d;
+}
+struct AttnGeometry {
+  uint64_t B, S, H, d;
+};
+inline constexpr AttnGeometry UnpackAttnGeometry(uint64_t word) {
+  return {word >> 48, (word >> 32) & 0xFFFFu, (word >> 16) & 0xFFFFu,
+          word & 0xFFFFu};
+}
 
 // --- kFusedMap stages ----------------------------------------------------------
 // A stage byte: the kind in the low nibble, an argument in the high nibble.

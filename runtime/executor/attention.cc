@@ -1,4 +1,5 @@
 #include <cmath>
+#include <vector>
 
 #include "runtime/executor/kernel_policy.h"
 #include "runtime/executor/update_kernels.h"
@@ -270,6 +271,227 @@ void AttnDK(const float* ds, const float* q, float* dk, size_t B, size_t S,
         const float g = ds[((b * H + h) * S + i) * S + j] * inv_sqrt_d;
         const float* qi = q + (b * S + i) * D + h * d;
         for (size_t c = 0; c < d; ++c) dkj[c] += g * qi[c];
+      }
+    }
+  });
+}
+
+
+// =============================================================================
+// The tiled family (plan v15, E11 / #94): the same attention with no S x S
+// matrix anywhere. The cached family keeps P = softmax(mask(Q K^T/sqrt d))
+// alive from the forward to the backward of every layer, and the backward
+// materializes dP and dS at the same size: at S = 2048, H = 8 that is 134
+// MB per matrix per layer — the sequence-length ceiling on a device. Here
+// the forward keeps one probability ROW at a time in a scratch buffer and
+// stores four floats per row instead of S: the row max m, the inverse
+// softmax denominator 1/l, and (written by the dQ pass) the softmax-
+// backward rowsum delta. Every backward pass recomputes the probabilities
+// it needs from Q, K and those two numbers.
+//
+// THE BITS. Recomputed is not approximated: p(i, j) is evaluated as
+// exp(s - m) * (1/l) with s the same double-accumulated dot product the
+// cached forward scored, so every recomputed probability is the float the
+// cached path stored; dp(i, j), delta(i), ds(i, j) and the dQ/dK/dV
+// accumulations use the cached kernels' expressions in the cached kernels'
+// orders. The tiled family therefore computes the SAME BITS as the cached
+// family — the compiler may pick either by memory alone — at about twice
+// the arithmetic (Q K^T is recomputed by each backward pass, dP by two of
+// them) for O(B·H·S) memory instead of O(B·H·S^2). Units are the cached
+// kernels' units (a query row for the forward and dQ, a key row for dK and
+// dV), each writing only what it owns, so any thread count computes the
+// same floats.
+// =============================================================================
+
+namespace {
+
+/// The per-row scratch of the tiled kernels: `width` floats per ParallelFor
+/// chunk (S of probabilities, S more of dP where a pass needs both), sized
+/// once per kernel call for the chunk count the (n, grain) pair yields —
+/// the kernels allocate nothing per row, and a chunk's slice is its own.
+struct ChunkScratch {
+  std::vector<float> buf;
+  size_t width;
+  ChunkScratch(size_t n, size_t grain, size_t width)
+      : buf(up::ParallelChunkCount(n, grain) * width), width(width) {}
+  float* at(size_t chunk) { return buf.data() + chunk * width; }
+};
+
+/// scores(i, j) for j <= i into `prow`, and the row max — exactly the
+/// cached forward's first pass.
+inline float ScoreRow(const float* qi, const float* k, size_t b, size_t S,
+                      size_t D, size_t h, size_t d, size_t i,
+                      float inv_sqrt_d, float* prow) {
+  float row_max = -INFINITY;
+  for (size_t j = 0; j <= i; ++j) {
+    const float* kj = k + (b * S + j) * D + h * d;
+    double dot = 0.0;
+    for (size_t c = 0; c < d; ++c) dot += static_cast<double>(qi[c]) * kj[c];
+    const float s = static_cast<float>(dot) * inv_sqrt_d;
+    prow[j] = s;
+    if (s > row_max) row_max = s;
+  }
+  return row_max;
+}
+
+/// p(i, j) for j <= i from the stored (m, 1/l): the floats the cached
+/// forward wrote into its P row.
+inline void ProbRow(const float* qi, const float* k, size_t b, size_t S,
+                    size_t D, size_t h, size_t d, size_t i, float inv_sqrt_d,
+                    float m, float inv_denom, float* prow) {
+  for (size_t j = 0; j <= i; ++j) {
+    const float* kj = k + (b * S + j) * D + h * d;
+    double dot = 0.0;
+    for (size_t c = 0; c < d; ++c) dot += static_cast<double>(qi[c]) * kj[c];
+    const float s = static_cast<float>(dot) * inv_sqrt_d;
+    const float e = std::exp(s - m);
+    prow[j] = e * inv_denom;
+  }
+}
+
+/// One probability p(i, j): ProbRow's expression for a single (i, j).
+inline float Prob(const float* qi, const float* kj, size_t d, float inv_sqrt_d,
+                  float m, float inv_denom) {
+  double dot = 0.0;
+  for (size_t c = 0; c < d; ++c) dot += static_cast<double>(qi[c]) * kj[c];
+  const float s = static_cast<float>(dot) * inv_sqrt_d;
+  const float e = std::exp(s - m);
+  return e * inv_denom;
+}
+
+/// dp(i, j) = dO(i) . v(j), AttnDP's expression.
+inline float DProb(const float* doi, const float* vj, size_t d) {
+  double dot = 0.0;
+  for (size_t c = 0; c < d; ++c) dot += static_cast<double>(doi[c]) * vj[c];
+  return static_cast<float>(dot);
+}
+
+}  // namespace
+
+void AttnFwdTiled(const float* q, const float* k, const float* v, float* o,
+                  float* stats, size_t B, size_t S, size_t H, size_t d) {
+  const size_t D = H * d;
+  const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
+  const size_t grain = RowGrain(S * (d + 4), kGrainMath);
+  ChunkScratch scratch(B * H * S, grain, S);
+  up::ParallelFor(B * H * S, grain,
+                  [&](size_t u0, size_t u1, size_t chunk) {
+    float* prow = scratch.at(chunk);
+    for (size_t u = u0; u < u1; ++u) {
+      const auto [b, h, i] = UnitOf(u, H, S);
+      const float* qi = q + (b * S + i) * D + h * d;
+      const float row_max = ScoreRow(qi, k, b, S, D, h, d, i, inv_sqrt_d, prow);
+      double denom = 0.0;
+      for (size_t j = 0; j <= i; ++j) {
+        const float e = std::exp(prow[j] - row_max);
+        prow[j] = e;
+        denom += e;
+      }
+      const float inv_denom = 1.0f / static_cast<float>(denom);
+      for (size_t j = 0; j <= i; ++j) prow[j] *= inv_denom;
+      float* oi = o + (b * S + i) * D + h * d;
+      for (size_t c = 0; c < d; ++c) oi[c] = 0.0f;
+      for (size_t j = 0; j <= i; ++j) {
+        const float p = prow[j];
+        const float* vj = v + (b * S + j) * D + h * d;
+        for (size_t c = 0; c < d; ++c) oi[c] += p * vj[c];
+      }
+      float* st = stats + u * up::kAttnStatsWidth;
+      st[0] = row_max;
+      st[1] = inv_denom;
+      st[2] = 0.0f;  // delta: the dQ pass's
+      st[3] = 0.0f;
+    }
+  });
+}
+
+void AttnDQTiled(const float* q, const float* k, const float* v,
+                 const float* dout, float* stats, float* dq, size_t B,
+                 size_t S, size_t H, size_t d) {
+  const size_t D = H * d;
+  const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
+  // Per query row: p and dP recomputed, delta = rowsum(dP * P) in double
+  // (SoftmaxRowsBwd's), dS = P * (dP - delta), dQ = dS K / sqrt(d) in
+  // AttnDQ's order. delta is stored for the dK pass.
+  const size_t grain = RowGrain(S * 3 * d, kGrainMath);
+  ChunkScratch scratch(B * H * S, grain, 2 * S);
+  up::ParallelFor(B * H * S, grain,
+                  [&](size_t u0, size_t u1, size_t chunk) {
+    float* prow = scratch.at(chunk);
+    float* dprow = prow + S;
+    for (size_t u = u0; u < u1; ++u) {
+      const auto [b, h, i] = UnitOf(u, H, S);
+      const float* qi = q + (b * S + i) * D + h * d;
+      const float* doi = dout + (b * S + i) * D + h * d;
+      float* st = stats + u * up::kAttnStatsWidth;
+      ProbRow(qi, k, b, S, D, h, d, i, inv_sqrt_d, st[0], st[1], prow);
+      double dot = 0.0;
+      for (size_t j = 0; j <= i; ++j) {
+        const float* vj = v + (b * S + j) * D + h * d;
+        dprow[j] = DProb(doi, vj, d);
+        dot += static_cast<double>(dprow[j]) * prow[j];
+      }
+      const float delta = static_cast<float>(dot);
+      st[2] = delta;
+      float* dqi = dq + (b * S + i) * D + h * d;
+      for (size_t c = 0; c < d; ++c) dqi[c] = 0.0f;
+      for (size_t j = 0; j <= i; ++j) {
+        const float ds = prow[j] * (dprow[j] - delta);
+        const float g = ds * inv_sqrt_d;
+        const float* kj = k + (b * S + j) * D + h * d;
+        for (size_t c = 0; c < d; ++c) dqi[c] += g * kj[c];
+      }
+    }
+  });
+}
+
+void AttnDKTiled(const float* q, const float* k, const float* v,
+                 const float* dout, const float* stats, float* dk, size_t B,
+                 size_t S, size_t H, size_t d) {
+  const size_t D = H * d;
+  const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
+  // Per key row j: dk(j) = sum_{i >= j} dS(i, j) q(i) / sqrt(d), with
+  // dS(i, j) recomputed from (m, 1/l, delta) of row i — AttnDK's order.
+  up::ParallelFor(B * H * S, RowGrain(S * 3 * d, kGrainMath),
+                  [&](size_t u0, size_t u1, size_t) {
+    for (size_t u = u0; u < u1; ++u) {
+      const auto [b, h, j] = UnitOf(u, H, S);
+      const float* kj = k + (b * S + j) * D + h * d;
+      const float* vj = v + (b * S + j) * D + h * d;
+      float* dkj = dk + (b * S + j) * D + h * d;
+      for (size_t c = 0; c < d; ++c) dkj[c] = 0.0f;
+      for (size_t i = j; i < S; ++i) {
+        const float* qi = q + (b * S + i) * D + h * d;
+        const float* doi = dout + (b * S + i) * D + h * d;
+        const float* st = stats + ((b * H + h) * S + i) * up::kAttnStatsWidth;
+        const float p = Prob(qi, kj, d, inv_sqrt_d, st[0], st[1]);
+        const float ds = p * (DProb(doi, vj, d) - st[2]);
+        const float g = ds * inv_sqrt_d;
+        for (size_t c = 0; c < d; ++c) dkj[c] += g * qi[c];
+      }
+    }
+  });
+}
+
+void AttnDVTiled(const float* q, const float* k, const float* dout,
+                 const float* stats, float* dv, size_t B, size_t S, size_t H,
+                 size_t d) {
+  const size_t D = H * d;
+  const float inv_sqrt_d = 1.0f / std::sqrt(static_cast<float>(d));
+  // Per value row j: dv(j) = sum_{i >= j} P(i, j) dO(i) — AttnDV's order.
+  up::ParallelFor(B * H * S, RowGrain(S * 2 * d, kGrainMath),
+                  [&](size_t u0, size_t u1, size_t) {
+    for (size_t u = u0; u < u1; ++u) {
+      const auto [b, h, j] = UnitOf(u, H, S);
+      const float* kj = k + (b * S + j) * D + h * d;
+      float* dvj = dv + (b * S + j) * D + h * d;
+      for (size_t c = 0; c < d; ++c) dvj[c] = 0.0f;
+      for (size_t i = j; i < S; ++i) {
+        const float* qi = q + (b * S + i) * D + h * d;
+        const float* doi = dout + (b * S + i) * D + h * d;
+        const float* st = stats + ((b * H + h) * S + i) * up::kAttnStatsWidth;
+        const float p = Prob(qi, kj, d, inv_sqrt_d, st[0], st[1]);
+        for (size_t c = 0; c < d; ++c) dvj[c] += p * doi[c];
       }
     }
   });

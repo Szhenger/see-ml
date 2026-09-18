@@ -88,7 +88,14 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // v14: the GEMM addend (E10) — kFlagGemmAddend on kGemmNT, C = D + A@B^T
 // with D in the free in[3]. Additive, one flag bit, rejected below v14;
 // bit-identical to the kGemmNT + kAddEW pair it replaces.
-inline constexpr uint32_t kSeeuVersion = 14;
+// v15: tiled attention (E11) — kAttnFwdTiled / kAttnDQTiled / kAttnDKTiled
+// / kAttnDVTiled, four opcodes that keep O(B·H·S) attention state instead
+// of the O(B·H·S²) probability cache. Additive, rejected below v15;
+// bit-identical to the cached family they stand in for.
+inline constexpr uint32_t kSeeuVersion = 15;
+
+// The version that introduced the tiled attention family.
+inline constexpr uint32_t kSeeuTiledAttentionVersion = 15;
 
 // The version that introduced kFlagGemmAddend.
 inline constexpr uint32_t kSeeuGemmAddendVersion = 14;

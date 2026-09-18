@@ -96,7 +96,7 @@ SDS_HEADER_BYTES = SDS_HEADER.size
 # --- SEEU: the update plan (source/plan/schema.h, instruction.h) -------------
 
 SEEU_MAGIC = 0x55454553  # "SEEU"
-SEEU_VERSION = 14
+SEEU_VERSION = 15
 SEEU_OLDEST_READABLE = 4
 RODATA_BIT = 1 << 63
 NULL_REF = (1 << 64) - 1
@@ -149,7 +149,11 @@ OPCODES = {
     36: "attn.dp", 37: "attn.dv", 38: "softmax_rows.bwd", 39: "attn.dq",
     40: "attn.dk", 41: "embed.fwd", 42: "accumulate", 43: "gemm.nn.bf16",
     44: "gemm.nt.bf16", 45: "rope.table", 46: "fused.map",
+    47: "attn.fwd.tiled", 48: "attn.dq.tiled", 49: "attn.dk.tiled",
+    50: "attn.dv.tiled",
 }
+# The tiled family's stats row: [row max, 1/denominator, delta, pad].
+ATTN_STATS_WIDTH = 4
 
 # Instruction flags on the GEMM family: the fused epilogue.
 FLAG_EPILOGUE_BIAS = 1

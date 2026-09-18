@@ -35,6 +35,7 @@
 
 #include "compiler/analysis/algebra/epilogue_fuser.h" // IWYU pragma: export
 #include "compiler/analysis/algebra/addend_fuser.h"   // IWYU pragma: export
+#include "compiler/analysis/algebra/attention_tiling.h"  // IWYU pragma: export
 #include "compiler/analysis/algebra/chain_fuser.h"    // IWYU pragma: export
 #include "compiler/analysis/algebra/rope_table.h"     // IWYU pragma: export
 #include "compiler/analysis/algebra/lora_grafter.h"   // IWYU pragma: export

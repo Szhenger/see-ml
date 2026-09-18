@@ -166,6 +166,26 @@ void AttnDQ(const float* ds, const float* k, float* dq, size_t B, size_t S,
 void AttnDK(const float* ds, const float* q, float* dk, size_t B, size_t S,
             size_t H, size_t d);             // dK = (dS^T Q) / sqrt(d)
 
+// The tiled family (plan v15, E11): the same attention, the same bits, no
+// S x S matrix. `stats` is [B*H*S, kAttnStatsWidth] f32: per query row the
+// score max m, the inverse softmax denominator 1/l (both written by the
+// forward), and the softmax-backward rowsum delta (written by AttnDQTiled,
+// read by AttnDKTiled — the compiled stream runs dQ first). Every backward
+// pass recomputes the probabilities it needs from Q, K and (m, 1/l), with
+// the cached kernels' expressions in the cached kernels' orders, so each
+// result equals the cached family's float for float.
+void AttnFwdTiled(const float* q, const float* k, const float* v, float* o,
+                  float* stats, size_t B, size_t S, size_t H, size_t d);
+void AttnDQTiled(const float* q, const float* k, const float* v,
+                 const float* dout, float* stats, float* dq, size_t B,
+                 size_t S, size_t H, size_t d);
+void AttnDKTiled(const float* q, const float* k, const float* v,
+                 const float* dout, const float* stats, float* dk, size_t B,
+                 size_t S, size_t H, size_t d);
+void AttnDVTiled(const float* q, const float* k, const float* dout,
+                 const float* stats, float* dv, size_t B, size_t S, size_t H,
+                 size_t d);
+
 // --- Token-native input (plan v7) --------------------------------------------
 // Frozen embedding gather: out[t, :] = table[tokens[t], :]. The feeder
 // contract proved every token < V before dispatch (exactly as class labels

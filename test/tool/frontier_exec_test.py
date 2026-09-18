@@ -450,6 +450,10 @@ MATRIX = [
       "--no-fuse-elementwise"]),
     ("mlp_unfused_maps", "mlp.smf", "class.sds", 8,
      ["--no-fuse-elementwise", "--no-fuse-epilogue"]),
+    # The tiled attention family (plan v15): the stats row, and every
+    # probability recomputed by the backward passes.
+    ("dec_tiled", "decoder.smf", "decoder_corpus.sds", 12,
+     ["--attention", "tiled", "--lora-rank", "4"]),
 ]
 # Opcodes no seeml-update-compile invocation produces today: kNop is a
 # placeholder, kCopy a utility no pass selects, and kReduceRows the bias

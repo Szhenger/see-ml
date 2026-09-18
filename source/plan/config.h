@@ -28,6 +28,9 @@ enum class OptimizerKind : uint8_t { kSgd = 0, kAdamW = 1 };
 // Warmup ramps linearly from 0 over `warmup_steps`; cosine then decays to
 // lr * min_lr_factor across the plan's default_steps horizon.
 enum class LrSchedule : uint32_t { kConstant = 0, kCosineWithWarmup = 1 };
+// Which attention family a plan compiles to (E11, #94): see
+// UpdateConfig::attention.
+enum class AttentionKind : uint8_t { kAuto = 0, kCached = 1, kTiled = 2 };
 
 struct LoRASpec {
   int64_t rank = 8;
@@ -88,6 +91,14 @@ struct UpdateConfig {
   // exposed so a fused and an unfused compilation of the same model can be
   // compared bit-for-bit.
   bool fuse_epilogues = true;
+  // Attention memory (E11, #94). kAuto tiles every attention op when the
+  // probability caches of all of them together would exceed the budget —
+  // the cached family holds P [B*H*S, S] from forward to backward for
+  // every layer, and dP and dS at that size — at about twice the attention
+  // arithmetic; kCached / kTiled force one family. Identical bits either
+  // way (the tiled kernels reproduce the cached kernels' expressions).
+  AttentionKind attention = AttentionKind::kAuto;
+  uint64_t attention_cache_budget_bytes = 256ull << 20;
   // The bitwise-safe kernel batch (E3, plan v12), each exposed for the same
   // reason: so a compilation with and without it can be compared
   // bit-for-bit. rope_table hoists the RoPE angles into one device-built
