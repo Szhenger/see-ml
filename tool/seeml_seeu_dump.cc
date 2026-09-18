@@ -44,7 +44,10 @@ void PrintRef(uint64_t ref) {
     std::printf("  <null>          ");
     return;
   }
-  std::printf("  %s+0x%08" PRIx64, IsRodataRef(ref) ? "ro" : "ar",
+  std::printf("  %s+0x%08" PRIx64,
+              IsRodataRef(ref)   ? "ro"
+              : IsSourceRef(ref) ? "src"  // v17: the source model file
+                                 : "ar",
               RefOffset(ref));
 }
 

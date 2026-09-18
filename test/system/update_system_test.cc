@@ -724,6 +724,91 @@ TEST(UpdateSystem, TransformerTrainsMergesAndCommits) {
 // 8. Quantized base weights (int8 rodata)
 // =============================================================================
 
+TEST(UpdateSystem, TheGateScoresTheModelThatShips) {
+  // E12 (#95). Under --quantize-base / --bf16-base the adapter trains
+  // against the narrow weights, but the commit patches the f32 source file:
+  // the function that ships is W_f32 + delta. A plan compiled from a file
+  // scores exactly that — its eval program reads the f32 weights from the
+  // bound model — so the gated validation loss IS the committed model's
+  // (up to the rounding of W + delta in the file), and the step-0 score is
+  // the source model's, not the quantized source's. The in-plan proxy an
+  // in-memory compile keeps is further from the truth: that gap is what
+  // the gate used to certify.
+  const int64_t in_dim = 8, hidden = 16, out_dim = 3, batch = 8;
+  for (const bool bf16 : {false, true}) {
+    SmfModel model = MakeMlp(in_dim, hidden, out_dim, 71);
+    ScopedTempDir dir;
+    const std::string src = dir.File("source.smf");
+    ASSERT_OK(SaveSmf(src, model));
+    ASSERT_OK_AND_ASSIGN(SmfModel saved, LoadSmf(src));
+    UpdateConfig config = BaseConfig(batch);
+    config.optimizer.lr = 5e-3f;
+    config.quantize_base = !bf16;
+    config.bf16_base = bf16;
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate shipped,
+                         UpdateCompiler(config).Compile(saved));
+    // SaveSmf stamps offsets and the hash onto `model`: the proxy compiles
+    // a fresh, never-saved copy of the same network.
+    SmfModel in_memory = MakeMlp(in_dim, hidden, out_dim, 71);
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate proxy,
+                         UpdateCompiler(config).Compile(in_memory));
+    EXPECT_TRUE(shipped.scores_shipped);
+    EXPECT_FALSE(proxy.scores_shipped);
+
+    ASSERT_OK_AND_ASSIGN(Dataset train, MakeClassificationData(96, in_dim, 72));
+    ASSERT_OK_AND_ASSIGN(Dataset val, MakeClassificationData(40, in_dim, 73));
+    TrainOptions options = Quiet();
+    options.validation = &val;
+
+    UpdateEngine engine;
+    ASSERT_OK(engine.LoadFromMemory(shipped.plan.data(), shipped.plan.size()));
+    EXPECT_TRUE(engine.scores_shipped());
+    // Unbound, the plan refuses to score anything.
+    EXPECT_ERROR_CONTAINS(engine.Evaluate(val), "BindSourceModel");
+    ASSERT_OK(engine.BindSourceModel(src));
+    ASSERT_OK_AND_ASSIGN(auto report, engine.Train(train, 60, options));
+    ASSERT_OK(engine.RunMerge());
+    const std::string out = dir.File("updated.smf");
+    ASSERT_OK(engine.CommitToModel(src, out));
+
+    UpdateEngine twin;  // the same training, scored by the in-plan proxy
+    ASSERT_OK(twin.LoadFromMemory(proxy.plan.data(), proxy.plan.size()));
+    ASSERT_OK_AND_ASSIGN(Dataset train2,
+                         MakeClassificationData(96, in_dim, 72));
+    ASSERT_OK_AND_ASSIGN(auto proxied, twin.Train(train2, 60, options));
+
+    // The truth: an f32 plan compiled from each file, evaluated as is.
+    auto f32_loss = [&](const std::string& path) -> float {
+      auto m = LoadSmf(path);
+      if (!m) return -1.0f;
+      UpdateConfig f32 = BaseConfig(batch);
+      auto c = UpdateCompiler(f32).Compile(*m);
+      if (!c) return -1.0f;
+      UpdateEngine e;
+      if (!e.LoadFromMemory(c->plan.data(), c->plan.size())) return -1.0f;
+      if (!e.BindSourceModel(path)) return -1.0f;
+      auto l = e.Evaluate(val);
+      return l ? *l : -1.0f;
+    };
+    const float source_loss = f32_loss(src);
+    const float committed_loss = f32_loss(out);
+    ASSERT_GT(source_loss, 0.0f);
+    ASSERT_GT(committed_loss, 0.0f);
+    // Step 0: B = 0, so the shipped eval is the source model exactly.
+    EXPECT_EQ(report.val_initial_loss, source_loss);
+    // The end: the gated score is the committed model's.
+    EXPECT_NEAR(report.val_final_loss, committed_loss,
+                2e-5 * (1.0 + committed_loss));
+    // The proxy scored something else — at step 0 (the quantized source)
+    // and at the end — and the shipped score is the closer.
+    EXPECT_NE(proxied.val_initial_loss, source_loss);
+    EXPECT_LT(std::fabs(report.val_final_loss - committed_loss),
+              std::fabs(proxied.val_final_loss - committed_loss));
+    // Training itself is unchanged: both ran against the narrow weights.
+    EXPECT_EQ(report.final_avg_loss, proxied.final_avg_loss);
+  }
+}
+
 TEST(UpdateSystem, QuantizedBaseTrainsAndCommitsWithoutBakingError) {
   const int64_t in_dim = 8, hidden = 16, out_dim = 2, batch = 8;
   SmfModel model = MakeMlp(in_dim, hidden, out_dim, 5);

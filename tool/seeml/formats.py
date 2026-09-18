@@ -97,9 +97,10 @@ SDS_HEADER_BYTES = SDS_HEADER.size
 # --- SEEU: the update plan (source/plan/schema.h, instruction.h) -------------
 
 SEEU_MAGIC = 0x55454553  # "SEEU"
-SEEU_VERSION = 16
+SEEU_VERSION = 17
 SEEU_OLDEST_READABLE = 4
 RODATA_BIT = 1 << 63
+SOURCE_BIT = 1 << 62  # v17: the source model file (E12), eval program only
 NULL_REF = (1 << 64) - 1
 RODATA_ALIGNMENT = 16384
 GEMM_PANEL_FLOATS = 8192

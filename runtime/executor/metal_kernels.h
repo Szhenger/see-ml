@@ -51,8 +51,10 @@ struct KArgs {
 };
 
 #define KSIG device uchar* ar [[buffer(0)]], device const uchar* ro [[buffer(1)]], \
-             constant KArgs& p [[buffer(2)]]
-#define RBASE(i) ((p.space & (1u << (i))) ? ro : (device const uchar*)ar)
+             constant KArgs& p [[buffer(2)]], device const uchar* src [[buffer(5)]]
+// space: bit i = slot i reads rodata; bit 8 + i = the source model (v17).
+#define RBASE(i) ((p.space & (1u << (8u + (i)))) ? src \
+                  : (p.space & (1u << (i))) ? ro : (device const uchar*)ar)
 #define RF(i) ((device const float*)(RBASE(i) + p.off[i]))
 #define RQ(i) ((device const char*)(RBASE(i) + p.off[i]))
 #define WF(i) ((device float*)(ar + p.off[i]))

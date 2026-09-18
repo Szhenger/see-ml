@@ -1,5 +1,6 @@
 #include "runtime/engine/update_engine.h"
 
+#include <algorithm>
 #include <bit>
 #ifdef SEEML_STEP_TIMING
 #include <chrono>
@@ -8,6 +9,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "runtime/custodian/checkpoint.h"
 #include "runtime/custodian/durable_io.h"
@@ -42,10 +48,69 @@ kernels::GemmTiles UpdateEngine::gemm_tiles() const {
   return KernelPolicyOf(header_).gemm_tiles;
 }
 
+UpdateEngine::SourceMapping::~SourceMapping() { Release(); }
+
+void UpdateEngine::SourceMapping::Release() {
+  if (data && heap.empty())
+    ::munmap(const_cast<uint8_t*>(data), static_cast<size_t>(bytes));
+  data = nullptr;
+  bytes = 0;
+  heap.clear();
+}
+
+std::expected<void, std::string> UpdateEngine::BindSourceModel(
+    const std::string& source_model_path) {
+  if (!arena_) return diag::executing::Error("no plan loaded");
+  if (source_required_ == 0) return VerifySourceModel(source_model_path);
+  // Map the file read-only: the eval program reads the f32 weights in place
+  // (the page cache serves them; nothing is copied), and the hash below is
+  // taken over the very bytes the kernels will read.
+  const int fd = ::open(source_model_path.c_str(), O_RDONLY);
+  if (fd < 0)
+    return diag::executing::Error("cannot open the source model '" +
+                                  source_model_path + "'");
+  struct stat st {};
+  if (::fstat(fd, &st) != 0 || st.st_size <= 0) {
+    ::close(fd);
+    return diag::executing::Error("cannot size the source model '" +
+                                  source_model_path + "'");
+  }
+  const auto bytes = static_cast<uint64_t>(st.st_size);
+  void* map = ::mmap(nullptr, static_cast<size_t>(bytes), PROT_READ,
+                     MAP_PRIVATE, fd, 0);
+  ::close(fd);
+  if (map == MAP_FAILED)
+    return diag::executing::Error("cannot map the source model '" +
+                                  source_model_path + "'");
+  SourceMapping candidate;
+  candidate.data = static_cast<const uint8_t*>(map);
+  candidate.bytes = bytes;
+  if (up::ContentHash64(candidate.data, bytes) != header_.source_model_hash)
+    return diag::executing::Error(
+        "source model does not match the plan's source_model_hash — "
+        "refusing to score against '" + source_model_path + "'");
+  if (bytes < source_required_)
+    return diag::executing::Error(
+        "source model '" + source_model_path + "' is shorter than the " +
+        std::to_string(source_required_) +
+        " bytes the eval program reads from it");
+  if (auto r = backend_->BindSource(candidate.data, bytes); !r)
+    return diag::executing::Error("backend cannot bind the source model: " +
+                                  r.error());
+  source_.Release();
+  source_.data = candidate.data;
+  source_.bytes = candidate.bytes;
+  candidate.data = nullptr;  // ownership moved; do not unmap twice
+  candidate.bytes = 0;
+  return {};
+}
+
 UpdateEngine::~UpdateEngine() {
   // The backend may hold a zero-copy view of the arena (a GPU buffer
-  // wrapping it): release the view before the memory.
+  // wrapping it) and of the source mapping: release the views before the
+  // memory.
   backend_.reset();
+  source_.Release();
   std::free(arena_);
 }
 
@@ -67,6 +132,11 @@ std::expected<void, std::string> UpdateEngine::SelectBackend(
           "backend '" + std::string(sel->backend->name()) +
           "' cannot bind the loaded plan: " + r.error());
     sel->backend->Configure(KernelPolicyOf(header_));
+    if (source_.data)
+      if (auto r = sel->backend->BindSource(source_.data, source_.bytes); !r)
+        return diag::executing::Error(
+            "backend '" + std::string(sel->backend->name()) +
+            "' cannot bind the source model: " + r.error());
   }
   backend_ = std::move(sel->backend);
   backend_kind_ = sel->resolved;
@@ -225,6 +295,18 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   // they already are from accuracy. A composite loss (xent + KL, pure KL)
   // is not row-separable from what the program keeps; it is weighted.
   EvalTail eval_tail;
+  // The source model extent the eval program reads (v17): the file bound
+  // at BindSourceModel must cover it. The contract proved every source ref
+  // against kSourceSpaceLimit; this recovers the real requirement.
+  uint64_t source_required = 0;
+  for (const up::UpdateInstruction& ins : eval)
+    if (auto ex = DescribeInstruction(ins, header.arena_size,
+                                      header.rodata_size, header.version,
+                                      /*allow_source=*/true))
+      for (size_t i = 0; i < ex->count; ++i)
+        if (ex->ranges[i].source)
+          source_required = std::max(source_required,
+                                     ex->ranges[i].off + ex->ranges[i].bytes);
   for (const up::UpdateInstruction& ins : eval) {
     const auto op = static_cast<up::OpCode>(ins.opcode);
     if (op == up::OpCode::kSoftmaxXEntFwd) {
@@ -379,6 +461,11 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   eval_softmax_rows_ = eval_softmax_rows;
   eval_softmax_cols_ = eval_softmax_cols;
   eval_tail_ = eval_tail;
+  // A new plan needs its own source binding: the old file (if any) was
+  // verified against another plan's hash.
+  if (source_.data) (void)backend_->BindSource(nullptr, 0);
+  source_.Release();
+  source_required_ = source_required;
   plan_ = plan;
   plan_size_ = plan_size;
   rodata_ = plan + header.rodata_offset;
@@ -534,6 +621,11 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
   if (!arena_) return diag::executing::Error("no plan loaded");
   if (eval_program_.empty())
     return diag::executing::Error("plan carries no eval program");
+  if (source_required_ > 0 && !source_.data)
+    return diag::executing::Error(
+        "this plan scores the shipped model: its eval program reads the "
+        "student's f32 weights from the source model file — bind it with "
+        "BindSourceModel before evaluating");
   if (auto r = ValidateDataset(data); !r) return std::unexpected(r.error());
 
   // Every evaluation of a given set must score the same sample sequence:

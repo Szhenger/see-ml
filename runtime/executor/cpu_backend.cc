@@ -52,6 +52,11 @@ class CpuBackend final : public ExecutorBackend {
     rodata_ = rodata;
     return {};
   }
+  std::expected<void, std::string> BindSource(const uint8_t* data,
+                                              uint64_t) override {
+    source_ = data;
+    return {};
+  }
 
   void Configure(const k::KernelPolicy& policy) override { policy_ = policy; }
 
@@ -65,6 +70,8 @@ class CpuBackend final : public ExecutorBackend {
     const uint64_t offset = up::RefOffset(ref);
     if (up::IsRodataRef(ref))
       return reinterpret_cast<const float*>(rodata_ + offset);
+    if (up::IsSourceRef(ref))  // v17: validated against the bound file
+      return reinterpret_cast<const float*>(source_ + offset);
     return reinterpret_cast<const float*>(arena_ + offset);
   }
   const int8_t* ReadPtrQ8(uint64_t ref) const {
@@ -82,6 +89,7 @@ class CpuBackend final : public ExecutorBackend {
 
   uint8_t* arena_ = nullptr;
   const uint8_t* rodata_ = nullptr;
+  const uint8_t* source_ = nullptr;  // v17: the bound source model file
   k::KernelPolicy policy_;  // the plan header's tiles; defaults until told
 };
 

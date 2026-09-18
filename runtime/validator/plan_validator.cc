@@ -59,7 +59,7 @@ bool FusedProgramOk(uint64_t stages_word, uint64_t imm_word,
 
 std::expected<void, std::string> ValidateInstructionImpl(
     const up::UpdateInstruction& ins, uint64_t arena_size,
-    uint64_t rodata_size, uint32_t plan_version,
+    uint64_t rodata_size, uint32_t plan_version, bool allow_source,
     InstructionExtents* extents) {
   // Flags discipline before any operand math. Pre-v5 plans predate the
   // flags vocabulary: a nonzero word there is corruption, not a feature.
@@ -136,6 +136,11 @@ std::expected<void, std::string> ValidateInstructionImpl(
                       uint64_t elem_bytes) {
     if (ref == up::kNullRef) return false;
     if (write && up::IsRodataRef(ref)) return false;
+    // A source ref (v17): read-only f32, in the eval program only.
+    const bool source = up::IsSourceRef(ref);
+    if (source && (write || !allow_source ||
+                   plan_version < up::kSeeuShippedEvalVersion))
+      return false;
     if (elems == 0) return false;
     uint64_t bytes = 0;
     if (!MulOk(elems, elem_bytes, &bytes)) return false;
@@ -144,10 +149,12 @@ std::expected<void, std::string> ValidateInstructionImpl(
     // blindly": a misaligned offset is UB, and a bus error on the
     // strict-alignment targets this runtime ships to.
     if (up::RefOffset(ref) % elem_bytes != 0) return false;
-    const uint64_t space = up::IsRodataRef(ref) ? rodata_size : arena_size;
+    const uint64_t space = source ? kSourceSpaceLimit
+                           : up::IsRodataRef(ref) ? rodata_size
+                                                  : arena_size;
     if (!RangeOk(up::RefOffset(ref), bytes, space)) return false;
     ranges[num_ranges++] = {up::RefOffset(ref), bytes, write,
-                            up::IsRodataRef(ref)};
+                            up::IsRodataRef(ref), source};
     return true;
   };
   auto ref_ok = [&](uint64_t ref, uint64_t elems, bool write) {
@@ -166,7 +173,9 @@ std::expected<void, std::string> ValidateInstructionImpl(
       for (size_t j = i + 1; j < num_ranges; ++j) {
         const OperandRange& a = ranges[i];
         const OperandRange& b = ranges[j];
-        if (!(a.write || b.write) || a.rodata != b.rodata) continue;
+        if (!(a.write || b.write) || a.rodata != b.rodata ||
+            a.source != b.source)
+          continue;
         if (a.bytes == 0 || b.bytes == 0) continue;
         if (a.off < b.off + b.bytes && b.off < a.off + a.bytes)
           return diag::validating::Error(
@@ -583,18 +592,18 @@ std::expected<void, std::string> ValidateInstructionImpl(
 
 std::expected<void, std::string> ValidateInstruction(
     const up::UpdateInstruction& ins, uint64_t arena_size,
-    uint64_t rodata_size, uint32_t plan_version) {
+    uint64_t rodata_size, uint32_t plan_version, bool allow_source) {
   InstructionExtents extents;
   return ValidateInstructionImpl(ins, arena_size, rodata_size, plan_version,
-                                 &extents);
+                                 allow_source, &extents);
 }
 
 std::expected<InstructionExtents, std::string> DescribeInstruction(
     const up::UpdateInstruction& ins, uint64_t arena_size,
-    uint64_t rodata_size, uint32_t plan_version) {
+    uint64_t rodata_size, uint32_t plan_version, bool allow_source) {
   InstructionExtents extents;
   if (auto r = ValidateInstructionImpl(ins, arena_size, rodata_size,
-                                       plan_version, &extents);
+                                       plan_version, allow_source, &extents);
       !r)
     return std::unexpected(r.error());
   return extents;

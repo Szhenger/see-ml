@@ -7,7 +7,7 @@
   },
   "sds": {"magic": 827540563, "version": 2, "min_version": 1, "header_bytes": 40, "label_kind_max": 2},
   "seeu": {
-    "magic": 1430603091, "version": 16, "oldest_readable": 4,
+    "magic": 1430603091, "version": 17, "oldest_readable": 4,
     "rodata_bit": 63, "rodata_alignment": 16384, "gemm_panel_floats": 8192,
     "flags": {"epilogue_bias": 1, "epilogue_act_shift": 1, "epilogue_act_mask": 6, "gemm_addend": 8},
     "fused_stages": {"end": 0, "add": 1, "mul": 2, "scale": 3, "relu": 4, "gelu": 5, "silu": 6},

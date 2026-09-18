@@ -42,9 +42,11 @@ inline bool RangeOk(uint64_t off, uint64_t bytes, uint64_t size) {
 /// joining the bounds and overlap discipline; kGemmNNQ8: activation only —
 /// its in[3] is the dequant scale). An unknown bit is a hard error, never a
 /// silent skip.
+/// `allow_source`: the instruction belongs to the eval program, the one
+/// stream that may read the source model file (v17).
 [[nodiscard]] std::expected<void, std::string> ValidateInstruction(
     const seeml::update::UpdateInstruction& ins, uint64_t arena_size,
-    uint64_t rodata_size, uint32_t plan_version);
+    uint64_t rodata_size, uint32_t plan_version, bool allow_source = false);
 
 /// One operand's byte extent as the validator derived it — the same
 /// arithmetic the kernels use for their loop bounds.
@@ -53,7 +55,14 @@ struct OperandExtent {
   uint64_t bytes = 0;
   bool write = false;
   bool rodata = false;
+  bool source = false;  // v17: the bound source model file (read-only)
 };
+
+/// The bound a source ref is checked against at load, before any file is
+/// bound: large enough for any model, small enough that offset arithmetic
+/// cannot overflow. The real file's size is checked at BindSourceModel
+/// against the extents the eval program proved.
+inline constexpr uint64_t kSourceSpaceLimit = 1ULL << 48;
 
 /// Every operand extent of one instruction (at most 8).
 struct InstructionExtents {
@@ -69,7 +78,7 @@ struct InstructionExtents {
 [[nodiscard]] std::expected<InstructionExtents, std::string>
 DescribeInstruction(const seeml::update::UpdateInstruction& ins,
                     uint64_t arena_size, uint64_t rodata_size,
-                    uint32_t plan_version);
+                    uint32_t plan_version, bool allow_source = false);
 
 }  // namespace seeml::update_rt
 

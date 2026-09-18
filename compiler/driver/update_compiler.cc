@@ -154,13 +154,15 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   // --- 0. Fail fast: prove the training footprint fits local memory. -------
   // The teacher is a frozen forward — no backward caches its activations —
   // so it is estimated at its peak, not its sum; and --quantize-base stores
-  // frozen weights as int8 rodata at 1/4 size (under-counting the
+  // the student's frozen weights as int8 rodata at 1/4 size (under-counting the
   // unselected remainder keeps the bound a lower bound). Both matter:
   // an over-count here refuses compiles the exact final gate would pass.
   TrainingFootprint footprint = EstimateTrainingFootprint(source, batch);
+  // Only the student's weights take int8 storage: the teacher stays f32
+  // (E12 — it is the distillation target), so it is added after the cut.
+  if (config_.quantize_base) footprint.weight_bytes /= 4;
   if (wants_teacher)
     footprint += EstimateFrozenForwardFootprint(*teacher, batch);
-  if (config_.quantize_base) footprint.weight_bytes /= 4;
   // The merged deltas are full-size f32 whatever the base is stored as
   // (finding #8): under --quantize-base, 4x the weights they patch.
   footprint.delta_bytes =
@@ -624,7 +626,47 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
                                  "program");
   }
 
-  auto eval_instrs = LowerOps(primal_ops, resolve_train, quant_scales, bf16_weights);
+  // --- The eval program scores what ships (E12, #95, plan v17). ------------
+  // Training runs against the narrow copies (that is the memory the int8 /
+  // bf16 base buys); the commit patches the f32 weights of the source file.
+  // So the eval program — every gate and best-state score — reads those
+  // f32 weights straight from the file (source refs, bound at run time),
+  // and its GEMMs lower as plain f32 ones: W_f32 + (α/r)·A·B, the committed
+  // function up to the rounding of one addition per element. Possible only
+  // for a model that came from a file (the offsets and the hash that binds
+  // them); an in-memory compile keeps the in-plan proxy, and says so.
+  std::unordered_set<const sir::Value*> shipped;
+  const bool from_file = source.content_hash != 0;
+  auto narrow_student = [&](const sir::Value* v) {
+    auto src = build.weight_sources.find(v);
+    return src != build.weight_sources.end() &&
+           !std::string_view(v->id()).starts_with("t::") &&
+           src->second->data_offset != 0;
+  };
+  if (from_file) {
+    for (const auto& [w, s] : quant_scales)
+      if (narrow_student(w)) shipped.insert(w);
+    for (const sir::Value* w : bf16_weights)
+      if (narrow_student(w)) shipped.insert(w);
+  }
+  if (!from_file && (!quant_scales.empty() || !bf16_weights.empty()))
+    seeml::diag::Note(generating::kDriver,
+                      "the model was not loaded from a file, so the eval "
+                      "program scores the narrow in-plan weights — a proxy "
+                      "for the committed f32 model");
+  auto resolve_eval =
+      [&](const sir::Value* v) -> std::expected<uint64_t, std::string> {
+    if (shipped.contains(v))
+      return MakeSourceRef(build.weight_sources.at(v)->data_offset);
+    return resolve_train(v);
+  };
+  std::unordered_map<const sir::Value*, float> eval_quant;
+  for (const auto& [w, s] : quant_scales)
+    if (!shipped.contains(w)) eval_quant.emplace(w, s);
+  std::unordered_set<const sir::Value*> eval_bf16;
+  for (const sir::Value* w : bf16_weights)
+    if (!shipped.contains(w)) eval_bf16.insert(w);
+  auto eval_instrs = LowerOps(primal_ops, resolve_eval, eval_quant, eval_bf16);
   if (!eval_instrs) return std::unexpected(eval_instrs.error());
 
   auto resolve_merge =
@@ -909,6 +951,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   result.merge_instruction_count = header.merge_instr_count;
   result.eval_instruction_count = header.eval_instr_count;
   result.rodata_size = header.rodata_size;
+  result.scores_shipped = !shipped.empty();
   // What the plan carries, from the pass that decided on exact shapes.
   result.attention_tiled =
       attention_decision.tiled && attention_decision.attention_ops > 0;

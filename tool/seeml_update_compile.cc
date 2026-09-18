@@ -522,6 +522,7 @@ int main(int argc, char** argv) {
                  "  \"effective_batch\": %" PRIu64 ",\n"
                  "  \"quantized_base\": %s,\n"
                  "  \"bf16_base\": %s,\n"
+                 "  \"validation_scores\": \"%s\",\n"
                  "  \"attention\": {\"family\": \"%s\", "
                  "\"cached_probs_bytes\": %" PRIu64 "},\n"
                  "  \"embedded_tu\": %s,\n"
@@ -544,6 +545,7 @@ int main(int argc, char** argv) {
                  static_cast<uint64_t>(config.batch) * compiled->grad_accum_steps,
                  config.quantize_base ? "true" : "false",
                  config.bf16_base ? "true" : "false",
+                 compiled->scores_shipped ? "shipped" : "plan",
                  compiled->attention_tiled ? "tiled" : "cached",
                  compiled->probs_cache_bytes,
                  embedded_tu_json.c_str(), policy->source.c_str(),
