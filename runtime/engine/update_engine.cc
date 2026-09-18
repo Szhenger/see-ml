@@ -219,12 +219,26 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   uint64_t eval_probs_ref = up::kNullRef;
   uint64_t eval_softmax_rows = 0;
   uint64_t eval_softmax_cols = 0;
-  for (const up::UpdateInstruction& ins : eval)
-    if (static_cast<up::OpCode>(ins.opcode) == up::OpCode::kSoftmaxXEntFwd) {
+  // The eval program's loss instruction, when the loss slot is exactly one
+  // row-separable loss (G13, #97): the wrapped duplicates of a final
+  // partial batch can then be excluded from the reported loss exactly, as
+  // they already are from accuracy. A composite loss (xent + KL, pure KL)
+  // is not row-separable from what the program keeps; it is weighted.
+  EvalTail eval_tail;
+  for (const up::UpdateInstruction& ins : eval) {
+    const auto op = static_cast<up::OpCode>(ins.opcode);
+    if (op == up::OpCode::kSoftmaxXEntFwd) {
       eval_probs_ref = ins.in[3];
       eval_softmax_rows = ins.out[0];
       eval_softmax_cols = ins.out[1];
+      if (ins.in[2] == header.loss_ref && ins.out[0] == header.batch)
+        eval_tail = {EvalTail::kXent, ins.in[3], ins.in[1], ins.out[1]};
+    } else if (op == up::OpCode::kMseFwd && ins.in[2] == header.loss_ref &&
+               header.batch > 0 && ins.out[0] % header.batch == 0) {
+      eval_tail = {EvalTail::kMse, ins.in[0], ins.in[1],
+                   ins.out[0] / header.batch};
     }
+  }
 
   // Class count for validating class-index labels at Train() time. The raw
   // dataset labels feed every softmax kernel in every program, so the check
@@ -364,6 +378,7 @@ std::expected<void, std::string> UpdateEngine::Initialize(const uint8_t* plan,
   eval_probs_ref_ = eval_probs_ref;
   eval_softmax_rows_ = eval_softmax_rows;
   eval_softmax_cols_ = eval_softmax_cols;
+  eval_tail_ = eval_tail;
   plan_ = plan;
   plan_size_ = plan_size;
   rodata_ = plan + header.rodata_offset;
@@ -562,6 +577,15 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
                                 samples_per_step);
   double total = 0.0;
   uint64_t correct = 0, counted = 0;
+  // The final batch wraps when the set is not a whole number of batches:
+  // its last rows are duplicates of samples already scored. Its loss is
+  // then taken over the real rows alone (G13, #97) — exactly, from the
+  // row-separable loss's own operands, or by real-row weight for a
+  // composite loss. A set of whole batches keeps the plain mean of the
+  // batch losses, bit for bit.
+  const bool ragged = data.num_samples() % samples_per_step != 0;
+  double real_row_loss = 0.0;   // sum of per-row losses over real rows
+  uint64_t real_rows = 0;
   {
     BatchPipeline feeder(data, header_.batch, header_.input_floats,
                          header_.label_kind == 0 ? 0 : header_.label_bytes);
@@ -572,6 +596,15 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
         return std::unexpected(r.error());
       }
       total += LossValue();
+      if (ragged) {
+        const uint64_t served_samples = b * samples_per_step;
+        const uint64_t real_here =
+            std::min<uint64_t>(samples_per_step,
+                               data.num_samples() - served_samples) *
+            rows_per_sample;
+        real_row_loss += RealRowLoss(real_here, label_slot);
+        real_rows += real_here;
+      }
       if (track_accuracy) {
         // Rows past the dataset's tail in the final batch are wrapped
         // duplicates — the loss's fixed-shape mean cannot exclude them, but
@@ -617,7 +650,9 @@ std::expected<EvalMetrics, std::string> UpdateEngine::EvaluateMetrics(
   }
   data.RestoreServingPos(entry_pos);
   EvalMetrics m;
-  m.loss = static_cast<float>(total / static_cast<double>(batches));
+  m.loss = static_cast<float>(
+      ragged ? real_row_loss / static_cast<double>(real_rows)
+             : total / static_cast<double>(batches));
   if (track_accuracy && counted > 0) {
     m.accuracy = static_cast<float>(static_cast<double>(correct) /
                                     static_cast<double>(counted));
@@ -945,6 +980,50 @@ std::expected<TrainReport, std::string> UpdateEngine::TrainImpl(
     }
   }
   return report;
+}
+
+double UpdateEngine::RealRowLoss(uint64_t real,
+                                 const uint8_t* label_slot) const {
+  // The sum of the per-row losses of the batch just evaluated over its
+  // first `real` rows — each row's loss evaluated with the loss kernel's
+  // own expression, so a full batch sums to rows x the kernel's mean up to
+  // the order of a double sum.
+  switch (eval_tail_.kind) {
+    case EvalTail::kXent: {
+      const float* probs = ReadPtr(eval_tail_.a);
+      const auto* labels = reinterpret_cast<const int32_t*>(label_slot);
+      double sum = 0.0;
+      for (uint64_t r = 0; r < real; ++r) {
+        const float p = probs[r * eval_tail_.width +
+                              static_cast<uint64_t>(labels[r])];
+        const double safe = std::isnan(p)
+                                ? static_cast<double>(p)
+                                : static_cast<double>(std::fmax(p, 1e-12f));
+        sum -= std::log(safe);
+      }
+      return sum;
+    }
+    case EvalTail::kMse: {
+      // MseFwd is the mean over every element; a row's share is the sum of
+      // its squared differences over the elements per row, scaled so the
+      // real rows' mean is the mean over their elements.
+      const float* pred = ReadPtr(eval_tail_.a);
+      const float* target = ReadPtr(eval_tail_.b);
+      const uint64_t w = eval_tail_.width;
+      double sum = 0.0;
+      for (uint64_t i = 0; i < real * w; ++i) {
+        const double d = static_cast<double>(pred[i]) - target[i];
+        sum += d * d;
+      }
+      return sum / static_cast<double>(w);
+    }
+    case EvalTail::kWeighted:
+      break;
+  }
+  // A composite loss keeps no per-row values: the batch's mean stands for
+  // each of its real rows (the duplicates' influence on that mean remains;
+  // documented in docs/runtime.md).
+  return static_cast<double>(LossValue()) * static_cast<double>(real);
 }
 
 void UpdateEngine::SnapshotBest(uint64_t step, float loss, float accuracy) {

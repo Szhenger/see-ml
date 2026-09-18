@@ -8,6 +8,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -956,6 +957,36 @@ TEST(ClipNorm, ZeroGradientAndZeroCapAreExact) {
   for (float v : h) EXPECT_EQ(v, 0.0f);
 }
 
+TEST(ClipNorm, AVectorAboveTheCapLandsOnIt) {
+  // G13 (#97): ||g|| = 13 over a cap of 2 — the clipped vector's norm is
+  // the cap, to the rounding of one f32 scale factor per element.
+  std::vector<float> g = {3.0f, -4.0f, 12.0f};
+  k::ClipNorm(g.data(), g.size(), 2.0f);
+  double norm = 0.0;
+  for (float v : g) norm += static_cast<double>(v) * v;
+  EXPECT_NEAR(std::sqrt(norm), 2.0, 2.0 * 4e-7);
+  EXPECT_NEAR(g[0], 3.0f * 2.0f / 13.0f, 1e-6);
+  // A vector under the cap is returned unchanged, bit for bit.
+  std::vector<float> h = {0.1f, -0.2f};
+  const std::vector<float> h0 = h;
+  k::ClipNorm(h.data(), h.size(), 2.0f);
+  EXPECT_BITWISE_EQ_F32(h0, h);
+}
+
+TEST(ClipNorm, ANonFiniteGradientIsNeverScrubbedToFinite) {
+  // G13 (#97): an inf or NaN element must survive the clip as a non-finite
+  // value — the engine's finite-loss guard is what stops the update, and a
+  // clip that turned the poison into zeros would hide it (the fused-clip
+  // steps refuse such a tensor outright; this is the standalone kernel).
+  for (const float bad : {INFINITY, -INFINITY, NAN}) {
+    std::vector<float> g = {1.0f, bad, 2.0f};
+    k::ClipNorm(g.data(), g.size(), 1.0f);
+    bool non_finite = false;
+    for (float v : g) non_finite = non_finite || !std::isfinite(v);
+    EXPECT_TRUE(non_finite);
+  }
+}
+
 TEST(LayerNorm, ZeroVarianceRowNormalizesToBeta) {
   const size_t rows = 1, cols = 4;
   const std::vector<float> x(cols, 7.25f);  // constant row: variance 0
@@ -1328,6 +1359,84 @@ constexpr GemmShape kGemmShapes[] = {
     {8, 1100, 300},                                   // column bands
     {2, 700, 900},  {257, 33, 64},  {66, 131, 65},    // NT pairing edges
 };
+
+TEST(GemmRedesign, SixVariantsAgainstADoubleReferenceAtATileCrossingShape) {
+  // G13 (#97): the bitwise tests compare each kernel with the reduction
+  // expression it is specified to compute; this compares every variant's
+  // VALUES with a double-precision product, at M = 37, N = 517, K = 131 —
+  // ragged in K % 4 and N % 4, crossing the K and N tiles and the NT
+  // pairing — at 1 and 8 threads. The Algorithm Review ran this by hand
+  // (6.2e-6 max relative error); now it is a test.
+  const size_t M = 37, N = 517, K = 131;
+  const auto A = RandnVector(M * K, 3701);
+  const auto B = RandnVector(K * N, 3702);   // [K, N] for NN / TN / Acc
+  const auto Bt = RandnVector(N * K, 3703);  // [N, K] for NT
+  const auto At = RandnVector(K * M, 3704);  // [K, M] for TN
+  const auto C0 = RandnVector(M * N, 3705);
+  std::vector<int8_t> q(K * N), qt(N * K);
+  for (size_t i = 0; i < q.size(); ++i) {
+    q[i] = static_cast<int8_t>((i * 131 + 17) % 255 - 127);
+    qt[i] = static_cast<int8_t>((i * 89 + 5) % 255 - 127);
+  }
+  const float qs = 0.0137f, alpha = 0.375f;
+  auto check = [&](const char* what, const std::vector<float>& got,
+                   auto&& ref) {
+    double worst = 0.0;
+    for (size_t m = 0; m < M; ++m)
+      for (size_t n = 0; n < N; ++n) {
+        double sum = 0.0, mag = 0.0;
+        for (size_t kk = 0; kk < K; ++kk) {
+          const double t = ref(m, n, kk);
+          sum += t;
+          mag += std::fabs(t);
+        }
+        sum = ref.finish(m, n, sum);
+        const double err = std::fabs(got[m * N + n] - sum) / (1.0 + mag);
+        worst = std::max(worst, err);
+      }
+    EXPECT_TRUE(worst < 2e-6);
+    if (!(worst < 2e-6))
+      ADD_FAILURE(std::string(what) + ": worst scaled error " +
+                  std::to_string(worst));
+  };
+  struct Plain {
+    std::function<double(size_t, size_t, size_t)> term;
+    double operator()(size_t m, size_t n, size_t k) const { return term(m, n, k); }
+    double finish(size_t, size_t, double s) const { return s; }
+  };
+  struct Acc {
+    const std::vector<float>* c0;
+    std::function<double(size_t, size_t, size_t)> term;
+    size_t N;
+    double operator()(size_t m, size_t n, size_t k) const { return term(m, n, k); }
+    double finish(size_t m, size_t n, double s) const {
+      return (*c0)[m * N + n] + s;
+    }
+  };
+  for (const size_t threads : {size_t{1}, size_t{8}}) {
+    ScopedThreads scoped(threads);
+    std::vector<float> c(M * N);
+    k::GemmNN(A.data(), B.data(), c.data(), M, N, K);
+    check("nn", c, Plain{[&](size_t m, size_t n, size_t kk) {
+      return static_cast<double>(A[m * K + kk]) * B[kk * N + n]; }});
+    k::GemmNT(A.data(), Bt.data(), c.data(), M, N, K);
+    check("nt", c, Plain{[&](size_t m, size_t n, size_t kk) {
+      return static_cast<double>(A[m * K + kk]) * Bt[n * K + kk]; }});
+    k::GemmTN(At.data(), B.data(), c.data(), M, N, K);
+    check("tn", c, Plain{[&](size_t m, size_t n, size_t kk) {
+      return static_cast<double>(At[kk * M + m]) * B[kk * N + n]; }});
+    c = C0;
+    k::GemmAccNN(A.data(), B.data(), c.data(), M, N, K, alpha);
+    check("acc", c, Acc{&C0, [&](size_t m, size_t n, size_t kk) {
+      return alpha * static_cast<double>(A[m * K + kk]) * B[kk * N + n]; }, N});
+    k::GemmNNQ8(A.data(), q.data(), c.data(), M, N, K, qs);
+    check("nn.q8", c, Plain{[&](size_t m, size_t n, size_t kk) {
+      return qs * static_cast<double>(A[m * K + kk]) * q[kk * N + n]; }});
+    k::GemmNTQ8(A.data(), qt.data(), c.data(), M, N, K, qs);
+    check("nt.q8", c, Plain{[&](size_t m, size_t n, size_t kk) {
+      return qs * static_cast<double>(A[m * K + kk]) * qt[n * K + kk]; }});
+  }
+}
 
 TEST(GemmRedesign, TheNNFamilyIsTheReferenceReductionExactly) {
   for (const GemmShape& sh : kGemmShapes) {
