@@ -48,6 +48,7 @@
 //     u8 kind; str name; u8 num_inputs; str inputs[num_inputs]; str output;
 //     u32 attr0                                  (v3+ only; per-kind meaning)
 //     u32 attr1                                  (v5+ only; per-kind meaning)
+//     u32 attr2                                  (v6+ only; per-kind meaning)
 //   data section: each constant tensor's f32 blob at its 64-aligned data_offset
 //
 // The absolute data_offset of every weight is preserved through compilation —
@@ -69,8 +70,13 @@ inline constexpr uint32_t kSmfMagic = 0x31464D53;  // "SMF1" little-endian
 // bits of the rotary base θ (0 = the classic 10000); 0 elsewhere. Without
 // it a Llama-3 (θ=500k) or Qwen (θ=1M) port compiled cleanly to the wrong
 // rotation — "unsupported" silently became "wrong".
-// Readers accept v1..v5; the writer emits v5.
-inline constexpr uint32_t kSmfVersion = 5;
+// v6 (P7, #96) adds a third per-op u32 attr2 after attr1: for kLayerNorm and
+// kRmsNorm the f32 bits of the normalization epsilon (0 = 1e-5, the value
+// every earlier file meant); 0 elsewhere. Qwen2-class models (1e-6) used to
+// fine-tune against a forward that was not their own.
+// Readers accept v1..v6; the C++ writer emits v6, the Python exporter the
+// lowest version that carries the model.
+inline constexpr uint32_t kSmfVersion = 6;
 inline constexpr uint32_t kSmfMinVersion = 1;
 
 // SMF is read/written by memcpy of host integers; the documented on-disk
@@ -198,7 +204,14 @@ struct SmfOp {
   // v5: second per-kind scalar — for kRope the f32 bits of the rotary base
   // θ (0 = kSmfDefaultRopeBase); 0 elsewhere (and for every pre-v5 file).
   uint32_t attr1 = 0;
+  // v6: third per-kind scalar — for kLayerNorm / kRmsNorm the f32 bits of
+  // the normalization epsilon (0 = kSmfDefaultNormEps); 0 elsewhere.
+  uint32_t attr2 = 0;
 };
+
+/// The epsilon a norm op means when its attr2 is zero (pre-v6 files, and
+/// v6 writers that leave the default).
+inline constexpr float kSmfDefaultNormEps = 1e-5f;
 
 /// The rotary base a kRope op means when its attr1 is zero (pre-v5 files,
 /// and v5 writers that leave the default).

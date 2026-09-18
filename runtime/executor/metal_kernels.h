@@ -643,7 +643,7 @@ kernel void k_layernorm_fwd(KSIG, uint g [[thread_position_in_grid]],
     const float d = x[c] - mu;
     var += d * d;
   }
-  const float rs = 1.0f / sqrt(simd_sum_tree(var) / (float)cols + 1e-5f);
+  const float rs = 1.0f / sqrt(simd_sum_tree(var) / (float)cols + p.f[0]);
   if (lane == 0u) {
     WF(4)[r] = mu;
     WF(5)[r] = rs;
@@ -687,7 +687,7 @@ kernel void k_rmsnorm_fwd(KSIG, uint g [[thread_position_in_grid]],
   device float* y = WF(2) + (ulong)r * cols;
   float ss = 0.0f;
   for (uint c = lane; c < cols; c += 32u) ss += x[c] * x[c];
-  const float rs = 1.0f / sqrt(simd_sum_tree(ss) / (float)cols + 1e-5f);
+  const float rs = 1.0f / sqrt(simd_sum_tree(ss) / (float)cols + p.f[0]);
   if (lane == 0u) WF(3)[r] = rs;
   for (uint c = lane; c < cols; c += 32u) y[c] = x[c] * rs * gamma[c];
 }

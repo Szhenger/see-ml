@@ -93,7 +93,14 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // / kAttnDVTiled, four opcodes that keep O(B·H·S) attention state instead
 // of the O(B·H·S²) probability cache. Additive, rejected below v15;
 // bit-identical to the cached family they stand in for.
-inline constexpr uint32_t kSeeuVersion = 15;
+// v16: the normalization epsilon (P7, #96) — the instruction's former pad
+// word is `imm`, and kLayerNormFwd / kRmsNormFwd carry the epsilon's f32
+// bits in it (0 = 1e-5, what every earlier plan meant). Additive: a
+// nonzero imm anywhere else, or below v16, is corruption.
+inline constexpr uint32_t kSeeuVersion = 16;
+
+// The version that gave the instruction's imm word meaning.
+inline constexpr uint32_t kSeeuNormEpsVersion = 16;
 
 // The version that introduced the tiled attention family.
 inline constexpr uint32_t kSeeuTiledAttentionVersion = 15;

@@ -352,6 +352,20 @@ SmfModel Tokenize(SmfModel m, int64_t vocab, int64_t dim, uint64_t seed) {
 
 }  // namespace
 
+SmfModel MakeTiedTokenDecoder(int64_t dim, int64_t heads, int64_t seq,
+                              int64_t ffn, uint64_t seed) {
+  // The token decoder with its LM head TIED to the embedding table, as in
+  // GPT-2, Gemma, Llama-3.2-1B and Qwen-0.5B: vocab == dim so the one
+  // [V, D] table is both the gather's rows and the head's [D, V] weight.
+  SmfModel m = Tokenize(MakeTinyDecoder(dim, heads, seq, ffn, dim, seed), dim,
+                        dim, seed);
+  for (update::SmfOp& op : m.ops)
+    if (op.name == "mmh") op.inputs[1] = "emb";
+  std::erase_if(m.tensors,
+                [](const update::SmfTensor& t) { return t.name == "wh"; });
+  return m;
+}
+
 SmfModel MakeTinyTokenDecoder(int64_t vocab, int64_t dim, int64_t heads,
                               int64_t seq, int64_t ffn, uint64_t seed) {
   // The decoder block of MakeTinyDecoder, fed by an embedding gather over

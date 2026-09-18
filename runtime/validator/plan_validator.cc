@@ -96,6 +96,24 @@ std::expected<void, std::string> ValidateInstructionImpl(
           "GEMM addend combined with a bias / activation epilogue (opcode " +
           std::to_string(ins.opcode) + ")");
   }
+  // The imm word (v16): defined on the normalization forwards only, as a
+  // finite positive epsilon's f32 bits (0 = 1e-5). Before v16 it was a pad
+  // word every compiler wrote as zero; a nonzero value anywhere it is not
+  // defined would be ignored by Execute(), so it dies here.
+  if (ins.imm != 0) {
+    const auto opcode = static_cast<up::OpCode>(ins.opcode);
+    const bool norm_fwd = opcode == up::OpCode::kLayerNormFwd ||
+                          opcode == up::OpCode::kRmsNormFwd;
+    if (!norm_fwd || plan_version < up::kSeeuNormEpsVersion)
+      return diag::validating::Error(
+          "instruction carries an imm word its opcode does not define "
+          "(opcode " + std::to_string(ins.opcode) + ", plan v" +
+          std::to_string(plan_version) + ")");
+    const float eps = std::bit_cast<float>(ins.imm);
+    if (!std::isfinite(eps) || !(eps > 0.0f))
+      return diag::validating::Error(
+          "normalization epsilon must be a finite positive float");
+  }
   // Every kernel is compiled with SEEML_RESTRICT pointers: a written range
   // overlapping any *other* operand of the same instruction is undefined
   // behavior, not a wrong answer. Bounds alone don't rule that out, so each

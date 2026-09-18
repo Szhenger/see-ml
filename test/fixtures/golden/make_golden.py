@@ -7,6 +7,8 @@ and the C++ core must read, value for value.
   mlp.smf      a 4 -> 3 linear layer (MatMul + AddBias), SMF v3
   class.sds    5 feature rows of width 4 with class labels, SDS v1
   tokens.sds   3 token records of 4 + 1 ids, SDS v2
+  eps6.smf     a one-block pre-embedded decoder whose RmsNorms carry a
+               Qwen2-style epsilon of 1e-6, SMF v6 (P7, #96)
 
 Every value is a small dyadic rational, exact in float32, so the C++ suite
 (test/compiler/frontend/golden_fixture_test.cc) can state them as literals.
@@ -24,6 +26,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "..", "..", "tool"))
 import export_model as em  # noqa: E402
 
 IN_DIM, OUT_DIM, ROWS = 4, 3, 5
+EPS6 = 1e-6  # a Qwen2-class rms_norm_eps
 RECORDS, SEQ, VOCAB = 3, 4, 7
 
 
@@ -63,6 +66,19 @@ def write_all(out_dir):
     records = np.array([[token(r, k) for k in range(SEQ + 1)]
                         for r in range(RECORDS)], dtype="<i4")
     em.export_token_sds(records, os.path.join(out_dir, "tokens.sds"))
+
+    dim, ffn = 4, 4
+    def eye_ish(rows, cols, shift):
+        return np.array([[((i + shift) % cols == j) * 0.5 for j in range(cols)]
+                         for i in range(rows)], dtype="<f4")
+    block = {"ln1_g": np.ones(dim, "<f4"), "wq": eye_ish(dim, dim, 0),
+             "wk": eye_ish(dim, dim, 1), "wv": eye_ish(dim, dim, 2),
+             "wo": eye_ish(dim, dim, 3), "ln2_g": np.ones(dim, "<f4"),
+             "w_gate": eye_ish(dim, ffn, 0), "w_up": eye_ish(dim, ffn, 1),
+             "w_down": eye_ish(ffn, dim, 2)}
+    head = {"lnf_g": np.ones(dim, "<f4"), "w_head": eye_ish(dim, 3, 0)}
+    em.export_decoder_smf([block], head, os.path.join(out_dir, "eps6.smf"),
+                          seq_len=2, num_heads=2, norm_eps=EPS6)
 
 
 if __name__ == "__main__":

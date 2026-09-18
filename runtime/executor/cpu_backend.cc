@@ -166,7 +166,8 @@ std::expected<void, std::string> CpuBackend::Execute(
       k::LayerNormFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
                       ReadPtr(ins.in[2]), WritePtr(ins.in[3]),
                       WritePtr(ins.out[1]), WritePtr(ins.out[2]),
-                      ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
+                      ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                      up::NormEpsOf(ins.imm));
       break;
     case up::OpCode::kLayerNormBwd:
       k::LayerNormBwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
@@ -259,7 +260,8 @@ std::expected<void, std::string> CpuBackend::Execute(
     case up::OpCode::kRmsNormFwd:
       k::RmsNormFwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
                     WritePtr(ins.in[2]), WritePtr(ins.in[3]),
-                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu);
+                    ins.out[0] >> 32, ins.out[0] & 0xFFFFFFFFu,
+                    up::NormEpsOf(ins.imm));
       break;
     case up::OpCode::kRmsNormBwd:
       k::RmsNormBwd(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),

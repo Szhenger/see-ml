@@ -114,8 +114,10 @@ void ReduceRows(const float* dy, float* db, size_t rows, size_t cols);
 
 // --- LayerNorm over the last dim of x[N,D], affine gamma/beta[D] --------------
 // Forward caches per-row mean and reciprocal stddev for the backward kernel.
+// `eps` is the plan's (v16: the instruction's imm word; 1e-5 by default).
 void LayerNormFwd(const float* x, const float* gamma, const float* beta,
-                  float* y, float* mean, float* rstd, size_t rows, size_t cols);
+                  float* y, float* mean, float* rstd, size_t rows, size_t cols,
+                  float eps = seeml::update::kDefaultNormEps);
 void LayerNormBwd(const float* dy, const float* x, const float* gamma,
                   const float* mean, const float* rstd, float* dx, size_t rows,
                   size_t cols);
@@ -124,7 +126,8 @@ void LayerNormBwd(const float* dy, const float* x, const float* gamma,
 // y = x * rstd * gamma with rstd = 1/sqrt(mean(x^2) + eps); forward caches
 // per-row rstd for the backward kernel. No bias, no mean subtraction.
 void RmsNormFwd(const float* x, const float* gamma, float* y, float* rstd,
-                size_t rows, size_t cols);
+                size_t rows, size_t cols,
+                float eps = seeml::update::kDefaultNormEps);
 void RmsNormBwd(const float* dy, const float* x, const float* gamma,
                 const float* rstd, float* dx, size_t rows, size_t cols);
 

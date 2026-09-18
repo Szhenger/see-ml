@@ -2,6 +2,7 @@
 #define SEEML_SOURCE_PLAN_INSTRUCTION_H_
 
 #include <cstddef>
+#include <bit>
 #include <cstdint>
 
 // =============================================================================
@@ -259,14 +260,27 @@ inline constexpr uint16_t MakeEpilogueFlags(bool bias, EpilogueAct act) {
                                << kFlagEpilogueActShift);
 }
 
+/// The epsilon a normalization forward's imm word means (0 = 1e-5).
+inline constexpr float kDefaultNormEps = 1e-5f;
+inline float NormEpsOf(uint32_t imm) {
+  return imm == 0 ? kDefaultNormEps : std::bit_cast<float>(imm);
+}
+
 #pragma pack(push, 1)
 
 /// One 64-byte instruction: a single L1 cache line, mirroring the design of
 /// the inference-side SerializedInstruction in backend/serializer/schema.h.
+///
+/// `imm` (plan v16, P7 #96) is an opcode-defined 32-bit immediate. It was a
+/// pad word every compiler wrote as zero and no runtime read; from v16
+/// kLayerNormFwd and kRmsNormFwd carry the normalization epsilon's f32 bits
+/// there (0 = the classic 1e-5, so every earlier plan means what it always
+/// meant). On any other opcode, and on any opcode below v16, a nonzero imm
+/// is corruption — the flags word's discipline.
 struct UpdateInstruction {
   uint16_t opcode = 0;
   uint16_t flags = 0;
-  uint32_t pad = 0;
+  uint32_t imm = 0;
   uint64_t in[4] = {kNullRef, kNullRef, kNullRef, kNullRef};
   uint64_t out[3] = {0, 0, 0};
 };
