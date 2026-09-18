@@ -16,7 +16,7 @@ tool/
   seeml_seeu_dump.cc      the plan disassembler   (inspect any .seeu; --json for tools)
   seeml_abi.cc            the ABI manifest        ->  tool/seeml/abi.json (every format, from the headers)
   seeml/formats.py        the Python plane's one statement of those formats, held to abi.json
-  seeml_bench.cc          the benchmark harness  ->  one JSON per run
+  seeml_bench.cc          the benchmark harness  ->  one JSON per run (--attention-sweep: the two attention families)
   bench_compare.py        the nightly Tier A regression gate over two runs
   autotune.py             the offline tuner      ->  host-keyed kernel-policy table
   frontier_exec.py        the frontier executor  ->  runs a .seeu through NumPy / PyTorch / MLX

@@ -246,6 +246,11 @@ const std::unordered_map<std::string_view, VjpRule>& VjpRegistry() {
       // Decomposed VJP over the cached P:
       //   dP = dO V^T;  dS = P*(dP - rowsum(dP*P));
       //   dV = P^T dO;  dQ = (dS K)/sqrt(d);  dK = (dS^T Q)/sqrt(d)
+      // Tiled (E11, plan v15, the op carries "tiled"): the same adjoints
+      // from the stats row instead of P — every pass recomputes the
+      // probabilities it needs. dQ writes the softmax-backward rowsum into
+      // the stats row and dK reads it, so dQ is emitted first and nothing
+      // reorders a program.
       {"sc_high.attention",
        [](sir::Operation* op, AdContext& ctx) {
          sir::Value* q = op->operand(0);
@@ -266,6 +271,23 @@ const std::unordered_map<std::string_view, VjpRule>& VjpRegistry() {
                                    std::to_string(ctx.fresh_counter++),
                                sir::DataType::F32, like->shape());
          };
+         if (op->hasAttribute("tiled")) {
+           sir::Value* stats = probs;
+           // The dQ pass also produces delta, which dK consumes; it runs
+           // whenever either is needed (DCE keeps it: it writes storage).
+           if (ctx.Needs(q) || ctx.Needs(k)) {
+             sir::Value* dq = emit("sc_low.attn_dq_tiled",
+                                   {q, k, v, dout, stats}, q);
+             if (ctx.Needs(q)) ctx.Accumulate(q, dq);
+           }
+           if (ctx.Needs(k))
+             ctx.Accumulate(k, emit("sc_low.attn_dk_tiled",
+                                    {q, k, v, dout, stats}, k));
+           if (ctx.Needs(v))
+             ctx.Accumulate(v, emit("sc_low.attn_dv_tiled",
+                                    {q, k, v, dout, stats}, v));
+           return true;
+         }
          if (ctx.Needs(v)) ctx.Accumulate(v, emit("sc_low.attn_dv",
                                                   {probs, dout}, v));
          if (ctx.Needs(q) || ctx.Needs(k)) {

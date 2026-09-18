@@ -103,6 +103,10 @@ class DocumentedVersions(unittest.TestCase):
 
     def test_the_format_reference_headings(self):
         text = self.read("docs", "formats.md")
+        # The SEEU section also states its version in prose.
+        prose = f"(currently v{formats.SEEU_VERSION})"
+        self.assertTrue(prose in text,
+                        f"docs/formats.md does not say {prose!r}")
         for heading in (
                 f"(`.smf`, v{formats.SMF_VERSION})",
                 f"(`.sds`, v{formats.SDS_VERSION})",

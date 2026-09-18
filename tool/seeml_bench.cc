@@ -77,6 +77,7 @@
 #include "compiler/diagnostics/logger.h"
 #include "compiler/driver/update_compiler.h"
 #include "runtime/engine/update_engine.h"
+#include "runtime/executor/update_kernels.h"
 #include "source/identity/version.h"
 #include "source/parallel/parallel_for.h"
 #include "source/plan/update_types.h"
@@ -281,6 +282,135 @@ uint64_t GemmFlopsPerStep(const std::vector<uint8_t>& plan) {
   return flops;
 }
 
+// --- The attention sweep (docs/benchmarks.md, Tier B/C; E11 #94) -------------
+// `--attention-sweep` times the two attention families on the kernels
+// alone — the forward and the whole backward chain — over a sweep of S at
+// one (B, H, d), and prints one JSON object: per S and family, the median
+// forward and backward milliseconds of --repeats runs, the bytes each keeps
+// between forward and backward (the probability cache vs the stats row) and
+// its share of what the backward chain touches. This is the flash-attention
+// decision the bench doc names, run and recorded (the results are in the
+// doc) — and the two families compute identical bits, so it is a cost curve
+// and nothing else.
+
+struct AttnCell {
+  double fwd_ms, bwd_ms;
+  uint64_t live_bytes;   // kept from forward to backward
+  uint64_t chain_bytes;  // everything the backward chain reads and writes
+};
+
+template <typename F>
+double MedianMs(uint64_t repeats, F&& run) {
+  std::vector<double> ms;
+  for (uint64_t r = 0; r < repeats; ++r) {
+    const auto t0 = std::chrono::steady_clock::now();
+    run();
+    ms.push_back(std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - t0)
+                     .count());
+  }
+  std::sort(ms.begin(), ms.end());
+  return ms[ms.size() / 2];
+}
+
+AttnCell SweepCached(const std::vector<float>& q, const std::vector<float>& k,
+                     const std::vector<float>& v, const std::vector<float>& dout,
+                     size_t B, size_t S, size_t H, size_t d, uint64_t repeats) {
+  namespace kn = rt::kernels;
+  const size_t act = B * S * H * d, pm = B * H * S * S;
+  std::vector<float> o(act), probs(pm), dp(pm), ds(pm), dq(act), dk(act), dv(act);
+  AttnCell cell;
+  cell.fwd_ms = MedianMs(repeats, [&] {
+    kn::AttnFwd(q.data(), k.data(), v.data(), o.data(), probs.data(), B, S, H, d);
+  });
+  cell.bwd_ms = MedianMs(repeats, [&] {
+    kn::AttnDV(probs.data(), dout.data(), dv.data(), B, S, H, d);
+    kn::AttnDP(dout.data(), v.data(), dp.data(), B, S, H, d);
+    kn::SoftmaxRowsBwd(probs.data(), dp.data(), ds.data(), B * H * S, S);
+    kn::AttnDQ(ds.data(), k.data(), dq.data(), B, S, H, d);
+    kn::AttnDK(ds.data(), q.data(), dk.data(), B, S, H, d);
+  });
+  cell.live_bytes = pm * 4;
+  cell.chain_bytes = (3 * pm + 7 * act) * 4;  // P, dP, dS; q k v dO dq dk dv
+  return cell;
+}
+
+AttnCell SweepTiled(const std::vector<float>& q, const std::vector<float>& k,
+                    const std::vector<float>& v, const std::vector<float>& dout,
+                    size_t B, size_t S, size_t H, size_t d, uint64_t repeats) {
+  namespace kn = rt::kernels;
+  const size_t act = B * S * H * d, st = B * H * S * up::kAttnStatsWidth;
+  std::vector<float> o(act), stats(st), dq(act), dk(act), dv(act);
+  AttnCell cell;
+  cell.fwd_ms = MedianMs(repeats, [&] {
+    kn::AttnFwdTiled(q.data(), k.data(), v.data(), o.data(), stats.data(), B,
+                     S, H, d);
+  });
+  cell.bwd_ms = MedianMs(repeats, [&] {
+    kn::AttnDQTiled(q.data(), k.data(), v.data(), dout.data(), stats.data(),
+                    dq.data(), B, S, H, d);
+    kn::AttnDKTiled(q.data(), k.data(), v.data(), dout.data(), stats.data(),
+                    dk.data(), B, S, H, d);
+    kn::AttnDVTiled(q.data(), k.data(), dout.data(), stats.data(), dv.data(),
+                    B, S, H, d);
+  });
+  cell.live_bytes = st * 4;
+  cell.chain_bytes = (st + 7 * act) * 4;
+  return cell;
+}
+
+int AttentionSweep(const std::vector<size_t>& threads, uint64_t repeats,
+                   const std::string& out_path) {
+  if (repeats == 0) repeats = 1;
+  const size_t B = 1, H = 8, d = 64;
+  const size_t lengths[] = {64, 256, 1024, 2048};
+  std::string json = "{\n  \"schema\": 1,\n  \"attention_sweep\": {\"B\": 1, "
+                     "\"H\": 8, \"d\": 64, \"cells\": [";
+  bool first = true;
+  for (const size_t t : threads) {
+    up::SetParallelThreadCount(t);
+    for (const size_t S : lengths) {
+      const size_t act = B * S * H * d;
+      const auto q = seeml::testing::RandnVector(act, 11);
+      const auto k = seeml::testing::RandnVector(act, 12);
+      const auto v = seeml::testing::RandnVector(act, 13);
+      const auto dout = seeml::testing::RandnVector(act, 14);
+      const AttnCell c = SweepCached(q, k, v, dout, B, S, H, d, repeats);
+      const AttnCell tl = SweepTiled(q, k, v, dout, B, S, H, d, repeats);
+      char buf[512];
+      std::snprintf(
+          buf, sizeof(buf),
+          "%s\n    {\"threads\": %zu, \"S\": %zu, "
+          "\"cached\": {\"fwd_ms\": %.4f, \"bwd_ms\": %.4f, "
+          "\"live_bytes\": %llu, \"chain_bytes\": %llu}, "
+          "\"tiled\": {\"fwd_ms\": %.4f, \"bwd_ms\": %.4f, "
+          "\"live_bytes\": %llu, \"chain_bytes\": %llu}}",
+          first ? "" : ",", t, S, c.fwd_ms, c.bwd_ms,
+          (unsigned long long)c.live_bytes, (unsigned long long)c.chain_bytes,
+          tl.fwd_ms, tl.bwd_ms, (unsigned long long)tl.live_bytes,
+          (unsigned long long)tl.chain_bytes);
+      json += buf;
+      first = false;
+      std::fprintf(stderr,
+                   "seeml-bench: attention S=%zu t=%zu  cached fwd %.2f bwd "
+                   "%.2f ms  tiled fwd %.2f bwd %.2f ms  live %llu -> %llu B\n",
+                   S, t, c.fwd_ms, c.bwd_ms, tl.fwd_ms, tl.bwd_ms,
+                   (unsigned long long)c.live_bytes,
+                   (unsigned long long)tl.live_bytes);
+    }
+  }
+  up::SetParallelThreadCount(0);
+  json += "\n  ]}\n}\n";
+  std::FILE* f = std::fopen(out_path.c_str(), "w");
+  if (!f) {
+    std::fprintf(stderr, "seeml-bench: cannot write '%s'\n", out_path.c_str());
+    return 1;
+  }
+  std::fputs(json.c_str(), f);
+  std::fclose(f);
+  return 0;
+}
+
 // --- Strict argument cursor (the seeml-update-compile discipline) -----------
 
 struct Args {
@@ -365,6 +495,7 @@ int main(int argc, char** argv) {
     return 0;
   }
 
+  const bool attention_sweep = args.Take("--attention-sweep");
   auto out_path = args.TakeValue("--out", "");
   auto threads_csv = args.TakeValue("--threads", "1,8");
   auto lo_s = args.TakeValue("--steps-lo", "20");
@@ -450,6 +581,12 @@ int main(int argc, char** argv) {
     auto n = ParseU64("--threads", t);
     if (!n) return Fail(n.error());
     threads.push_back(*n);
+  }
+  if (attention_sweep) {
+    if (!args.rest.empty())
+      return Fail("--attention-sweep takes --out, --threads and --repeats only");
+    std::vector<size_t> widths(threads.begin(), threads.end());
+    return AttentionSweep(widths, *repeats, *out_path);
   }
 
   std::vector<const Fixture*> selected;

@@ -165,6 +165,31 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   // (finding #8): under --quantize-base, 4x the weights they patch.
   footprint.delta_bytes =
       EstimateLoraDeltaBytes(source, config_.lora.target_filters);
+  // The attention decision (E11, plan v15), made on the footprint: keep
+  // the probability caches when they fit the budget AND the whole
+  // footprint fits local memory with them; tile otherwise (the tiled
+  // family holds a stats row per query instead, at about twice the
+  // attention arithmetic and identical bits). --attention forces either.
+  AttentionKind attention = config_.attention;
+  if (attention == AttentionKind::kAuto) {
+    const bool over_budget =
+        footprint.probs_cache_bytes > config_.attention_cache_budget_bytes;
+    const bool cached_fits =
+        CheckTrainableLocally(footprint, config_.memory_budget_bytes)
+            .has_value();
+    attention = (over_budget || !cached_fits) ? AttentionKind::kTiled
+                                              : AttentionKind::kCached;
+  }
+  if (attention == AttentionKind::kTiled) {
+    if (footprint.probs_cache_bytes > 0)
+      seeml::diag::Note(generating::kDriver,
+                        "attention tiled: " +
+                            std::to_string(footprint.probs_cache_bytes) +
+                            " B of probability caches become " +
+                            std::to_string(footprint.attention_stats_bytes) +
+                            " B of stats rows");
+    footprint.probs_cache_bytes = footprint.attention_stats_bytes;
+  }
   if (auto fits = CheckTrainableLocally(footprint, config_.memory_budget_bytes);
       !fits)
     return std::unexpected(fits.error());
@@ -289,6 +314,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   build.output = nullptr;
 
   phase("frontend", block.numOps());
+  AttilingDecision attention_decision;
   // --- 3. Structural passes (phase A): convolution lowering, then LoRA
   // grafting — everything that must precede the primal snapshot. The pass
   // manager re-verifies the block after each pass, so a corrupting rewrite
@@ -298,6 +324,20 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
     PassManager pm;
     pm.Add("conv-lowering",
            [](sir::Block& b) { return ConvLowering().Run(b); });
+    // Attention memory (E11, plan v15): before the snapshot, so the eval
+    // program runs the same family, and before autodiff, whose VJP rule
+    // reads the decision off the op.
+    pm.Add("attention-tiling",
+           [&](sir::Block& b) -> std::expected<void, std::string> {
+             auto decided =
+                 AttentionTiling(config_.attention,
+                                 attention == AttentionKind::kTiled,
+                                 config_.attention_cache_budget_bytes)
+                     .Run(b);
+             if (!decided) return std::unexpected(decided.error());
+             attention_decision = *decided;
+             return {};
+           });
     pm.Add("lora-graft",
            [&](sir::Block& b) -> std::expected<void, std::string> {
              auto grafted = LoraGrafter(config_.lora).Run(b);
@@ -869,6 +909,10 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   result.merge_instruction_count = header.merge_instr_count;
   result.eval_instruction_count = header.eval_instr_count;
   result.rodata_size = header.rodata_size;
+  // What the plan carries, from the pass that decided on exact shapes.
+  result.attention_tiled =
+      attention_decision.tiled && attention_decision.attention_ops > 0;
+  result.probs_cache_bytes = attention_decision.probs_cache_bytes;
   result.gemm_tile_k = header.gemm_tile_k;
   result.gemm_tile_n = header.gemm_tile_n;
 

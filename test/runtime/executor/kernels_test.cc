@@ -1071,6 +1071,49 @@ TEST(Rope, GoldenValuesPinTheConvention) {
               1e-5);
 }
 
+TEST(Attention, TheTiledFamilyIsTheCachedFamilyBitForBit) {
+  // E11 (#94): the tiled kernels keep a stats row instead of P and
+  // recompute every probability, with the cached kernels' expressions in
+  // the cached kernels' orders — so O, dQ, dK and dV are the cached
+  // family's floats exactly, at any width, and no S x S buffer exists.
+  struct Shape { size_t B, S, H, d; };
+  for (const Shape sh : {Shape{1, 1, 1, 4}, Shape{2, 7, 3, 5},
+                         Shape{2, 64, 2, 8}, Shape{1, 130, 4, 16}}) {
+    const size_t n = sh.B * sh.S * sh.H * sh.d;
+    const size_t pn = sh.B * sh.H * sh.S * sh.S;
+    const size_t rows = sh.B * sh.H * sh.S;
+    const auto q = RandnVector(n, 201 + sh.S);
+    const auto k2 = RandnVector(n, 202 + sh.S);
+    const auto v = RandnVector(n, 203 + sh.S);
+    const auto w = RandnVector(n, 204 + sh.S);  // dL/dO
+    std::vector<float> o(n), p(pn), dp(pn), ds(pn), dq(n), dk(n), dv(n);
+    k::AttnFwd(q.data(), k2.data(), v.data(), o.data(), p.data(), sh.B, sh.S,
+               sh.H, sh.d);
+    k::AttnDP(w.data(), v.data(), dp.data(), sh.B, sh.S, sh.H, sh.d);
+    k::AttnDV(p.data(), w.data(), dv.data(), sh.B, sh.S, sh.H, sh.d);
+    k::SoftmaxRowsBwd(p.data(), dp.data(), ds.data(), rows, sh.S);
+    k::AttnDQ(ds.data(), k2.data(), dq.data(), sh.B, sh.S, sh.H, sh.d);
+    k::AttnDK(ds.data(), q.data(), dk.data(), sh.B, sh.S, sh.H, sh.d);
+    for (const size_t threads : {size_t{1}, size_t{8}}) {
+      ScopedThreads scoped(threads);
+      std::vector<float> to(n, 9.0f), tq(n, 9.0f), tk(n, 9.0f), tv(n, 9.0f);
+      std::vector<float> stats(rows * seeml::update::kAttnStatsWidth, 9.0f);
+      k::AttnFwdTiled(q.data(), k2.data(), v.data(), to.data(), stats.data(),
+                      sh.B, sh.S, sh.H, sh.d);
+      k::AttnDQTiled(q.data(), k2.data(), v.data(), w.data(), stats.data(),
+                     tq.data(), sh.B, sh.S, sh.H, sh.d);
+      k::AttnDKTiled(q.data(), k2.data(), v.data(), w.data(), stats.data(),
+                     tk.data(), sh.B, sh.S, sh.H, sh.d);
+      k::AttnDVTiled(q.data(), k2.data(), w.data(), stats.data(), tv.data(),
+                     sh.B, sh.S, sh.H, sh.d);
+      EXPECT_BITWISE_EQ_F32(o, to);
+      EXPECT_BITWISE_EQ_F32(dq, tq);
+      EXPECT_BITWISE_EQ_F32(dk, tk);
+      EXPECT_BITWISE_EQ_F32(dv, tv);
+    }
+  }
+}
+
 TEST(Attention, KernelsAreThreadCountInvariant) {
   // Shapes sized so every kernel decomposes into MANY chunks (units >>
   // grain) — with tiny shapes both widths run one chunk and the comparison

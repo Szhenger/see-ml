@@ -36,6 +36,13 @@ struct TrainingFootprint {
   // quantized base they are 4x the weights they patch — the largest term
   // the early gate used to leave to the final one.
   uint64_t delta_bytes = 0;
+  // The attention probability caches (E11, #94): P [B*H*S, S] f32 per
+  // attention op, alive from forward to backward, summed over the ops.
+  // Counted apart from the activations because the compiler may choose
+  // not to keep them at all — the tiled family holds kAttnStatsWidth
+  // floats per query row instead — and the choice is made on this number.
+  uint64_t probs_cache_bytes = 0;
+  uint64_t attention_stats_bytes = 0;  // what the tiled family holds instead
 
   /// Saturating sum of the components.
   uint64_t total_bytes() const;

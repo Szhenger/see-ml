@@ -51,6 +51,59 @@ LoRASpec Spec(int64_t rank = 4, float alpha = 8.0f, uint64_t seed = 7) {
 }
 
 // =============================================================================
+// AttentionTiling (E11)
+// =============================================================================
+
+TEST(AttentionTiling, AutoRechecksTheExactShapesAndOnlyEverTiles) {
+  // The driver's gate decides first, from the SMF-level estimate; under
+  // kAuto the pass re-checks the exact SIR cache shapes and tiles if either
+  // says so (tiling only lowers memory). A forced kind is obeyed as given.
+  const int64_t seq = 4, heads = 2, dim = 8, batch = 8;
+  SmfModel model =
+      seeml::testing::MakeDecoderStack(dim, heads, seq, 16, 11, 2, 5);
+  auto build_block = [&](sir::Block& block) {
+    GraphBuild build;
+    build.input =
+        block.addArgument(sir::DataType::F32, sir::Shape{batch, dim});
+    ASSERT_TRUE(BuildForward(block, model, "", build.input, batch, build)
+                    .has_value());
+  };
+  // Two layers of P [batch*heads, seq] f32.
+  const uint64_t exact = 2ull * batch * heads * seq * sizeof(float);
+  auto tiled_ops = [](sir::Block& block) {
+    size_t n = 0;
+    block.walk([&](sir::Operation* op) {
+      if (op->mnemonic() == "sc_high.attention" && op->hasAttribute("tiled"))
+        ++n;
+    });
+    return n;
+  };
+  struct Case {
+    AttentionKind kind;
+    bool gate_tiled;
+    uint64_t budget;
+    bool want_tiled;
+  };
+  for (const Case c : {
+           Case{AttentionKind::kAuto, false, exact, false},     // fits
+           Case{AttentionKind::kAuto, false, exact - 1, true},  // exact > budget
+           Case{AttentionKind::kAuto, true, exact * 4, true},   // gate said tile
+           Case{AttentionKind::kCached, true, 0, false},        // forced
+           Case{AttentionKind::kTiled, false, exact * 4, true},  // forced
+       }) {
+    sir::Block block;
+    build_block(block);
+    ASSERT_OK_AND_ASSIGN(
+        AttilingDecision d,
+        AttentionTiling(c.kind, c.gate_tiled, c.budget).Run(block));
+    EXPECT_EQ(d.attention_ops, 2u);
+    EXPECT_EQ(d.probs_cache_bytes, exact);
+    EXPECT_EQ(d.tiled, c.want_tiled);
+    EXPECT_EQ(tiled_ops(block), c.want_tiled ? 2u : 0u);
+  }
+}
+
+// =============================================================================
 // LoraGrafter
 // =============================================================================
 

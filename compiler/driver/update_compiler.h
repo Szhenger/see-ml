@@ -87,6 +87,10 @@ struct CompiledUpdate {
   uint64_t rodata_size = 0;
   uint32_t gemm_tile_k = 0;  // the header's CPU GEMM tiles (0 = default)
   uint32_t gemm_tile_n = 0;
+  // The attention decision (E11): whether the plan runs the tiled family,
+  // and the probability-cache bytes the cached family would have held.
+  bool attention_tiled = false;
+  uint64_t probs_cache_bytes = 0;
 };
 
 class UpdateCompiler {

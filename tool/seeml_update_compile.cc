@@ -89,6 +89,7 @@ void PrintUsage() {
                "  [--weight-decay WD] [--clip-norm C]\n"
                "  [--lr-schedule const|cosine] [--warmup N] [--allow-zero-lr]\n"
                "  [--min-lr-factor F] [--quantize-base | --bf16-base]\n"
+               "  [--attention auto|cached|tiled] [--attention-cache-budget-mib N]\n"
                "  [--steps N]\n"
                "  [--grad-accum G]\n"
                "  [--no-fuse-epilogue] [--no-fuse-elementwise] [--no-fuse-addend]\n"
@@ -349,6 +350,24 @@ int main(int argc, char** argv) {
     return Fail("--allow-zero-lr applies to --lr-schedule cosine only");
   config.quantize_base = args.Take("--quantize-base");
   config.bf16_base = args.Take("--bf16-base");
+  // Attention memory (E11, plan v15): auto tiles when the probability
+  // caches of all layers would exceed the budget; the two families compute
+  // the same bits, so this is a memory decision alone.
+  if (auto v = args.TakeValue("--attention")) {
+    if (*v == "auto") config.attention = AttentionKind::kAuto;
+    else if (*v == "cached") config.attention = AttentionKind::kCached;
+    else if (*v == "tiled") config.attention = AttentionKind::kTiled;
+    else return Fail("unknown --attention '" + *v + "'");
+  }
+  if (auto v = args.TakeValue("--attention-cache-budget-mib")) {
+    uint64_t mib = 0;
+    if (!ParseU64(*v, &mib) || mib > (1ull << 40))
+      return Fail("--attention-cache-budget-mib must be a whole number of "
+                  "MiB, got '" + *v + "'");
+    if (config.attention != AttentionKind::kAuto)
+      return Fail("--attention-cache-budget-mib applies to --attention auto only");
+    config.attention_cache_budget_bytes = mib << 20;
+  }
   if (config.quantize_base && config.bf16_base)
     return Fail("--quantize-base and --bf16-base are mutually exclusive "
                 "(one storage precision per weight)");
@@ -503,6 +522,8 @@ int main(int argc, char** argv) {
                  "  \"effective_batch\": %" PRIu64 ",\n"
                  "  \"quantized_base\": %s,\n"
                  "  \"bf16_base\": %s,\n"
+                 "  \"attention\": {\"family\": \"%s\", "
+                 "\"cached_probs_bytes\": %" PRIu64 "},\n"
                  "  \"embedded_tu\": %s,\n"
                  "  \"kernel_policy\": {\"source\": \"%s\", \"host_key\": "
                  "\"%s\", \"gemm_tile_k\": %u, \"gemm_tile_n\": %u},\n"
@@ -523,6 +544,8 @@ int main(int argc, char** argv) {
                  static_cast<uint64_t>(config.batch) * compiled->grad_accum_steps,
                  config.quantize_base ? "true" : "false",
                  config.bf16_base ? "true" : "false",
+                 compiled->attention_tiled ? "tiled" : "cached",
+                 compiled->probs_cache_bytes,
                  embedded_tu_json.c_str(), policy->source.c_str(),
                  JsonEscape(policy->host_key).c_str(),
                  compiled->gemm_tile_k, compiled->gemm_tile_n);

@@ -76,7 +76,7 @@ shapes — the gap the C2 SIMD and G1b Metal projects are priced against.
 | metric | definition | what it gates |
 |---|---|---|
 | **GEMM GFLOP/s vs peak** | blocked cores at the shapes the decoders actually emit (projections, SwiGLU, lm-head) | the explicit-SIMD kernel project (frontier pillar C2): if autovectorized cores sit at <30% of peak, hand SIMD is worth it; if 60%+, it is not |
-| **attention μs and bytes** | `AttnFwd` + backward chain per (B,H,S,d) sweep of S ∈ {64, 256, 1024} | the flash-attention decision: the S² probs cache's cost curve tells you exactly when the tiled rewrite pays |
+| **attention μs and bytes** | `AttnFwd` + backward chain per (B,H,S,d) sweep of S ∈ {64, 256, 1024, 2048} — `seeml-bench --attention-sweep` | the flash-attention decision — run and recorded below (E11, #94): the tiled family is a memory decision, not a speed one |
 | **EmbedFwd GB/s** | gather bandwidth vs `memcpy` bandwidth | it should be memory-bound; if not, the row-grain is wrong |
 | **softmax-xent μs at vocab ∈ {1k, 32k, 128k}** | fwd+bwd per row | the chunked-CE project (pillar A3): this curve IS the justification |
 | **q8 dequant overhead** | q8 GEMM / f32 GEMM time ratio | NF4/int4 design: if int8 dequant already costs >15%, block-wise 4-bit needs a fused design, not a naive port |
@@ -111,6 +111,46 @@ digit. `seeml-plan-probe --profile N` attributes a plan's step per opcode
 and GEMM shape: on `dec_wide` the GEMM family is now ~65% of the step and
 the attention family ~24% — the f64 score reductions of #77 and the S²
 cache of E11 (#94) are where the next CPU kernel dollar goes, not GEMM.
+
+### The flash-attention decision, measured (E11, #94, 2026-09-18)
+
+`seeml-bench --attention-sweep` times the attention kernels alone —
+forward, then the whole backward chain — for both families at B = 1,
+H = 8, d = 64 on an Apple M5 (median of 3):
+
+| S | threads | cached fwd / bwd (ms) | tiled fwd / bwd (ms) | kept fwd→bwd, cached → tiled |
+|---|---|---|---|---|
+| 64 | 1 | 1.07 / 1.45 | 0.97 / 3.24 | 128 KiB → 8 KiB |
+| 256 | 1 | 10.7 / 16.0 | 10.7 / 47.6 | 2 MiB → 32 KiB |
+| 1024 | 1 | 172 / 252 | 171 / 777 | 32 MiB → 128 KiB |
+| 2048 | 1 | 684 / 1,036 | 684 / 3,107 | 128 MiB → 256 KiB |
+| 64 | 8 | 0.15 / 0.41 | 0.16 / 0.59 | |
+| 256 | 8 | 1.63 / 2.53 | 1.62 / 7.07 | |
+| 1024 | 8 | 25.3 / 39.4 | 26.4 / 116 | |
+| 2048 | 8 | 103 / 185 | 109 / 476 | |
+
+The forward costs the same; the tiled backward recomputes the scores in
+each of its three passes and dP in two, and runs at about 3× the cached
+backward at every length and both widths. **There is no crossover on this
+CPU**: no S where tiling is faster, because the cached family's S² traffic
+is served from a large unified memory without becoming the bottleneck.
+What tiling buys is memory. End to end, on a 4-block, D = 512, H = 8
+decoder at batch = one sequence, trained by the emitted `model_update`
+(`--eval-every 0`, second of two runs each):
+
+| S | step time, cached → tiled | peak footprint, cached → tiled | committed model |
+|---|---|---|---|
+| 256 | 1.55 → 1.84 s / 20 steps (1.19×) | 88 → 80 MiB | byte-identical |
+| 2048 | 8.99 → 14.91 s / 6 steps (1.66×) | 1,039 → 324 MiB | byte-identical |
+
+The probability caches are 8 MiB of the 86 MiB arena at S = 256 and
+512 MiB of 1,036 MiB at S = 2048 — the S² term that makes long sequences
+a memory-gate refusal on a device. So the compiler's rule is a memory
+rule: `--attention auto` keeps the cache while all layers' caches fit
+`--attention-cache-budget-mib` (256 by default) and the whole footprint
+fits local memory with them, and tiles otherwise. A GPU, where the
+cached family's S² traffic does cost bandwidth, may move the crossover;
+that is #63's measurement to make on the tiled family.
 
 ### The first GPU baseline row (v1.3.0 gate, 2026-09-15)
 

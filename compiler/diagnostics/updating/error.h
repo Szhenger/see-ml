@@ -27,6 +27,7 @@ inline constexpr std::string_view kEpilogueFuser = "GemmEpilogueFuser";
 inline constexpr std::string_view kRopeTable = "RopeTableHoister";
 inline constexpr std::string_view kChainFuser = "ElementwiseChainFuser";
 inline constexpr std::string_view kAddendFuser = "GemmAddendFuser";
+inline constexpr std::string_view kAttentionTiling = "AttentionTiling";
 
 /// Analytic failure in `unit`: "<unit>: <message>".
 [[nodiscard]] inline std::unexpected<std::string> Error(std::string_view unit,
