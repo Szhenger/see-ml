@@ -464,6 +464,66 @@ TEST(PlanValidator, FusedBiasJoinsBoundsAndOverlapDiscipline) {
   EXPECT_STR_CONTAINS(r.error(), "alias");
 }
 
+TEST(PlanValidator, TheGemmAddendIsAVersionedReadOfTheWholeResultShape) {
+  // kFlagGemmAddend (v14): C = D + A@B on the three f32 GEMMs, D's ref in
+  // in[3]. M = N = K = 4: A at 0, B at 64, C at 512, D at 256 (64 B each).
+  for (const up::OpCode op :
+       {up::OpCode::kGemmNN, up::OpCode::kGemmNT, up::OpCode::kGemmTN}) {
+    up::UpdateInstruction gemm = GemmNN(
+        up::MakeArenaRef(0), up::MakeArenaRef(64), up::MakeArenaRef(512), 4, 4, 4);
+    gemm.opcode = static_cast<uint16_t>(op);
+    gemm.flags = up::kFlagGemmAddend;
+    gemm.in[3] = up::MakeArenaRef(256);
+    EXPECT_OK(ValidateInstruction(gemm, kArena, kRodata, up::kSeeuVersion));
+
+    // A v13 runtime's vocabulary does not hold the bit: corruption there.
+    const auto old = ValidateInstruction(gemm, kArena, kRodata,
+                                         up::kSeeuGemmAddendVersion - 1);
+    ASSERT_FALSE(old.has_value());
+    EXPECT_STR_CONTAINS(old.error(), "flags");
+
+    // The addend is M*N floats: 964 + 64 B > 1024.
+    gemm.in[3] = up::MakeArenaRef(964);
+    EXPECT_ERROR(ValidateInstruction(gemm, kArena, kRodata, up::kSeeuVersion));
+
+    // The kernels hold C restrict: D may not alias it (GemmAccNN is the
+    // in-place form, and rounds differently).
+    gemm.in[3] = up::MakeArenaRef(512);
+    const auto alias =
+        ValidateInstruction(gemm, kArena, kRodata, up::kSeeuVersion);
+    ASSERT_FALSE(alias.has_value());
+    EXPECT_STR_CONTAINS(alias.error(), "alias");
+  }
+}
+
+TEST(PlanValidator, TheGemmAddendSharesItsSlotWithNothing) {
+  // in[3] holds one ref: an addend excludes the bias / activation epilogue
+  // outright, and the narrow-weight GEMMs (in[3] = a dequant scale, or no
+  // addend kernel) and every non-GEMM opcode refuse the bit.
+  up::UpdateInstruction gemm = GemmNN(up::MakeArenaRef(0), up::MakeArenaRef(64),
+                                      up::MakeArenaRef(512), 4, 4, 4);
+  gemm.in[3] = up::MakeArenaRef(256);
+  for (const uint16_t epilogue :
+       {up::MakeEpilogueFlags(true, up::EpilogueAct::kNone),
+        up::MakeEpilogueFlags(false, up::EpilogueAct::kRelu)}) {
+    gemm.flags = static_cast<uint16_t>(up::kFlagGemmAddend | epilogue);
+    const auto r = ValidateInstruction(gemm, kArena, kRodata, up::kSeeuVersion);
+    ASSERT_FALSE(r.has_value());
+    EXPECT_STR_CONTAINS(r.error(), "addend");
+  }
+  gemm.flags = up::kFlagGemmAddend;
+  for (const up::OpCode op :
+       {up::OpCode::kGemmAccNN, up::OpCode::kGemmNNQ8, up::OpCode::kGemmNTQ8,
+        up::OpCode::kGemmNNBF16, up::OpCode::kGemmNTBF16}) {
+    gemm.opcode = static_cast<uint16_t>(op);
+    EXPECT_ERROR(ValidateInstruction(gemm, kArena, kRodata, up::kSeeuVersion));
+  }
+  up::UpdateInstruction add = AddEw(up::MakeArenaRef(0), up::MakeArenaRef(256),
+                                    up::MakeArenaRef(512), 16);
+  add.flags = up::kFlagGemmAddend;
+  EXPECT_ERROR(ValidateInstruction(add, kArena, kRodata, up::kSeeuVersion));
+}
+
 TEST(PlanValidator, RejectsFusedBiasOnQuantizedGemm) {
   // The q8 GEMM's in[3] carries the dequant scale — a bias flag there
   // would make Execute() read the scale bits as an arena ref.

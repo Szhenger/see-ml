@@ -889,10 +889,18 @@ def _gemm_operands(m, ins, kind, transposed_b):
     return a, (b.T if transposed_b else b)
 
 
+def _addend(m, ins, c):
+    """The GEMM addend (v14): C = D + A@B over the complete product — the
+    expression of the GEMM + add pair the compiler folded."""
+    if ins.flags & formats.FLAG_GEMM_ADDEND:
+        return m.read(ins.src[3], (ins.out[0], ins.out[1])) + c
+    return c
+
+
 def _gemm_nn(kind):
     def op(m, x, ins, step):
         a, b = _gemm_operands(m, ins, kind, False)
-        c = x.matmul(a, b)
+        c = _addend(m, ins, x.matmul(a, b))
         if ins.flags & 1:  # the fused epilogue: C = act(A@B + bias)
             c = c + m.read(ins.src[3], (ins.out[1],))
         m.write(ins.src[2], _act(x, (ins.flags >> 1) & 3, c))
@@ -902,14 +910,14 @@ def _gemm_nn(kind):
 def _gemm_nt(kind):
     def op(m, x, ins, step):
         a, b = _gemm_operands(m, ins, kind, True)
-        m.write(ins.src[2], x.matmul(a, b))
+        m.write(ins.src[2], _addend(m, ins, x.matmul(a, b)))
     return op
 
 
 def _gemm_tn(m, x, ins, step):
     rows, cols, inner = ins.out
     a, b = m.read(ins.src[0], (inner, rows)), m.read(ins.src[1], (inner, cols))
-    m.write(ins.src[2], x.matmul(a.T, b))
+    m.write(ins.src[2], _addend(m, ins, x.matmul(a.T, b)))
 
 
 def _gemm_acc(m, x, ins, step):

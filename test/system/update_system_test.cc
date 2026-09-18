@@ -1097,24 +1097,102 @@ TEST(UpdateSystem, ANonFiniteGradientNormAbortsTheStep) {
 }
 
 // =============================================================================
+// The GEMM addend (E10, #93): kFlagGemmAddend
+// =============================================================================
+
+TEST(UpdateSystem, TheGemmAddendChangesNoTrainingBits) {
+  // Folded and unfolded compilations of the same update train to the same
+  // losses, validation loss and persistent segment, at one thread and at
+  // eight — an MLP, a token decoder, the decoder over int8 weights, and a
+  // tied-weight net (fan-out sums on parameter gradients). alpha/r = 3/4
+  // is deliberately not a power of two: the fold must be neutral for any
+  // scale, not only where scaling happens to be exact.
+  struct Case {
+    SmfModel model;
+    bool tokens;
+    bool quantize;
+    int64_t in_dim;
+  };
+  const int64_t vocab = 16, seq = 4, batch = 16;
+  std::vector<Case> cases;
+  cases.push_back({MakeMlp(8, 12, 4, 91), false, false, 8});
+  cases.push_back({seeml::testing::MakeTinyTokenDecoder(vocab, 8, 2, seq, 16, 92),
+                   true, false, 0});
+  cases.push_back({seeml::testing::MakeTinyTokenDecoder(vocab, 8, 2, seq, 16, 93),
+                   true, true, 0});
+  cases.push_back({seeml::testing::MakeTiedMlp(8, 94), false, false, 8});
+  for (const Case& c : cases) {
+    std::vector<float> want_curve;
+    std::vector<uint8_t> want_state;
+    float want_val = 0.0f;
+    uint64_t unfolded_instrs = 0;
+    for (int variant = 0; variant < 4; ++variant) {
+      UpdateConfig config = BaseConfig(batch);
+      config.optimizer.lr = 5e-3f;
+      config.lora.alpha = 3.0f;
+      config.quantize_base = c.quantize;
+      config.fuse_gemm_addend = (variant & 1) != 0;
+      seeml::update::SetParallelThreadCount((variant & 2) ? 8 : 1);
+      ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                           UpdateCompiler(config).Compile(c.model));
+      const PlanHeader h = HeaderOf(compiled);
+      if (variant == 0) unfolded_instrs = h.train_instr_count;
+      if (variant == 1) EXPECT_LT(h.train_instr_count, unfolded_instrs);
+      UpdateEngine engine;
+      ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(),
+                                      compiled.plan.size()));
+      ASSERT_OK_AND_ASSIGN(
+          Dataset data,
+          c.tokens ? seeml::testing::MakeTokenCorpus(128, seq, vocab, 45)
+                   : MakeClassificationData(128, c.in_dim, 46));
+      data.EnableShuffle(5);
+      TrainOptions options = Quiet();
+      options.record_loss_curve = true;
+      ASSERT_OK_AND_ASSIGN(auto report, engine.Train(data, 25, options));
+      ASSERT_OK_AND_ASSIGN(float val, engine.Evaluate(data));
+      std::vector<uint8_t> state(engine.arena(),
+                                 engine.arena() + h.persistent_size);
+      if (variant == 0) {
+        want_curve = report.loss_curve;
+        want_state = state;
+        want_val = val;
+        continue;
+      }
+      EXPECT_EQ(val, want_val);
+      ASSERT_EQ(report.loss_curve.size(), want_curve.size());
+      for (size_t i = 0; i < want_curve.size(); ++i)
+        EXPECT_EQ(report.loss_curve[i], want_curve[i]);
+      EXPECT_TRUE(state == want_state);
+    }
+  }
+  seeml::update::SetParallelThreadCount(0);
+}
+
+// =============================================================================
 // Elementwise chain fusion (E4, #83): kFusedMap
 // =============================================================================
 
 TEST(UpdateSystem, ElementwiseChainFusionChangesNoTrainingBits) {
-  // A fused and an unfused compilation of the same update — an MLP (scale
-  // -> add at every LoRA site) and a token decoder (residual adds, the
-  // composite loss's scale/add) — train to the same losses, the same
+  // A fused and an unfused compilation of the same update — an MLP, a
+  // token decoder, and an MLP distilled under the composite loss (its
+  // scale -> add is the chain) — train to the same losses, the same
   // validation loss and the same persistent segment, at one thread and at
-  // eight; and the fused plan really is shorter.
+  // eight; and where a chain exists the fused plan really is shorter. The
+  // chain E4 was built on, scale -> add at every LoRA site, is gone since
+  // E10: the scale moved to the rank-r activation and the add into the
+  // GEMM, so on a plain LoRA update there is nothing left to fuse.
   struct Case {
     SmfModel model;
     bool tokens;
+    bool distill = false;
   };
   const int64_t vocab = 16, seq = 4, batch = 16;
   std::vector<Case> cases;
   cases.push_back({MakeMlp(8, 12, 4, 81), false});
   cases.push_back(
       {seeml::testing::MakeTinyTokenDecoder(vocab, 8, 2, seq, 16, 82), true});
+  cases.push_back({MakeMlp(8, 12, 4, 83), false, /*distill=*/true});
+  SmfModel teacher = MakeMlp(8, 16, 4, 84);
   for (const Case& c : cases) {
     std::vector<float> want_curve;
     std::vector<uint8_t> want_state;
@@ -1124,12 +1202,23 @@ TEST(UpdateSystem, ElementwiseChainFusionChangesNoTrainingBits) {
       UpdateConfig config = BaseConfig(batch);
       config.optimizer.lr = 5e-3f;
       config.fuse_elementwise = (variant & 1) != 0;
+      if (c.distill) {
+        config.loss = LossKind::kXEntPlusKL;
+        config.distill_weight = 0.5f;
+      }
       seeml::update::SetParallelThreadCount((variant & 2) ? 8 : 1);
-      ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
-                           UpdateCompiler(config).Compile(c.model));
+      ASSERT_OK_AND_ASSIGN(
+          CompiledUpdate compiled,
+          UpdateCompiler(config).Compile(c.model,
+                                         c.distill ? &teacher : nullptr));
       const PlanHeader h = HeaderOf(compiled);
       if (variant == 0) unfused_instrs = h.train_instr_count;
-      if (variant == 1) EXPECT_LT(h.train_instr_count, unfused_instrs);
+      if (variant == 1) {
+        if (c.distill)
+          EXPECT_LT(h.train_instr_count, unfused_instrs);
+        else
+          EXPECT_LE(h.train_instr_count, unfused_instrs);
+      }
       UpdateEngine engine;
       ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(),
                                       compiled.plan.size()));

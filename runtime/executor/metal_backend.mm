@@ -676,6 +676,17 @@ std::expected<void, std::string> MetalBackend::Encode(
     Dispatch(kPClipFinish, c, 1, 1, true);
     return true;
   };
+  // The GEMM addend (v14): C = D + C, in place, one thread per element —
+  // the two dispatches the GEMM + kAddEW pair always was on this backend.
+  auto EncodeAddend = [&](uint32_t count) {
+    if (!(ins.flags & up::kFlagGemmAddend)) return;
+    KArgs sum;
+    sum.off[0] = up::RefOffset(ins.in[3]);
+    if (up::IsRodataRef(ins.in[3])) sum.space |= 1u;
+    sum.off[1] = sum.off[2] = up::RefOffset(ins.in[2]);
+    sum.n = count;
+    Dispatch(kPAddEW, sum, sum.n, kElementwiseGroup);
+  };
   const auto op = static_cast<up::OpCode>(ins.opcode);
   switch (op) {
     case up::OpCode::kGemmNN:
@@ -687,6 +698,7 @@ std::expected<void, std::string> MetalBackend::Encode(
       a.flags = static_cast<uint32_t>(up::EpilogueActOf(ins.flags)) |
                 ((ins.flags & up::kFlagEpilogueBias) ? 8u : 0u);
       DispatchGemm(kPGemmNN, a, false, false, 4);
+      EncodeAddend(a.m * a.n);
       return {};
     case up::OpCode::kGemmNT:
     case up::OpCode::kGemmTN:
@@ -697,6 +709,7 @@ std::expected<void, std::string> MetalBackend::Encode(
         DispatchGemm(kPGemmNT, a, false, true, 4);
       else
         DispatchGemm(kPGemmTN, a, true, false, 4);
+      EncodeAddend(a.m * a.n);
       return {};
     case up::OpCode::kGemmAccNN:
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]);

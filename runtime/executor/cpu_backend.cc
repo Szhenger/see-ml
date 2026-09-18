@@ -97,15 +97,21 @@ std::expected<void, std::string> CpuBackend::Execute(
                 ins.out[0], ins.out[1], ins.out[2],
                 ins.flags & up::kFlagEpilogueBias ? ReadPtr(ins.in[3])
                                                   : nullptr,
-                up::EpilogueActOf(ins.flags), policy_.gemm_tiles);
+                up::EpilogueActOf(ins.flags), policy_.gemm_tiles,
+                ins.flags & up::kFlagGemmAddend ? ReadPtr(ins.in[3])
+                                                : nullptr);
       break;
     case up::OpCode::kGemmNT:
       k::GemmNT(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                ins.out[0], ins.out[1], ins.out[2], policy_.gemm_tiles);
+                ins.out[0], ins.out[1], ins.out[2], policy_.gemm_tiles,
+                ins.flags & up::kFlagGemmAddend ? ReadPtr(ins.in[3])
+                                                : nullptr);
       break;
     case up::OpCode::kGemmTN:
       k::GemmTN(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
-                ins.out[0], ins.out[1], ins.out[2], policy_.gemm_tiles);
+                ins.out[0], ins.out[1], ins.out[2], policy_.gemm_tiles,
+                ins.flags & up::kFlagGemmAddend ? ReadPtr(ins.in[3])
+                                                : nullptr);
       break;
     case up::OpCode::kGemmAccNN:
       k::GemmAccNN(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),

@@ -78,13 +78,15 @@ int ImmInSlot(uint16_t opcode) {
   }
 }
 
-/// Compact epilogue decode for the v5 flag word: "bias", "relu",
-/// "bias+gelu", ... — or nullptr when no flags are set.
+/// Compact decode of the flag word: the v5 epilogue ("bias", "relu",
+/// "bias+gelu", ...), the v14 GEMM "addend" (exclusive with the epilogue) —
+/// or nullptr when no flags are set.
 const char* EpilogueName(uint16_t flags) {
   static const char* const kNames[] = {
       nullptr, "bias",      "relu", "bias+relu",
       "gelu",  "bias+gelu", "silu", "bias+silu",
   };
+  if (flags == seeml::update::kFlagGemmAddend) return "addend";  // v14
   return flags < 8 ? kNames[flags] : "unknown-flags";
 }
 

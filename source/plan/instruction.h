@@ -199,8 +199,22 @@ inline constexpr uint8_t FusedStageArg(uint8_t stage) {
 inline constexpr uint16_t kFlagEpilogueBias = 1u << 0;  // in[3] = bias ref [N]
 inline constexpr uint16_t kFlagEpilogueActShift = 1;    // bits 1..2: EpilogueAct
 inline constexpr uint16_t kFlagEpilogueActMask = 3u << kFlagEpilogueActShift;
-inline constexpr uint16_t kKnownFlagsMask =
+inline constexpr uint16_t kEpilogueFlagsMask =
     kFlagEpilogueBias | kFlagEpilogueActMask;
+// --- The GEMM addend (plan v14, E10). -----------------------------------------
+// The f32 GEMMs (kGemmNN, kGemmNT, kGemmTN): C = D + A @ B, with D's ref
+// ([M, N] f32, read) riding the otherwise-free in[3]. Every LoRA site sums
+// a rank-r GEMM into an activation-sized tensor twice per step — forward
+// C' = C + (s*t)@B, backward dX = dC@W^T + dt@A^T — and each used to be a
+// GEMM into a transient followed by a kAddEW over the whole tensor. The
+// addend form writes the sum as the dot products come out of the core.
+// Each element is `d + s` over the complete dot product s, exactly what
+// the two-instruction form computed, so the fold changes memory traffic and
+// never bits. It excludes the bias / activation epilogue (kGemmNN's in[3]
+// holds one ref), and the narrow-weight GEMMs do not take it.
+inline constexpr uint16_t kFlagGemmAddend = 1u << 3;  // in[3] = addend ref [M,N]
+inline constexpr uint16_t kKnownFlagsMask =
+    kEpilogueFlagsMask | kFlagGemmAddend;
 
 enum class EpilogueAct : uint16_t { kNone = 0, kRelu = 1, kGelu = 2, kSilu = 3 };
 

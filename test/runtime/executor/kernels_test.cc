@@ -1317,6 +1317,48 @@ TEST(GemmRedesign, TheNNFamilyIsTheReferenceReductionExactly) {
   }
 }
 
+TEST(GemmRedesign, TheAddendIsTheGemmThenAnAddExactly) {
+  // kFlagGemmAddend (plan v14, E10): C = D + A@B must be the bits of the
+  // two instructions it replaces — the GEMM into a transient, then an
+  // elementwise add in either operand order — for all three f32 forms, at
+  // any tiling and any width.
+  for (const GemmShape& sh : kGemmShapes) {
+    const size_t M = sh.M, N = sh.N, K = sh.K;
+    const auto A = RandnVector(M * K, 7000 + M);
+    const auto Bnn = RandnVector(K * N, 7100 + N);
+    const auto D = RandnVector(M * N, 7200 + K);
+    for (const k::GemmTiles tiles :
+         {k::kDefaultGemmTiles, k::GemmTiles{4096, 100000}, k::GemmTiles{4, 1}}) {
+      for (const size_t threads : {size_t{1}, size_t{8}}) {
+        ScopedThreads scoped(threads);
+        std::vector<float> plain(M * N), want(M * N), got(M * N, 9.0f);
+        auto summed = [&] {
+          for (size_t i = 0; i < M * N; ++i) want[i] = plain[i] + D[i];
+        };
+        k::GemmNN(A.data(), Bnn.data(), plain.data(), M, N, K, nullptr,
+                  seeml::update::EpilogueAct::kNone, tiles);
+        summed();
+        k::GemmNN(A.data(), Bnn.data(), got.data(), M, N, K, nullptr,
+                  seeml::update::EpilogueAct::kNone, tiles, D.data());
+        EXPECT_BITWISE_EQ_F32(want, got);
+
+        // NT reads B as [N, K]; TN reads A as [K, M]. Same element counts.
+        k::GemmNT(A.data(), Bnn.data(), plain.data(), M, N, K, tiles);
+        summed();
+        std::fill(got.begin(), got.end(), 9.0f);
+        k::GemmNT(A.data(), Bnn.data(), got.data(), M, N, K, tiles, D.data());
+        EXPECT_BITWISE_EQ_F32(want, got);
+
+        k::GemmTN(A.data(), Bnn.data(), plain.data(), M, N, K, tiles);
+        summed();
+        std::fill(got.begin(), got.end(), 9.0f);
+        k::GemmTN(A.data(), Bnn.data(), got.data(), M, N, K, tiles, D.data());
+        EXPECT_BITWISE_EQ_F32(want, got);
+      }
+    }
+  }
+}
+
 TEST(GemmRedesign, TheNTFamilyIsTheReferenceReductionExactly) {
   for (const GemmShape& sh : kGemmShapes) {
     const size_t M = sh.M, N = sh.N, K = sh.K;

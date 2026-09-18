@@ -406,6 +406,81 @@ TEST(UpdateCompiler, CompositeLossCombinesBothTerms) {
   EXPECT_EQ(CountOpcode(instrs, OpCode::kKLDistillFwd), 1u);
 }
 
+TEST(UpdateCompiler, LoraSitesCostNoActivationSizedPassOfTheirOwn) {
+  // E10 (#93). Per adapted matmul the program used to spend two
+  // activation-sized elementwise passes forward (scale, add) and two
+  // backward (the scale's VJP over dC, the fan-out add into dX). Now the
+  // scale lives on the rank-r activation and both adds ride their GEMM.
+  SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 31);
+  UpdateConfig config = BaseConfig(kBatch);  // rank 4, alpha 8
+  UpdateConfig unfolded = config;
+  unfolded.fuse_gemm_addend = false;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate folded, UpdateCompiler(config).Compile(model));
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate plain,
+                       UpdateCompiler(unfolded).Compile(model));
+  ASSERT_EQ(folded.adapters.size(), 2u);
+
+  // Every scale in either program is rank-sized: [N, r] = 4 * 4 elements.
+  const uint64_t rank_sized =
+      static_cast<uint64_t>(kBatch) * static_cast<uint64_t>(config.lora.rank);
+  for (const CompiledUpdate* c : {&folded, &plain}) {
+    size_t scales = 0;
+    for (const UpdateInstruction& ins : TrainProgramOf(*c)) {
+      if (ins.opcode != static_cast<uint16_t>(OpCode::kScale)) continue;
+      ++scales;
+      EXPECT_EQ(ins.out[0], rank_sized);
+    }
+    EXPECT_EQ(scales, 2 * folded.adapters.size());  // forward t, backward dt
+  }
+
+  // Folded: one forward addend per site (C' = C + ts@B), and one backward
+  // wherever dX is needed at all — the first layer's input takes no
+  // gradient — each naming a real addend; no standalone add is left.
+  size_t nn = 0, nt = 0;
+  for (const UpdateInstruction& ins : TrainProgramOf(folded)) {
+    if (!(ins.flags & kFlagGemmAddend)) continue;
+    EXPECT_EQ(ins.flags, kFlagGemmAddend);
+    EXPECT_NE(ins.in[3], kNullRef);
+    if (ins.opcode == static_cast<uint16_t>(OpCode::kGemmNN)) ++nn;
+    if (ins.opcode == static_cast<uint16_t>(OpCode::kGemmNT)) ++nt;
+  }
+  EXPECT_EQ(nn, 2u);
+  EXPECT_EQ(nt, 1u);
+  EXPECT_EQ(CountOpcode(TrainProgramOf(folded), OpCode::kAddEW), 0u);
+
+  // Unfolded: the same sums as instructions of their own, and no flag.
+  for (const UpdateInstruction& ins : TrainProgramOf(plain))
+    EXPECT_EQ(ins.flags & kFlagGemmAddend, 0);
+  EXPECT_EQ(CountOpcode(TrainProgramOf(plain), OpCode::kAddEW), 3u);
+  EXPECT_EQ(HeaderOf(plain).train_instr_count,
+            HeaderOf(folded).train_instr_count + 3);
+  EXPECT_EQ(HeaderOf(plain).eval_instr_count,
+            HeaderOf(folded).eval_instr_count + 2);
+}
+
+TEST(UpdateCompiler, NarrowWeightGemmsKeepTheirOwnInstruction) {
+  // The addend exists for the f32 GEMMs only. At a LoRA site over an int8
+  // or bf16 frozen weight the rank-r GEMM is the one that folds, so the
+  // fold loses nothing — and the validator would refuse the other choice.
+  for (const bool bf16 : {false, true}) {
+    SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 32);
+    UpdateConfig config = BaseConfig(kBatch);
+    config.quantize_base = !bf16;
+    config.bf16_base = bf16;
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                         UpdateCompiler(config).Compile(model));
+    size_t folded = 0;
+    for (const UpdateInstruction& ins : TrainProgramOf(compiled)) {
+      if (!(ins.flags & kFlagGemmAddend)) continue;
+      ++folded;
+      EXPECT_TRUE(ins.opcode == static_cast<uint16_t>(OpCode::kGemmNN) ||
+                  ins.opcode == static_cast<uint16_t>(OpCode::kGemmNT));
+      EXPECT_FALSE(IsRodataRef(ins.in[1]));  // the adapter, never the base
+    }
+    EXPECT_EQ(folded, 3u);
+  }
+}
+
 TEST(UpdateCompiler, EpilogueFusionShrinksDistillPrograms) {
   // Under distillation the frozen teacher's GEMM -> AddBias -> activation
   // chains fuse into flagged GEMM epilogues; the orphaned ops are DCE'd, so
@@ -435,16 +510,17 @@ TEST(UpdateCompiler, EpilogueFusionShrinksDistillPrograms) {
 
   // The fused stream carries epilogue flags on forward GEMMs; the unfused
   // stream carries none anywhere (flags == 0 was the pre-v5 invariant).
+  // (The GEMM addend, v14, is a different pass's flag and rides both.)
   size_t flagged = 0;
   for (const UpdateInstruction& ins : TrainProgramOf(fused)) {
-    if (ins.flags == 0) continue;
+    EXPECT_EQ(ins.flags & static_cast<uint16_t>(~kKnownFlagsMask), 0);
+    if ((ins.flags & kEpilogueFlagsMask) == 0) continue;
     ++flagged;
     EXPECT_EQ(ins.opcode, static_cast<uint16_t>(OpCode::kGemmNN));
-    EXPECT_EQ(ins.flags & static_cast<uint16_t>(~kKnownFlagsMask), 0);
   }
   EXPECT_GT(flagged, 0u);
   for (const UpdateInstruction& ins : TrainProgramOf(unfused))
-    EXPECT_EQ(ins.flags, 0);
+    EXPECT_EQ(ins.flags & kEpilogueFlagsMask, 0);
 
   // The teacher's hidden layer fused bias+relu, its logits layer bias-only:
   // no teacher AddBias survives, and the student's (LoRA-interposed) ones

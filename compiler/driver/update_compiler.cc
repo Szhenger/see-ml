@@ -436,6 +436,32 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
                }
                return {};
              });
+    // Before the chain fuser: an add that can absorb a GEMM stops being an
+    // elementwise stage at all (its whole pass disappears), which beats
+    // sharing one with its neighbours.
+    if (config_.fuse_gemm_addend)
+      pm.Add("fuse-gemm-addend",
+             [&](sir::Block& b) -> std::expected<void, std::string> {
+               std::unordered_set<const sir::Value*> narrow;
+               for (const auto& [w, s] : quant_scales) narrow.insert(w);
+               for (const sir::Value* w : bf16_weights) narrow.insert(w);
+               std::unordered_set<const sir::Value*> protected_values;
+               protected_values.insert(loss);
+               for (const auto& [p, g] : param_grads)
+                 protected_values.insert(g);
+               auto fused = GemmAddendFuser().Run(b, narrow, protected_values);
+               if (!fused) return std::unexpected(fused.error());
+               // Fuse-then-rebind, as above: a folded forward GEMM leaves
+               // the eval snapshot; the add that absorbed it stays.
+               if (!fused->fused_away.empty()) {
+                 std::unordered_set<const sir::Operation*> dead(
+                     fused->fused_away.begin(), fused->fused_away.end());
+                 std::erase_if(primal_ops, [&](const sir::Operation* op) {
+                   return dead.contains(op);
+                 });
+               }
+               return {};
+             });
     if (config_.fuse_elementwise)
       pm.Add("fuse-elementwise",
              [&](sir::Block& b) -> std::expected<void, std::string> {

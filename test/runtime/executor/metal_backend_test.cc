@@ -426,6 +426,11 @@ TEST(MetalBackend, GemmShapesMatchCpuOnEveryKernelPath) {
        "nn+bias+silu"},
       {OpCode::kGemmNT, kF32, false, true, false, 0, "nt"},
       {OpCode::kGemmTN, kF32, true, false, false, 0, "tn"},
+      // The GEMM addend (v14): C = D + A@B, D at the "bias" slot's offset
+      // widened to M*N floats below.
+      {OpCode::kGemmNN, kF32, false, false, false, kFlagGemmAddend, "nn+addend"},
+      {OpCode::kGemmNT, kF32, false, true, false, kFlagGemmAddend, "nt+addend"},
+      {OpCode::kGemmTN, kF32, true, false, false, kFlagGemmAddend, "tn+addend"},
       {OpCode::kGemmAccNN, kF32, false, false, true, 0, "acc"},
       {OpCode::kGemmNNQ8, kQ8, false, false, false, 0, "nn.q8"},
       {OpCode::kGemmNTQ8, kQ8, false, true, false, 0, "nt.q8"},
@@ -444,7 +449,8 @@ TEST(MetalBackend, GemmShapesMatchCpuOnEveryKernelPath) {
         const size_t c_elems = size_t{sh.m} * sh.n;
         const uint64_t a_off = skew, c_off = 64 * ((a_off + a_elems * 4 + 63) / 64);
         const uint64_t bias_off = 64 * ((c_off + c_elems * 4 + 63) / 64);
-        const size_t arena_floats = (bias_off + sh.n * 4 + 64) / 4;
+        // Room for the bias (N floats) or the addend (M*N floats) there.
+        const size_t arena_floats = (bias_off + c_elems * 4 + 64) / 4;
         std::vector<float> arena(arena_floats);
         for (auto& x : arena) x = unit(rng);  // C starts non-zero (Acc)
         const size_t elem = v.kind == kQ8 ? 1 : v.kind == kBF16 ? 2 : 4;
@@ -462,7 +468,8 @@ TEST(MetalBackend, GemmShapesMatchCpuOnEveryKernelPath) {
         ins.in[0] = MakeArenaRef(a_off);
         ins.in[1] = MakeRodataRef(skew);
         ins.in[2] = MakeArenaRef(c_off);
-        if (v.flags & kFlagEpilogueBias) ins.in[3] = MakeArenaRef(bias_off);
+        if (v.flags & (kFlagEpilogueBias | kFlagGemmAddend))
+          ins.in[3] = MakeArenaRef(bias_off);
         else if (v.kind == kQ8) ins.in[3] = F32Bits(0.01f);
         else if (v.acc) ins.in[3] = F32Bits(0.5f);
         ins.out[0] = sh.m; ins.out[1] = sh.n; ins.out[2] = sh.k;

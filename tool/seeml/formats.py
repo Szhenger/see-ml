@@ -96,7 +96,7 @@ SDS_HEADER_BYTES = SDS_HEADER.size
 # --- SEEU: the update plan (source/plan/schema.h, instruction.h) -------------
 
 SEEU_MAGIC = 0x55454553  # "SEEU"
-SEEU_VERSION = 13
+SEEU_VERSION = 14
 SEEU_OLDEST_READABLE = 4
 RODATA_BIT = 1 << 63
 NULL_REF = (1 << 64) - 1
@@ -155,6 +155,8 @@ OPCODES = {
 FLAG_EPILOGUE_BIAS = 1
 FLAG_EPILOGUE_ACT_SHIFT = 1
 FLAG_EPILOGUE_ACT_MASK = 6
+# The f32 GEMMs (v14): C = D + A@B, D's ref in in[3]; excludes the epilogue.
+FLAG_GEMM_ADDEND = 8
 
 # kFusedMap micro-program: one byte per stage, packed into an operand word.
 FUSED_STAGES = {"end": 0, "add": 1, "mul": 2, "scale": 3, "relu": 4,
@@ -221,7 +223,8 @@ def check_against(abi: Dict[str, Any]) -> List[str]:
     same("seeu.opcodes", {n: k for k, n in OPCODES.items()}, seeu["opcodes"])
     same("seeu.flags", {"epilogue_bias": FLAG_EPILOGUE_BIAS,
                         "epilogue_act_shift": FLAG_EPILOGUE_ACT_SHIFT,
-                        "epilogue_act_mask": FLAG_EPILOGUE_ACT_MASK},
+                        "epilogue_act_mask": FLAG_EPILOGUE_ACT_MASK,
+                        "gemm_addend": FLAG_GEMM_ADDEND},
          seeu["flags"])
     same("seeu.fused_stages", FUSED_STAGES, seeu["fused_stages"])
     same("seeu.fused_stage", {"kind_mask": FUSED_KIND_MASK,

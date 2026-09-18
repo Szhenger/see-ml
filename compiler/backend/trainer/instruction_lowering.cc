@@ -147,6 +147,31 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
       ins.out[0] = static_cast<uint64_t>(a->shape().dims.at(0));
       ins.out[1] = static_cast<uint64_t>(b->shape().dims.at(1));
       ins.out[2] = static_cast<uint64_t>(a->shape().dims.at(1));
+    } else if (m == "sc_high.add" && op->hasAttribute("gemm_addend")) {
+      // GemmAddendFuser's tail (v14): operands [addend, A, B]; the add IS
+      // the GEMM now, summing as the dot products come out of the core.
+      const std::string form =
+          op->getAttrAs<std::string>("gemm_addend").value_or("");
+      if (op->numOperands() != 3 ||
+          (form != "nn" && form != "nt" && form != "tn")) {
+        error = "malformed GEMM addend ('" +
+                std::string(op->result(0)->id()) + "')";
+        break;
+      }
+      const sir::Value* a = op->operand(1);
+      const sir::Value* c = op->result(0);
+      set(form == "nn"   ? OpCode::kGemmNN
+          : form == "nt" ? OpCode::kGemmNT
+                         : OpCode::kGemmTN);
+      ins.in[0] = ref(a);
+      ins.in[1] = ref(op->operand(2));
+      ins.in[2] = ref(c);
+      ins.in[3] = ref(op->operand(0));
+      ins.out[0] = static_cast<uint64_t>(c->shape().dims.at(0));  // M
+      ins.out[1] = static_cast<uint64_t>(c->shape().dims.at(1));  // N
+      ins.out[2] = static_cast<uint64_t>(                          // K
+          form == "tn" ? a->shape().dims.at(0) : a->shape().dims.at(1));
+      ins.flags = kFlagGemmAddend;
     } else if (m == "sc_high.add") {
       set(OpCode::kAddEW);
       ins.in[0] = ref(op->operand(0));
