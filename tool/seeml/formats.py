@@ -170,12 +170,22 @@ FUSED_MAX_STAGES = 4
 # --- SEKP: the checkpoint (runtime/custodian/checkpoint_format.h) ------------
 
 SEKP_MAGIC = 0x504B4553  # "SEKP"
-SEKP_VERSION = 4         # v4: the run's horizon follows the v3 header
+SEKP_VERSION = 5         # v5: the run binding, source score and best state
 SEKP_OLDEST_READABLE = 3
 CKPT_HEADER = Layout("CkptHeader", [
     ("magic", "I"), ("version", "I"), ("plan_hash", "Q"), ("step", "Q"),
     ("persistent_size", "Q"), ("payload_hash", "Q")])
 CKPT_HEADER_V4_TAIL = Layout("CkptHeaderV4Tail", [("horizon_steps", "Q")])
+CKPT_HEADER_V5_TAIL = Layout("CkptHeaderV5Tail", [
+    ("shuffle_origin", "Q"), ("train_samples", "Q"), ("val_samples", "Q"),
+    ("best_step", "Q"), ("best_payload_hash", "Q"), ("flags", "I"),
+    ("val_initial_loss_bits", "I"), ("val_initial_accuracy_bits", "I"),
+    ("best_loss_bits", "I"), ("best_accuracy_bits", "I"),
+    ("stale_evals", "I")])
+CKPT_HAS_VAL_INITIAL = 1
+CKPT_HAS_ACCURACY = 2
+CKPT_HAS_BEST_PAYLOAD = 4
+CKPT_HAS_BEST = 8
 
 # --- The probe trace (tool/probe_trace.h) -------------------------------------
 
@@ -187,7 +197,7 @@ PROBE_TRACE_EXTENT = struct.Struct("<QQ")     # arena offset, bytes
 
 STRUCTS = {
     "seeu": (PLAN_HEADER, INSTRUCTION, EMIT_ENTRY),
-    "sekp": (CKPT_HEADER, CKPT_HEADER_V4_TAIL),
+    "sekp": (CKPT_HEADER, CKPT_HEADER_V4_TAIL, CKPT_HEADER_V5_TAIL),
 }
 
 
@@ -237,6 +247,10 @@ def check_against(abi: Dict[str, Any]) -> List[str]:
     same("sekp.version", SEKP_VERSION, sekp["version"])
     same("sekp.oldest_readable", SEKP_OLDEST_READABLE,
          sekp["oldest_readable"])
+    same("sekp.flags", {"has_val_initial": CKPT_HAS_VAL_INITIAL,
+                        "has_accuracy": CKPT_HAS_ACCURACY,
+                        "has_best_payload": CKPT_HAS_BEST_PAYLOAD,
+                        "has_best": CKPT_HAS_BEST}, sekp["flags"])
     same("probe_trace.magic", PROBE_TRACE_MAGIC, abi["probe_trace"]["magic"])
     same("probe_trace.version", PROBE_TRACE_VERSION,
          abi["probe_trace"]["version"])

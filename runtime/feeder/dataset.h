@@ -68,6 +68,11 @@ class Dataset {
       std::vector<int32_t> tokens, uint64_t num_records, uint64_t seq);
 
   uint64_t num_samples() const { return num_samples_; }
+  /// The identity of the shuffle stream: the folded seed EnableShuffle
+  /// started from, 0 when serving is sequential. Two datasets with equal
+  /// origins (and sizes) serve the same permutations — what a checkpoint
+  /// binds a resume to (E9, #92).
+  uint64_t shuffle_origin() const { return shuffle_origin_; }
   uint64_t input_dim() const { return input_dim_; }
   uint32_t label_kind() const { return label_kind_; }
   uint32_t input_kind() const { return input_kind_; }

@@ -169,14 +169,31 @@ int main(int argc, char**) {
   std::printf("    }\n  },\n");
 
   std::printf("  \"sekp\": {\n    \"magic\": %u, \"version\": %u, "
-              "\"oldest_readable\": %u,\n    \"structs\": {\n",
-              rt::kCkptMagic, rt::kCkptVersion, rt::kCkptOldestReadable);
+              "\"oldest_readable\": %u,\n    \"flags\": {\"has_val_initial\": "
+              "%u, \"has_accuracy\": %u, \"has_best_payload\": %u, "
+              "\"has_best\": %u},\n    \"structs\": {\n",
+              rt::kCkptMagic, rt::kCkptVersion, rt::kCkptOldestReadable,
+              rt::kCkptHasValInitial, rt::kCkptHasAccuracy,
+              rt::kCkptHasBestPayload, rt::kCkptHasBest);
 #define X(f) SEEML_FIELD(rt::CkptHeader, f);
   Struct("CkptHeader", sizeof(rt::CkptHeader), [] { CKPT_FIELDS(X) });
 #undef X
   Struct("CkptHeaderV4Tail", sizeof(rt::CkptHeaderV4Tail), [] {
     SEEML_FIELD(rt::CkptHeaderV4Tail, horizon_steps);
-  }, true);
+  });
+#define CKPT_V5_FIELDS(X)                                                  \
+  X(shuffle_origin) X(train_samples) X(val_samples) X(best_step)           \
+  X(best_payload_hash) X(flags) X(val_initial_loss_bits)                   \
+  X(val_initial_accuracy_bits) X(best_loss_bits) X(best_accuracy_bits)     \
+  X(stale_evals)
+#define SIZE_OF_V5(f) +sizeof(rt::CkptHeaderV5Tail::f)
+  static_assert(0 CKPT_V5_FIELDS(SIZE_OF_V5) == sizeof(rt::CkptHeaderV5Tail),
+                "a CkptHeaderV5Tail field is missing from the manifest");
+#undef SIZE_OF_V5
+#define X(f) SEEML_FIELD(rt::CkptHeaderV5Tail, f);
+  Struct("CkptHeaderV5Tail", sizeof(rt::CkptHeaderV5Tail),
+         [] { CKPT_V5_FIELDS(X) }, true);
+#undef X
   std::printf("    }\n  },\n");
 
   std::printf("  \"probe_trace\": {\"magic\": %u, \"version\": %u}\n}\n",

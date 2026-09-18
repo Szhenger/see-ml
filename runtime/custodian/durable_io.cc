@@ -1,5 +1,7 @@
 #include "runtime/custodian/durable_io.h"
 
+#include <span>
+
 #include "runtime/diagnostics/persisting/error.h"
 #include "source/identity/hash.h"
 #include "source/parallel/parallel_for.h"
@@ -47,6 +49,11 @@ std::string UniqueTmpPath(const std::string& path) {
 
 std::expected<void, std::string> WriteFileDurable(
     const std::string& path, std::initializer_list<ByteSpan> parts) {
+  return WriteFileDurable(path, std::span<const ByteSpan>(parts.begin(), parts.size()));
+}
+
+std::expected<void, std::string> WriteFileDurable(
+    const std::string& path, std::span<const ByteSpan> parts) {
   const std::string tmp = UniqueTmpPath(path);
 #ifndef _WIN32
   const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);

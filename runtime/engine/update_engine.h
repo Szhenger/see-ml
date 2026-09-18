@@ -78,6 +78,24 @@ struct TrainOptions {
   // gate — instead of the training-loss windows.
   Dataset* validation = nullptr;
 
+  // Periodic evaluation and the best state (E9, #92). With a validation set
+  // and eval_every > 0 the run evaluates every eval_every optimizer steps
+  // (kEvalEveryAuto: max(1, steps / 10)) and keeps a copy of the persistent
+  // segment at the best validation loss seen — the source model's own score
+  // being the bar to beat. When training ends, THAT state is what the arena
+  // holds, so merge and commit ship the best evaluated update rather than
+  // the last one: on a small corpus the endpoint is often past the minimum,
+  // and a state that is still better than step 0 used to be committed while
+  // a better one was thrown away. The extra evaluation never touches a
+  // training bit (the eval program writes transients only), and the copy is
+  // one more persistent_size allocation, made at Train.
+  // patience > 0 stops the run after that many consecutive evaluations
+  // without a new best. eval_every == 0 is the pre-E9 loop: evaluate
+  // before and after, commit the last state, bit for bit.
+  static constexpr uint64_t kEvalEveryAuto = ~0ULL;
+  uint64_t eval_every = 0;
+  uint64_t patience = 0;
+
   // Cooperative cancellation, polled once per step. A long-running update on
   // a device must be interruptible; combined with checkpointing the update
   // resumes where it stopped.
@@ -122,8 +140,25 @@ struct TrainReport {
   float final_avg_loss = 0.0f;    // mean training loss over the last window
 
   bool has_validation = false;
-  float val_initial_loss = 0.0f;  // eval-program loss before training
-  float val_final_loss = 0.0f;    // eval-program loss after training
+  float val_initial_loss = 0.0f;  // eval-program loss before training —
+                                  // the SOURCE model's, also across resumes
+  float val_final_loss = 0.0f;    // eval-program loss of the state the run
+                                  // leaves in the arena (the best one when
+                                  // tracked, else the last)
+
+  // The best-state bookkeeping (E9). When best tracking ran, best_step is
+  // the step whose state the arena holds and val_last_* score the state the
+  // run actually ended on; they equal val_final_* whenever the endpoint was
+  // the best. eval_every / patience are the values the run resolved.
+  bool best_tracked = false;
+  uint64_t best_step = 0;
+  float val_last_loss = 0.0f;
+  float val_last_accuracy = 0.0f;
+  uint64_t evaluations = 0;        // periodic evaluations run (not the two
+                                   // bracketing ones)
+  bool stopped_by_patience = false;
+  uint64_t eval_every = 0;
+  uint64_t patience = 0;
 
   // Task-level metric next to the loss the gate compares: exact held-out
   // argmax accuracy before/after, for plans trained on class labels. The
@@ -323,6 +358,29 @@ class UpdateEngine {
   std::string backend_note_;
   uint64_t step_ = 0;                     // 1-indexed AdamW timestep
   uint64_t horizon_ = 0;                  // run LR horizon; 0 = plan default
+
+  // The run's identity and the best state (E9, #92), carried into every
+  // checkpoint (SEKP v5) and restored from one. `binding_` is set from the
+  // datasets at Train; a resume whose datasets disagree with the
+  // checkpoint's is refused. best_state_ is empty until a tracked run
+  // snapshots the persistent segment.
+  struct RunBinding {
+    bool bound = false;
+    uint64_t shuffle_origin = 0;
+    uint64_t train_samples = 0;
+    uint64_t val_samples = 0;
+  } binding_;
+  bool has_val_initial_ = false;          // the source model's score
+  bool val_initial_has_accuracy_ = false;
+  float val_initial_loss_ = 0.0f;
+  float val_initial_accuracy_ = 0.0f;
+  bool has_best_ = false;
+  uint64_t best_step_ = 0;
+  float best_loss_ = 0.0f;
+  float best_accuracy_ = 0.0f;
+  uint32_t stale_evals_ = 0;
+  std::vector<uint8_t> best_state_;
+  void SnapshotBest(uint64_t step, float loss, float accuracy);
   uint64_t num_classes_ = 0;              // softmax width, 0 = no class loss
   uint64_t vocab_bound_ = 0;              // narrowest embedding table, 0 = none
   bool merged_ = false;
