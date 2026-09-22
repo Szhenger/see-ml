@@ -10,6 +10,8 @@
 #   tier 1  + NumPy            export_model.py (--demo-decoder, --corpus,
 #                              --hf), frontier_exec.py, certify_numerics.py
 #   tier 2  + PyTorch / MLX    export_model.py (--demo, nn.Module export),
+#                              frontier_run.py (torch / mlx rows; its seeml
+#                              and check subcommands are tier 0),
 #                              frontier_exec.py --backend torch|mlx
 [project]
 name = "seeml-tools"
