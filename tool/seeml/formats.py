@@ -187,7 +187,7 @@ def relaxed_gemm_count(source: Any) -> int:
 
         def section(off: int, n: int) -> bytes:
             source.seek(off)
-            return source.read(n * INSTRUCTION.size)
+            return bytes(source.read(n * INSTRUCTION.size))
     else:
         total = len(source)
         head = bytes(source[:PLAN_HEADER.size])
