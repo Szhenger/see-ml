@@ -233,16 +233,24 @@ def cmd_torch(args):
         rec = torch.from_numpy(train_rec[perm[cursor:cursor + args.batch]]).to(args.device)
         cursor += args.batch
         x, y = rec[:, :-1], rec[:, 1:]
-        sync(); t0 = time.perf_counter()
+        sync()
+        t0 = time.perf_counter()
         logits = run_model(input_ids=x, use_cache=False).logits
         loss = F.cross_entropy(logits.reshape(-1, logits.shape[-1]).float(), y.reshape(-1))
-        sync(); t1 = time.perf_counter()
+        sync()
+        t1 = time.perf_counter()
         loss.backward()
-        sync(); t2 = time.perf_counter()
-        opt.step(); opt.zero_grad(set_to_none=True)
-        sync(); t3 = time.perf_counter()
+        sync()
+        t2 = time.perf_counter()
+        opt.step()
+        opt.zero_grad(set_to_none=True)
+        sync()
+        t3 = time.perf_counter()
         curve.append(loss.item())
-        wall.append(t3 - t0); fwd.append(t1 - t0); bwd.append(t2 - t1); optt.append(t3 - t2)
+        wall.append(t3 - t0)
+        fwd.append(t1 - t0)
+        bwd.append(t2 - t1)
+        optt.append(t3 - t2)
         if args.device == "mps":
             peak_dev = max(peak_dev, torch.mps.driver_allocated_memory())
     val1 = evaluate()
@@ -292,7 +300,6 @@ def cmd_mlx(args):
         else:
             env["MLX_ENABLE_TF32"] = want
         return subprocess.call([sys.executable] + sys.argv, env=env)
-    import numpy as np
     import mlx.core as mx
     import mlx.nn as nn
     import mlx.optimizers as optim
