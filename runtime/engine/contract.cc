@@ -142,6 +142,14 @@ std::expected<void, std::string> VerifyExecutorContract(
                                        /*allow_source=*/program == &eval);
           !r)
         return r;
+      // The relaxed bit (v18) belongs to the train and step programs: the
+      // eval program scores the model that ships in exact arithmetic, and
+      // the merge program has no GEMM a certificate covers.
+      if ((ins.flags & up::kFlagRelaxed) &&
+          (program == &eval || program == &merge))
+        return diag::executing::Error(
+            "a relaxed GEMM outside the train / step programs (opcode " +
+            std::to_string(ins.opcode) + ")");
       // Label provenance for the class-indexed kernels. The softmax pair
       // indexes probability rows with raw i32 labels
       // (probs[n*C + labels[n]]) — the one place a validated instruction

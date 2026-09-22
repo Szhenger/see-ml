@@ -85,8 +85,8 @@ int ImmInSlot(uint16_t opcode, uint16_t flags = 0) {
 }
 
 /// Compact decode of the flag word, composed from its parts: the v5
-/// epilogue ("bias", "relu", "bias+gelu", ...), the v14 GEMM "addend" and
-/// the v17 per-column int8 scales ("cols"). Returned by value, so any
+/// epilogue ("bias", "relu", "bias+gelu", ...), the v14 GEMM "addend", the
+/// v17 per-column int8 scales ("cols") and the v18 "relaxed" permission. Returned by value, so any
 /// number of calls may share one expression.
 std::string EpilogueName(uint16_t flags) {
   static const char* const kActs[] = {"", "relu", "gelu", "silu"};
@@ -101,6 +101,7 @@ std::string EpilogueName(uint16_t flags) {
     add(kActs[act]);
   if (flags & kFlagGemmAddend) add("addend");
   if (flags & kFlagQ8ColScale) add("cols");
+  if (flags & kFlagRelaxed) add("relaxed");
   if (flags & static_cast<uint16_t>(~kKnownFlagsMask)) add("unknown-flags");
   return name;
 }

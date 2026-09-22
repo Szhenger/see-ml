@@ -115,6 +115,11 @@ class ExecutorBackend {
 /// invariant by construction (kernel_policy.h).
 std::unique_ptr<ExecutorBackend> CreateCpuBackend();
 
+/// True when the CPU backend computes a relaxed (v18) instruction with the
+/// exact portable kernel — every build but one with SEEML_ACCELERATE, where
+/// the frozen-weight f32 GEMMs run on Accelerate's SGEMM instead.
+bool CpuBackendRelaxedIsExact();
+
 /// A resolved backend choice. `resolved` names what was actually built
 /// (kAuto never survives resolution); `note` explains a fallback the
 /// caller should log, and is empty otherwise.

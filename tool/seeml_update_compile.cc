@@ -20,6 +20,9 @@
 //                                      step then trains at LR 0)
 //       [--quantize-base]              int8-quantize frozen weights in rodata
 //       [--bf16-base]                  store frozen weights as bfloat16 rodata
+//       [--precision f32|certified-bf16] relaxed frozen-weight GEMMs (v18):
+//                                      the package then needs a numerics
+//                                      certificate (tool/certify_numerics.py)
 //                                      (2x smaller, f32 compute; exclusive with
 //                                      --quantize-base)
 //       [--steps 1000]                 default optimizer-step count baked into the plan
@@ -89,6 +92,7 @@ void PrintUsage() {
                "  [--weight-decay WD] [--clip-norm C]\n"
                "  [--lr-schedule const|cosine] [--warmup N] [--allow-zero-lr]\n"
                "  [--min-lr-factor F] [--quantize-base | --bf16-base]\n"
+               "  [--precision f32|certified-bf16]\n"
                "  [--attention auto|cached|tiled] [--attention-cache-budget-mib N]\n"
                "  [--steps N]\n"
                "  [--grad-accum G]\n"
@@ -350,6 +354,16 @@ int main(int argc, char** argv) {
     return Fail("--allow-zero-lr applies to --lr-schedule cosine only");
   config.quantize_base = args.Take("--quantize-base");
   config.bf16_base = args.Take("--bf16-base");
+  // Arithmetic (v18, F2 / F4): the relaxed GEMM family is a permission the
+  // compiler grants per instruction; the package then needs a certificate.
+  if (auto v = args.TakeValue("--precision")) {
+    if (*v == "f32") config.precision = Precision::kF32;
+    else if (*v == "certified-bf16")
+      config.precision = Precision::kCertifiedBf16;
+    else
+      return Fail("unknown --precision '" + *v +
+                  "' (f32 or certified-bf16)");
+  }
   // Attention memory (E11, plan v15): auto tiles when the probability
   // caches of all layers would exceed the budget; the two families compute
   // the same bits, so this is a memory decision alone.
@@ -462,6 +476,7 @@ int main(int argc, char** argv) {
   const std::string repo_root =
       std::filesystem::path(argv[0]).parent_path().parent_path().string();
   EmitOptions emit_options;
+  emit_options.relaxed_plan = compiled->relaxed_gemms > 0;
   emit_options.embed_plan_tu = !no_embed;
   auto paths = EmitNativePackage(
       compiled->plan, *out_dir,
@@ -522,6 +537,8 @@ int main(int argc, char** argv) {
                  "  \"effective_batch\": %" PRIu64 ",\n"
                  "  \"quantized_base\": %s,\n"
                  "  \"bf16_base\": %s,\n"
+                 "  \"precision\": \"%s\",\n"
+                 "  \"relaxed_gemms\": %" PRIu64 ",\n"
                  "  \"validation_scores\": \"%s\",\n"
                  "  \"attention\": {\"family\": \"%s\", "
                  "\"cached_probs_bytes\": %" PRIu64 "},\n"
@@ -545,6 +562,9 @@ int main(int argc, char** argv) {
                  static_cast<uint64_t>(config.batch) * compiled->grad_accum_steps,
                  config.quantize_base ? "true" : "false",
                  config.bf16_base ? "true" : "false",
+                 config.precision == Precision::kCertifiedBf16
+                     ? "certified-bf16" : "f32",
+                 compiled->relaxed_gemms,
                  compiled->scores_shipped ? "shipped" : "plan",
                  compiled->attention_tiled ? "tiled" : "cached",
                  compiled->probs_cache_bytes,

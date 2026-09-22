@@ -120,7 +120,14 @@ against `--max-site-error` / `--max-loss-deviation`, binds the result to
 the plan and corpus by SHA-256, and `verify` holds a measured run (a
 `frontier_exec.py diff` report) to the certified tolerances.
 `pack_update.py` refuses to package a plan beside a certificate that does
-not vouch for it, so a recompile voids a certificate loudly. The relaxed
+not vouch for it, so a recompile voids a certificate loudly. Since plan
+v18 the certifier also prices the `gemm.relaxed` site — the frozen-weight
+GEMMs a `--precision certified-bf16` plan marks, modelled as the Metal
+kernels compute them (the activation rounded to bfloat16 once, the weight
+exact) against its own tolerance (`--max-relaxed-gemm-error`, 2⁻⁷) — and
+`pack_update.py` refuses a relaxed plan that has no certificate, or one
+that never saw that site; `--source model.smf` binds a v17 plan's eval
+program to the model file it scores. The relaxed
 opcode family itself is core-plane work that does not exist yet: today the
 certificate is the measured answer to "what would relaxing cost this
 plan", and the contract that family will be admitted under.

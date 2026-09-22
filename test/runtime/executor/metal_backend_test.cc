@@ -506,6 +506,136 @@ TEST(MetalBackend, GemmShapesMatchCpuOnEveryKernelPath) {
   }
 }
 
+TEST(MetalBackend, RelaxedGemmsMatchCpuAtTheBf16Tolerance) {
+  // Plan v18: the six frozen-weight GEMMs under kFlagRelaxed run on the
+  // Metal 4 tensor-op family (bf16-rounded activations, exact weights)
+  // where it built, and on the exact kernels where it did not — either way
+  // against the exact CPU result at the tolerance one bf16 rounding of the
+  // activation implies, on every epilogue the family takes (bias, act, the
+  // NN and NT per-column int8 scales, the addend), on ragged and split-K
+  // shapes, and skinny shapes (where the exact kernels always serve). The
+  // GPU result is bitwise across two runs.
+  if (Skip()) return;
+  auto backend = CreateMetalBackend();
+  ASSERT_OK(backend);
+  const bool tensor_ops =
+      (*backend)->device().find("relaxed GEMMs on tensor ops") !=
+      std::string::npos;
+  backend->reset();
+  struct Shape {
+    uint32_t m, n, k;
+  };
+  const Shape shapes[] = {{64, 64, 64}, {129, 65, 33}, {200, 300, 4100},
+                          {512, 8, 576}, {33, 17, 20}};
+  enum Kind { kF32, kQ8, kBF16 };
+  struct Variant {
+    OpCode op;
+    Kind kind;
+    bool bt;
+    uint16_t flags;
+    const char* name;
+  };
+  const uint16_t rx = kFlagRelaxed;
+  const Variant variants[] = {
+      {OpCode::kGemmNN, kF32, false, rx, "nn.rx"},
+      {OpCode::kGemmNN, kF32, false,
+       static_cast<uint16_t>(rx | kFlagEpilogueBias |
+                             (static_cast<uint16_t>(EpilogueAct::kSilu)
+                              << kFlagEpilogueActShift)),
+       "nn.rx+bias+silu"},
+      {OpCode::kGemmNN, kF32, false, static_cast<uint16_t>(rx | kFlagGemmAddend),
+       "nn.rx+addend"},
+      {OpCode::kGemmNT, kF32, true, rx, "nt.rx"},
+      {OpCode::kGemmNT, kF32, true, static_cast<uint16_t>(rx | kFlagGemmAddend),
+       "nt.rx+addend"},
+      {OpCode::kGemmNNQ8, kQ8, false, rx, "nn.q8.rx"},
+      {OpCode::kGemmNNQ8, kQ8, false,
+       static_cast<uint16_t>(rx | kFlagQ8ColScale |
+                             (static_cast<uint16_t>(EpilogueAct::kGelu)
+                              << kFlagEpilogueActShift)),
+       "nn.q8.rx.cols+gelu"},
+      {OpCode::kGemmNTQ8, kQ8, true, rx, "nt.q8.rx"},
+      {OpCode::kGemmNTQ8, kQ8, true, static_cast<uint16_t>(rx | kFlagQ8ColScale),
+       "nt.q8.rx.cols"},
+      {OpCode::kGemmNNBF16, kBF16, false,
+       static_cast<uint16_t>(rx | kFlagEpilogueBias), "nn.bf16.rx+bias"},
+      {OpCode::kGemmNTBF16, kBF16, true, rx, "nt.bf16.rx"},
+  };
+  std::mt19937_64 rng(2027);
+  std::uniform_real_distribution<float> unit(-1.0f, 1.0f);
+  size_t relaxed_differs = 0, cases = 0;
+  for (const Shape& sh : shapes) {
+    for (const Variant& v : variants) {
+      const size_t a_elems = size_t{sh.m} * sh.k, b_elems = size_t{sh.k} * sh.n;
+      const size_t c_elems = size_t{sh.m} * sh.n;
+      const uint64_t a_off = 0, c_off = 64 * ((a_elems * 4 + 63) / 64);
+      const uint64_t bias_off = 64 * ((c_off + c_elems * 4 + 63) / 64);
+      const size_t arena_floats = (bias_off + c_elems * 4 + 64) / 4;
+      std::vector<float> arena(arena_floats, 0.0f);
+      for (size_t i = 0; i < a_elems; ++i) arena[a_off / 4 + i] = unit(rng);
+      for (size_t i = 0; i < c_elems; ++i) arena[bias_off / 4 + i] = 0.5f * unit(rng);
+      // B in rodata: f32 [K, N] (or [N, K]), int8 levels, or bf16 bits;
+      // the int8 forms' per-column scales follow at a 64-byte boundary.
+      const size_t scales = v.bt ? sh.k : sh.n;
+      std::vector<uint8_t> rodata;
+      const size_t b_bytes = b_elems * (v.kind == kF32 ? 4 : v.kind == kBF16 ? 2 : 1);
+      const uint64_t scale_off = 64 * ((b_bytes + 63) / 64);
+      rodata.resize(scale_off + scales * 4, 0);
+      for (size_t i = 0; i < b_elems; ++i) {
+        const float x = unit(rng);
+        if (v.kind == kF32) {
+          std::memcpy(&rodata[i * 4], &x, 4);
+        } else if (v.kind == kBF16) {
+          const uint16_t h = static_cast<uint16_t>(std::bit_cast<uint32_t>(x) >> 16);
+          std::memcpy(&rodata[i * 2], &h, 2);
+        } else {
+          rodata[i] = static_cast<uint8_t>(static_cast<int8_t>(std::lround(x * 100.0f)));
+        }
+      }
+      for (size_t i = 0; i < scales; ++i) {
+        const float sc = 0.01f * (1.0f + 0.5f * (i % 7));
+        std::memcpy(&rodata[scale_off + i * 4], &sc, 4);
+      }
+      UpdateInstruction ins;
+      ins.opcode = static_cast<uint16_t>(v.op);
+      ins.flags = v.flags;
+      ins.in[0] = MakeArenaRef(a_off);
+      ins.in[1] = MakeRodataRef(0);
+      ins.in[2] = MakeArenaRef(c_off);
+      ins.in[3] = (v.flags & kFlagQ8ColScale) ? MakeRodataRef(scale_off)
+                  : (v.flags & (kFlagEpilogueBias | kFlagGemmAddend))
+                      ? MakeArenaRef(bias_off)
+                  : v.kind == kQ8 ? F32Bits(0.02f)
+                                  : kNullRef;
+      ins.out[0] = sh.m; ins.out[1] = sh.n; ins.out[2] = sh.k;
+      auto twin = RunTwin({ins}, arena, rodata);
+      ASSERT_OK(twin);
+      auto again = RunTwin({ins}, arena, rodata);
+      ASSERT_OK(again);
+      const std::string what = std::string(v.name) + " " + std::to_string(sh.m) +
+                               "x" + std::to_string(sh.n) + "x" +
+                               std::to_string(sh.k);
+      // One bf16 rounding of each activation: 2^-9 relative per term, so
+      // sqrt(K)-ish of that on a dot of unit products, well inside 1%.
+      const double abs_floor = 4.0 * std::ldexp(1.0, -9) * std::sqrt(double(sh.k));
+      ExpectRangeClose(what.c_str(), *twin, c_off / 4, c_elems, 1e-2, abs_floor);
+      for (size_t i = 0; i < c_elems; ++i)
+        EXPECT_EQ(std::bit_cast<uint32_t>(twin->gpu[c_off / 4 + i]),
+                  std::bit_cast<uint32_t>(again->gpu[c_off / 4 + i]));
+      ++cases;
+      for (size_t i = 0; i < c_elems; ++i)
+        if (twin->gpu[c_off / 4 + i] != twin->cpu[c_off / 4 + i]) {
+          ++relaxed_differs;
+          break;
+        }
+    }
+  }
+  // With the tensor-op library present the relaxed path really ran: the
+  // non-skinny cases differ from the exact CPU bits (a rounded activation)
+  // in all but a coincidence; without it every case may match exactly.
+  if (tensor_ops) EXPECT_GE(relaxed_differs, cases / 2);
+}
+
 TEST(MetalBackend, AttentionMatchesCpuAtModelShape) {
   if (Skip()) return;
   // SmolLM-135M's geometry: 9 heads of 64 over S = 128, two sequences —

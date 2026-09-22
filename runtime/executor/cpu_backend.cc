@@ -5,6 +5,24 @@
 #include "runtime/executor/backend.h"
 #include "runtime/executor/update_kernels.h"
 
+// The relaxed GEMM family on the CPU (plan v18, F4 #132, option B): a
+// kFlagRelaxed f32-weight GEMM may run on Accelerate's SGEMM — the AMX /
+// SME matrix units the portable cores cannot reach — when the package was
+// built with SEEML_ACCELERATE (the emitted build.sh sets it on Apple hosts
+// for a relaxed plan). Its reduction order is Apple's, fixed per OS build,
+// so a run is reproducible on one machine and the plan's certificate
+// bounds the difference. int8 and bf16 weights stay on the portable
+// widening kernels (Accelerate wants an f32 panel the arena does not
+// hold); everywhere else, and without the define, every relaxed
+// instruction runs exact.
+#if defined(__APPLE__) && defined(SEEML_ACCELERATE)
+#define ACCELERATE_NEW_LAPACK 1
+#include <Accelerate/Accelerate.h>
+#define SEEML_HAS_ACCELERATE 1
+#else
+#define SEEML_HAS_ACCELERATE 0
+#endif
+
 // =============================================================================
 // CpuBackend — the reference executor: the portable kernel library behind
 // the ExecutorBackend seam. The dispatch switch below is the engine's
@@ -21,6 +39,34 @@ namespace up = seeml::update;
 namespace k = kernels;
 
 namespace {
+
+#if SEEML_HAS_ACCELERATE
+// C = [D +] act(A[M,K] @ B + bias), B as [K,N] (nt = false) or [N,K]:
+// SGEMM writes the product, then one pass applies what the exact kernels
+// fuse into their write-back.
+void AccelerateGemm(const float* A, const float* B, float* C, size_t M,
+                    size_t N, size_t K, bool nt, const float* bias,
+                    up::EpilogueAct act, const float* addend) {
+  cblas_sgemm(CblasRowMajor, CblasNoTrans, nt ? CblasTrans : CblasNoTrans,
+              static_cast<int>(M), static_cast<int>(N), static_cast<int>(K),
+              1.0f, A, static_cast<int>(K), B, static_cast<int>(nt ? K : N),
+              0.0f, C, static_cast<int>(N));
+  if (!bias && act == up::EpilogueAct::kNone && !addend) return;
+  for (size_t i = 0; i < M; ++i)
+    for (size_t j = 0; j < N; ++j) {
+      float v = C[i * N + j];
+      if (bias) v += bias[j];
+      switch (act) {
+        case up::EpilogueAct::kRelu: v = k::ReluExpr(v); break;
+        case up::EpilogueAct::kGelu: v = k::GeluExpr(v); break;
+        case up::EpilogueAct::kSilu: v = k::SiluExpr(v); break;
+        case up::EpilogueAct::kNone: break;
+      }
+      if (addend) v += addend[i * N + j];
+      C[i * N + j] = v;
+    }
+}
+#endif
 
 float BitsToF32(uint64_t bits) {
   return std::bit_cast<float>(static_cast<uint32_t>(bits));
@@ -97,12 +143,31 @@ class CpuBackend final : public ExecutorBackend {
   k::KernelPolicy policy_;  // the plan header's tiles; defaults until told
 };
 
+}  // namespace
+
+bool CpuBackendRelaxedIsExact() { return !SEEML_HAS_ACCELERATE; }
+
+namespace {
+
 std::expected<void, std::string> CpuBackend::Execute(
     const up::UpdateInstruction& ins, const StepParams& params) {
   switch (static_cast<up::OpCode>(ins.opcode)) {
     case up::OpCode::kNop:
       break;
     case up::OpCode::kGemmNN:
+#if SEEML_HAS_ACCELERATE
+      if (ins.flags & up::kFlagRelaxed) {
+        AccelerateGemm(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
+                       WritePtr(ins.in[2]), ins.out[0], ins.out[1],
+                       ins.out[2], false,
+                       ins.flags & up::kFlagEpilogueBias ? ReadPtr(ins.in[3])
+                                                         : nullptr,
+                       up::EpilogueActOf(ins.flags),
+                       ins.flags & up::kFlagGemmAddend ? ReadPtr(ins.in[3])
+                                                       : nullptr);
+        break;
+      }
+#endif
       // v5 epilogue flags: bias ref rides the otherwise-free in[3]; the
       // validator proved the flag/slot combination before dispatch.
       k::GemmNN(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
@@ -114,6 +179,16 @@ std::expected<void, std::string> CpuBackend::Execute(
                                                 : nullptr);
       break;
     case up::OpCode::kGemmNT:
+#if SEEML_HAS_ACCELERATE
+      if (ins.flags & up::kFlagRelaxed) {
+        AccelerateGemm(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]),
+                       WritePtr(ins.in[2]), ins.out[0], ins.out[1],
+                       ins.out[2], true, nullptr, up::EpilogueAct::kNone,
+                       ins.flags & up::kFlagGemmAddend ? ReadPtr(ins.in[3])
+                                                       : nullptr);
+        break;
+      }
+#endif
       k::GemmNT(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),
                 ins.out[0], ins.out[1], ins.out[2], policy_.gemm_tiles,
                 ins.flags & up::kFlagGemmAddend ? ReadPtr(ins.in[3])

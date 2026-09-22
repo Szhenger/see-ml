@@ -519,6 +519,57 @@ TEST(PlanValidator, PerColumnInt8ScalesAreARodataVectorFromV17) {
   EXPECT_ERROR(ValidateInstruction(q8, kArena, kRodata, up::kSeeuVersion));
 }
 
+TEST(PlanValidator, TheRelaxedBitIsAFrozenGemmPermissionFromV18) {
+  // kFlagRelaxed (v18): the six frozen-weight GEMMs, train and step
+  // programs only — never the eval program (allow_source), never TN, never
+  // below v18. Rodata is 256 B here: K*N f32 = 128 B.
+  const size_t M = 4, N = 4, K = 8;
+  up::UpdateInstruction g;
+  g.opcode = static_cast<uint16_t>(up::OpCode::kGemmNN);
+  g.flags = up::kFlagRelaxed;
+  g.in[0] = up::MakeArenaRef(0);     // M*K f32 = 128 B
+  g.in[1] = up::MakeRodataRef(0);    // K*N f32 = 128 B
+  g.in[2] = up::MakeArenaRef(512);   // M*N f32 = 64 B
+  g.out[0] = M; g.out[1] = N; g.out[2] = K;
+  EXPECT_OK(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
+  EXPECT_ERROR(ValidateInstruction(g, kArena, kRodata,
+                                   up::kSeeuRelaxedVersion - 1));
+  // At the instruction level the bit is an opcode permission — which
+  // program may carry it is the executor contract's rule (contract.cc).
+  EXPECT_OK(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion,
+                                /*allow_source=*/true));
+  // It composes with the epilogue on NN and with the addend on NT.
+  g.flags = up::kFlagRelaxed | up::MakeEpilogueFlags(false,
+                                                     up::EpilogueAct::kGelu);
+  EXPECT_OK(ValidateInstruction(g, kArena, kRodata, up::kSeeuVersion));
+  up::UpdateInstruction nt = g;
+  nt.opcode = static_cast<uint16_t>(up::OpCode::kGemmNT);
+  nt.flags = up::kFlagRelaxed | up::kFlagGemmAddend;
+  nt.in[3] = up::MakeArenaRef(768);  // M*N f32 = 64 B
+  EXPECT_OK(ValidateInstruction(nt, kArena, kRodata, up::kSeeuVersion));
+  // The int8 and bf16 forms take it; TN and everything else do not.
+  up::UpdateInstruction q8 = g;
+  q8.flags = up::kFlagRelaxed | up::kFlagQ8ColScale;
+  q8.opcode = static_cast<uint16_t>(up::OpCode::kGemmNNQ8);
+  q8.in[3] = up::MakeRodataRef(128);  // N floats = 16 B
+  EXPECT_OK(ValidateInstruction(q8, kArena, kRodata, up::kSeeuVersion));
+  up::UpdateInstruction bf = g;
+  bf.flags = up::kFlagRelaxed;
+  bf.opcode = static_cast<uint16_t>(up::OpCode::kGemmNTBF16);  // N*K bf16 = 64 B
+  EXPECT_OK(ValidateInstruction(bf, kArena, kRodata, up::kSeeuVersion));
+  up::UpdateInstruction tn = g;
+  tn.flags = up::kFlagRelaxed;
+  tn.opcode = static_cast<uint16_t>(up::OpCode::kGemmTN);
+  tn.in[1] = up::MakeArenaRef(256);  // K*N f32 = 128 B
+  EXPECT_ERROR(ValidateInstruction(tn, kArena, kRodata, up::kSeeuVersion));
+  up::UpdateInstruction add;
+  add.opcode = static_cast<uint16_t>(up::OpCode::kAddEW);
+  add.flags = up::kFlagRelaxed;
+  add.in[0] = up::MakeArenaRef(0); add.in[1] = up::MakeArenaRef(64);
+  add.in[2] = up::MakeArenaRef(128); add.out[0] = 16;
+  EXPECT_ERROR(ValidateInstruction(add, kArena, kRodata, up::kSeeuVersion));
+}
+
 TEST(PlanValidator, TheImmWordIsANormEpsilonAndNothingElse) {
   // v16 (P7, #96): the former pad word carries a normalization forward's
   // epsilon; anywhere else, or below v16, a nonzero imm is corruption.

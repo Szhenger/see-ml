@@ -320,6 +320,17 @@ def pack(opts: Options) -> dict:
 
     plan_bytes = check_plan(plan_path)
     certificate = check_certificate(pkg, plan_path)
+    # v18: relaxed GEMMs (--precision certified-bf16) ship only beside a
+    # certificate — the runtime's validator gates the bit on the version
+    # alone, so this is where "no certificate, no relaxed plan" is enforced.
+    with open(plan_path, "rb") as f:
+        relaxed_gemms = formats.relaxed_gemm_count(f)
+    if relaxed_gemms and certificate is None:
+        raise PackError(
+            f"'{plan_path}' carries {relaxed_gemms} relaxed GEMM(s) "
+            "(--precision certified-bf16) and no numerics certificate: run "
+            f"tool/certify_numerics.py certify {pkg} --corpus <corpus.sds> "
+            "[--source <model.smf>] first, or recompile with --precision f32")
 
     try:
         with open(script_path, "r", encoding="utf-8") as f:
@@ -378,6 +389,7 @@ def pack(opts: Options) -> dict:
                           else round(build_seconds, 3)),
         "binary": os.path.join(pkg, BINARY) if opts.build else None,
         "numerics_certificate": certificate,
+        "relaxed_gemms": relaxed_gemms,
     }
 
 

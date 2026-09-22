@@ -18,6 +18,15 @@ seeml_bench_enabled() {
 if seeml_bench_enabled; then
   FLAGS="$FLAGS -DSEEML_STEP_TIMING"
 fi
+# SEEML_ACCELERATE=1 mirrors CMake's -DSEEML_ACCELERATE=ON (Apple hosts):
+# the CPU backend runs a relaxed plan's f32-weight GEMMs (v18) on
+# Accelerate's SGEMM. The tree's own build leaves it off; the emitted
+# package's build.sh turns it on for a relaxed plan.
+ACCEL_LDFLAGS=""
+if [ "$(uname)" = "Darwin" ] && [ -n "${SEEML_ACCELERATE:-}" ] && [ "${SEEML_ACCELERATE}" != "0" ]; then
+  FLAGS="$FLAGS -DSEEML_ACCELERATE"
+  ACCEL_LDFLAGS="-framework Accelerate"
+fi
 
 compile() { echo "  CXX $1"; eval "$CXX $FLAGS -c '$1' -o 'build/$2'"; }
 
@@ -140,7 +149,7 @@ TESTING="build/seetest_registry.o build/seetest_main.o \
          build/fixtures_corpora.o build/fixtures_probes.o"
 
 echo "  LINK seeml-update-compile"
-eval "$CXX -pthread build/seeml_update_compile.o $LIBS $METAL_LDFLAGS -o build/seeml-update-compile"
+eval "$CXX -pthread build/seeml_update_compile.o $LIBS $METAL_LDFLAGS $ACCEL_LDFLAGS -o build/seeml-update-compile"
 echo "  LINK seeml-seeu-dump"
 # PlanSelfHash (the v4 integrity seal) runs on the parallel substrate.
 eval "$CXX -pthread build/seeml_seeu_dump.o build/parallel_for.o -o build/seeml-seeu-dump"
@@ -150,14 +159,14 @@ eval "$CXX -pthread build/seeml_abi.o -o build/seeml-abi"
 echo "  LINK seeml-plan-probe"
 # The frontier executor's C++ oracle (tool/frontier_exec.py, P4): one plan
 # section through one executor backend, every write traced.
-eval "$CXX -pthread build/seeml_plan_probe.o $LIBS $METAL_LDFLAGS -o build/seeml-plan-probe"
+eval "$CXX -pthread build/seeml_plan_probe.o $LIBS $METAL_LDFLAGS $ACCEL_LDFLAGS -o build/seeml-plan-probe"
 
 if seeml_bench_enabled; then
   echo "  CXX+LINK seeml-bench"
   eval "$CXX $FLAGS -c tool/seeml_bench.cc -o build/seeml_bench.o"
   eval "$CXX -pthread build/seeml_bench.o build/fixtures_models.o \
         build/fixtures_corpora.o build/fixtures_probes.o \
-        $LIBS $METAL_LDFLAGS -o build/seeml-bench"
+        $LIBS $METAL_LDFLAGS $ACCEL_LDFLAGS -o build/seeml-bench"
 fi
 
 for suite in \
@@ -182,6 +191,6 @@ for suite in \
   name="seeml_$(basename "$suite")"
   echo "  CXX+LINK $name"
   eval "$CXX $FLAGS -c 'test/$suite.cc' -o 'build/$name.o'"
-  eval "$CXX -pthread 'build/$name.o' $TESTING $LIBS $METAL_LDFLAGS -o 'build/$name'"
+  eval "$CXX -pthread 'build/$name.o' $TESTING $LIBS $METAL_LDFLAGS $ACCEL_LDFLAGS -o 'build/$name'"
 done
 echo "build complete"
