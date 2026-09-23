@@ -59,7 +59,8 @@ validation field reports, where the corpus is real text.
 Reference frontier numbers, measured on this host class (Apple M5, 16 GB,
 2026-09-22, same model, corpus, split and 512 tokens per step as SeeML —
 "The frontier row, measured" below): on SmolLM-135M, `mlx_lm`'s LoRA
-trainer reaches 4,605 tok/s in bf16 (9.0 it/s, 1.34 GB peak) and 2,240 in
+trainer reaches 4,605 tok/s in bf16 (9.0 it/s; 1.34 GB Metal-allocator
+peak, 1.01 GB resident) and 2,240 in
 true f32; `torch.compile` reaches 3,761 tok/s on MPS in bf16, 2,099 in f32,
 and 847 on the CPU in f32 (Accelerate/AMX). SeeML's Metal backend trains
 the same model at 1,802 tok/s (f32 math, int8 base) — 0.80–0.86× the f32
@@ -176,8 +177,9 @@ over the plan's own GEMM instructions.
 | cpu, before #104 | 7,841 | 65 | 0.128 | 39.6 | 1253 / 6591 / 14 |
 
 The same binary on the real SmolLM-135M package (the T2 import, the docs
-corpus, `model_update --backend metal`) measures 1,749 tok/s by the
-same regression; on Metal the fixture's seeded weights and corpus
+corpus, `model_update --backend metal`) measured 1,749 tok/s by the
+same regression on 2026-09-15 (1,802 on 2026-09-22, "The frontier row,
+measured" below); on Metal the fixture's seeded weights and corpus
 reproduce the model's per-step cost, not its loss. On the CPU the fixture
 under-reads: the real package measured 332 tok/s on 2026-09-22 ("The
 frontier row, measured" below) against the fixture's 233 here and 269
@@ -200,7 +202,7 @@ records, the tail 10 % held out, identical ids in every stack), LoRA r8 /
 0.01, constant LR, no clipping, 4 records × 128 targets = 512 loss tokens
 per step, 300 steps, 10 threads. Apple M5 (10-core GPU, 16 GB), main at
 1d6b8ed (the code that ran), driven by the F1 harness `tool/frontier_run.py`
-(#129), torch 2.14.0, mlx 0.32.2 / mlx-lm 0.31.3, warm chip, strictly
+(#129; on branch `claude/f1-frontier-harness` until it merges), torch 2.14.0, mlx 0.32.2 / mlx-lm 0.31.3, warm chip, strictly
 serial. SeeML's step is the steps-regression slope on the package binary
 (the 15→300-step slope where a 300-step run exists); PyTorch's is the
 median step after warm-up; MLX's is the trainer's own `It/sec` × 512.
