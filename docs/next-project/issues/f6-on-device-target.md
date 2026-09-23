@@ -2,6 +2,8 @@
 title: "SeeRL F6: on-device target — iPhone/iPad package runs, energy per token as a Tier A metric, adapter-only update packages"
 labels: enhancement,frontier-parity
 plane: Gates & docs
+origin: Frontier Outlook
+milestone: SeeRL v1.0.0.A
 priority: P2
 ---
 ## Why

@@ -2,6 +2,8 @@
 title: "SeeRL F5: scale ladder — SmolLM-360M, Qwen2.5-0.5B, then 1.5B on a 16 GB device with rematerialization and 8-bit optimizer states"
 labels: enhancement,core-plane,frontier-parity
 plane: Core plane
+origin: Frontier Outlook
+milestone: SeeRL v1.0.0.A
 priority: P1
 ---
 ## Why
@@ -10,8 +12,11 @@ Only SmolLM-135M has been validated end to end (import #69, Metal #103,
 CPU #105). The arena doctrine — one allocation, refused compiles instead
 of OOM — is the property that should beat frontier frameworks as models
 grow on a fixed-memory device, and it has never been exercised past 135M.
-MLX-LM's peak memory at 135M is 1.28 GB; nothing is known about SeeML's
-arena at 0.5B–1.5B.
+At 135M on the M5 (2026-09-22) MLX-LM peaks at 1.34 GB in the Metal
+allocator with 1.01 GB resident, while SeeML's whole footprint is 1.89 GB
+resident (arena, plan and Metal buffers are one shared allocation) — two
+quantities, to be compared like against like in this ladder; nothing is
+known about SeeML's arena at 0.5B–1.5B.
 
 ## Design
 

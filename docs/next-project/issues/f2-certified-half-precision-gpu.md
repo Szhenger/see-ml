@@ -2,6 +2,8 @@
 title: "SeeRL F2: certified half-precision GPU GEMMs — bf16/f16 simdgroup-MMA and M5 neural-accelerator kernels as a relaxed opcode family behind a P3 certificate"
 labels: enhancement,efficiency,core-plane,doctrine,frontier-parity
 plane: GPU backend
+origin: Frontier Outlook
+milestone: SeeRL v1.0.0.A
 priority: P0
 ---
 ## Why
@@ -46,8 +48,11 @@ atomics), so two runs of the same relaxed plan stay byte-identical.
 
 ## Acceptance
 
-- SmolLM-135M GPU tok/s measured against F1's MLX-LM row; target ≥ 0.9×
-  MLX-LM default mode on the same M5.
+- SmolLM-135M GPU tok/s measured against F1's MLX-LM **all-bf16** row
+  (4,605 tok/s on the M5, the 2026-09-22 frontier row in
+  `docs/benchmarks.md`; not the trainer's default mode, which on this
+  F32-stored checkpoint is f32 weights under TF32-class matmul); target
+  ≥ 0.9× on the same M5.
 - Certificate: per-site error inside the stated bound; 300-step val loss
   within 1e-3 relative of the f32 run; gate decision unchanged.
 - Two runs of a relaxed plan byte-identical; f32 plans bit-identical to

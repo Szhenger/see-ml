@@ -127,8 +127,11 @@ gh auth login            # then: gh auth refresh -s project
 tool/create_next_project.sh
 ```
 
-The script is idempotent: it creates the labels, files one GitHub Issue per
-body in `issues/` (skipping any title that already exists), creates the
+The script reconciles, so the bodies stay the source of truth after the
+first run: it upserts every label and milestone the bodies name, files one
+GitHub Issue per body in `issues/` and **edits** an existing one whose live
+body, labels or milestone differ from the file (`--dry-run` lists what
+would change), creates the
 **“SeeML Two-Plane Overhaul”** GitHub Project with `Plane` / `Origin` /
 `Priority` fields, and adds both the new issues and the existing
 #59–#67/#69–#71 to the board.

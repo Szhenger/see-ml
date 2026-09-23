@@ -2,6 +2,8 @@
 title: "SeeRL F3: tiled attention on Metal — port opcodes 47-50 to the GPU, then fuse forward and backward flash-style"
 labels: enhancement,efficiency,core-plane,frontier-parity
 plane: GPU backend
+origin: Frontier Outlook
+milestone: SeeRL v1.0.0.A
 priority: P1
 ---
 ## Why

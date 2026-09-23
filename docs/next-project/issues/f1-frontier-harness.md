@@ -2,6 +2,8 @@
 title: "SeeRL F1: measured frontier harness — real mlx_lm.lora and torch.compile runs on the same host, model, corpus and tokens/step, plus a nightly frontier row"
 labels: enhancement,python-plane,frontier-parity
 plane: Python plane
+origin: Frontier Outlook
+milestone: SeeRL v1.0.0.A
 priority: P0
 ---
 ## Why
