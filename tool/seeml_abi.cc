@@ -14,6 +14,7 @@
 // cannot merge. No arguments; deterministic output (no host facts).
 // =============================================================================
 
+#include <bit>
 #include <cstddef>
 #include <cstdio>
 #include <cstring>
@@ -133,17 +134,21 @@ int main(int argc, char**) {
               rt::kSdsLabelKindMax);
 
   std::printf("  \"seeu\": {\n    \"magic\": %u, \"version\": %u, "
-              "\"oldest_readable\": %u,\n    \"rodata_bit\": 63, "
+              "\"oldest_readable\": %u,\n    \"rodata_bit\": %d, "
+              "\"source_bit\": %d, "
               "\"rodata_alignment\": %llu, \"gemm_panel_floats\": %llu,\n",
               up::kSeeuMagic, up::kSeeuVersion, up::kSeeuOldestReadable,
+              std::countr_zero(up::kRodataBit), std::countr_zero(up::kSourceBit),
               static_cast<unsigned long long>(up::kSeeuRodataAlignment),
               static_cast<unsigned long long>(up::kDefaultGemmPanelFloats));
   std::printf("    \"flags\": {\"epilogue_bias\": %u, \"epilogue_act_shift\": "
-              "%u, \"epilogue_act_mask\": %u, \"gemm_addend\": %u},\n",
+              "%u, \"epilogue_act_mask\": %u, \"gemm_addend\": %u, "
+              "\"q8_col_scale\": %u, \"relaxed\": %u},\n",
               unsigned(up::kFlagEpilogueBias),
               unsigned(up::kFlagEpilogueActShift),
               unsigned(up::kFlagEpilogueActMask),
-              unsigned(up::kFlagGemmAddend));
+              unsigned(up::kFlagGemmAddend),
+              unsigned(up::kFlagQ8ColScale), unsigned(up::kFlagRelaxed));
   Enum("fused_stages", fused, sizeof(fused) / sizeof(fused[0]), false);
   std::printf("    \"fused_stage\": {\"kind_mask\": %u, \"arg_shift\": %u, "
               "\"arg_mask\": %u, \"run_is_right\": %u, \"max_stages\": %zu},\n",

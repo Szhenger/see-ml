@@ -26,11 +26,19 @@
 
 namespace seeml::update_rt {
 
-inline constexpr char kMetalKernelSource[] = R"msl(
+// The kernel library is three strings: the includes, a prelude every
+// library shares (the KArgs block, the operand macros, the activation
+// expressions — one statement of the ABI), and the kernels themselves. The
+// relaxed family below compiles as a second library under Metal 4 from the
+// same prelude.
+inline constexpr char kMetalKernelHead[] = R"msl(
 #include <metal_stdlib>
 #include <metal_simdgroup_matrix>
 using namespace metal;
 
+)msl";
+
+inline constexpr char kMetalKernelPrelude[] = R"msl(
 struct KArgs {
   ulong off[6];
   uint space;
@@ -51,8 +59,10 @@ struct KArgs {
 };
 
 #define KSIG device uchar* ar [[buffer(0)]], device const uchar* ro [[buffer(1)]], \
-             constant KArgs& p [[buffer(2)]]
-#define RBASE(i) ((p.space & (1u << (i))) ? ro : (device const uchar*)ar)
+             constant KArgs& p [[buffer(2)]], device const uchar* src [[buffer(5)]]
+// space: bit i = slot i reads rodata; bit 8 + i = the source model (v17).
+#define RBASE(i) ((p.space & (1u << (8u + (i)))) ? src \
+                  : (p.space & (1u << (i))) ? ro : (device const uchar*)ar)
 #define RF(i) ((device const float*)(RBASE(i) + p.off[i]))
 #define RQ(i) ((device const char*)(RBASE(i) + p.off[i]))
 #define WF(i) ((device float*)(ar + p.off[i]))
@@ -74,6 +84,9 @@ static inline float apply_act(float v, uint act) {
   }
 }
 
+)msl";
+
+inline constexpr char kMetalKernelSource[] = R"msl(
 // --- GEMM family --------------------------------------------------------
 // Four kernels per variant, chosen by shape on the host. The TILED kernel
 // computes 64x64 output tiles with K in panels of 16 and 128 threads = 4
@@ -136,6 +149,15 @@ static inline float4 fetch_p2(device const E* src, uint ld, uint k0, uint K,
   return o;
 }
 
+// Per-column int8 scales in the NT form (v17): the scale of W's output
+// column is this GEMM's reduction index, applied as the quad widens.
+static inline float4 kscale4(device const float* cs, uint gk, uint K) {
+  float4 s = float4(0.0f);
+  for (uint t = 0; t < 4u; ++t)
+    if (gk + t < K) s[t] = cs[gk + t];
+  return s;
+}
+
 #define LDP1 20u  // [64][16] slab, stride padded to 20 floats
 #define LDP2 68u  // [16][64] slab, stride padded to 68 floats
 #define GEMM_SMEM 2560u  // two [64][20] slabs (NT) is the largest; also the 32x64 epilogue stage
@@ -154,6 +176,7 @@ static inline ulong batch_off(constant KArgs& p, uint z, uint which) {
 template <bool AT, bool BT, typename EB, bool ACC>
 static inline void gemm_tile(device const float* A, device const EB* B,
                              device float* C, device const float* bias,
+                             device const float* cs,
                              uint M, uint N, uint K, uint lda, uint ldb,
                              uint ldc, float alpha, uint act, bool vecA,
                              bool vecB, uint splits, device float* ws,
@@ -191,6 +214,10 @@ static inline void gemm_tile(device const float* A, device const EB* B,
   } else {                                                                    \
     rb0 = fetch_p1(B, ldb, n0, N, (K0), K, v0, vecB);                        \
     rb1 = fetch_p1(B, ldb, n0, N, (K0), K, v1, vecB);                        \
+    if (cs) {                                                                 \
+      rb0 *= kscale4(cs, (K0) + (v0 & 3u) * 4u, K);                           \
+      rb1 *= kscale4(cs, (K0) + (v1 & 3u) * 4u, K);                           \
+    }                                                                         \
   }
   GEMM_FETCH(kbeg)
   for (uint k0 = kbeg; k0 < kend; k0 += 16u) {
@@ -259,7 +286,7 @@ static inline void gemm_tile(device const float* A, device const EB* B,
         } else if (ACC) {
           C[gm * ldc + gn] += alpha * v;
         } else {
-          v = alpha * v;
+          v = (!BT && cs) ? cs[gn] * v : alpha * v;  // v17 column scale
           if (bias) v += bias[gn];
           C[gm * ldc + gn] = apply_act(v, act);
         }
@@ -281,7 +308,7 @@ kernel void k_gemm_splitk_fin(KSIG, device const float* ws [[buffer(4)]],
   if (p.flags & 64u) {
     *C += p.f[0] * v;
   } else {
-    v = p.f[0] * v;
+    v = (p.flags & 128u) ? RF(3)[gn] * v : p.f[0] * v;  // v17 NN col scale
     if (p.flags & 8u) v += RF(3)[gn];
     *C = apply_act(v, p.flags & 7u);
   }
@@ -291,19 +318,21 @@ kernel void k_gemm_splitk_fin(KSIG, device const float* ws [[buffer(4)]],
 template <bool AT, bool BT, typename EB, bool ACC>
 static inline void gemm_small(device const float* A, device const EB* B,
                               device float* C, device const float* bias,
+                              device const float* cs,
                               uint M, uint N, uint K, uint lda, uint ldb,
                               uint ldc, float alpha, uint act, uint g) {
   const uint m = g / N, n = g % N;
   float acc = 0.0f;
   for (uint k = 0; k < K; ++k) {
     const float a = AT ? A[k * lda + m] : A[m * lda + k];
-    const float b = widen(BT ? B[n * ldb + k] : B[k * ldb + n]);
+    float b = widen(BT ? B[n * ldb + k] : B[k * ldb + n]);
+    if (BT && cs) b *= cs[k];
     acc += a * b;
   }
   if (ACC) {
     C[m * ldc + n] += alpha * acc;
   } else {
-    float v = alpha * acc;
+    float v = (!BT && cs) ? cs[n] * acc : alpha * acc;
     if (bias) v += bias[n];
     C[m * ldc + n] = apply_act(v, act);
   }
@@ -316,6 +345,7 @@ static inline void gemm_small(device const float* A, device const EB* B,
 template <bool AT, bool BT, typename EB, bool ACC>
 static inline void gemm_rows(device const float* A, device const EB* B,
                              device float* C, device const float* bias,
+                             device const float* cs,
                              uint M, uint N, uint K, uint lda, uint ldb,
                              uint ldc, float alpha, uint act, uint m,
                              uint lane) {
@@ -327,7 +357,9 @@ static inline void gemm_rows(device const float* A, device const EB* B,
 #pragma clang loop unroll(full)
     for (uint n = 0; n < 16u; ++n) {
       const uint nc = min(n, N - 1u);
-      acc[n] += a * widen(BT ? B[nc * ldb + k] : B[k * ldb + nc]);
+      float b = widen(BT ? B[nc * ldb + k] : B[k * ldb + nc]);
+      if (BT && cs) b *= cs[k];
+      acc[n] += a * b;
     }
   }
 #pragma clang loop unroll(full)
@@ -345,7 +377,7 @@ static inline void gemm_rows(device const float* A, device const EB* B,
     if (ACC) {
       C[m * ldc + n] += alpha * acc[n];
     } else {
-      float v = alpha * acc[n];
+      float v = (!BT && cs) ? cs[n] * acc[n] : alpha * acc[n];
       if (bias) v += bias[n];
       C[m * ldc + n] = apply_act(v, act);
     }
@@ -356,13 +388,15 @@ static inline void gemm_rows(device const float* A, device const EB* B,
 template <bool AT, bool BT, typename EB, bool ACC>
 static inline void gemm_cols(device const float* A, device const EB* B,
                              device float* C, device const float* bias,
+                             device const float* cs,
                              uint M, uint N, uint K, uint lda, uint ldb,
                              uint ldc, float alpha, uint act, uint n) {
   float acc[16];
 #pragma clang loop unroll(full)
   for (uint m = 0; m < 16u; ++m) acc[m] = 0.0f;
   for (uint k = 0; k < K; ++k) {
-    const float b = widen(BT ? B[n * ldb + k] : B[k * ldb + n]);
+    float b = widen(BT ? B[n * ldb + k] : B[k * ldb + n]);
+    if (BT && cs) b *= cs[k];
 #pragma clang loop unroll(full)
     for (uint m = 0; m < 16u; ++m) {
       const uint mc = min(m, M - 1u);
@@ -374,7 +408,8 @@ static inline void gemm_cols(device const float* A, device const EB* B,
     if (ACC) {
       C[m * ldc + n] += alpha * acc[m];
     } else {
-      C[m * ldc + n] = apply_act(alpha * acc[m] + bv, act);
+      C[m * ldc + n] = apply_act(
+          ((!BT && cs) ? cs[n] * acc[m] : alpha * acc[m]) + bv, act);
     }
   }
 }
@@ -384,6 +419,7 @@ static inline void gemm_cols(device const float* A, device const EB* B,
 template <bool AT, bool BT, typename EB, bool ACC>
 static inline void gemm_colsg(device const float* A, device const EB* B,
                               device float* C, device const float* bias,
+                              device const float* cs,
                               uint M, uint N, uint K, uint lda, uint ldb,
                               uint ldc, float alpha, uint act, uint n,
                               uint lane) {
@@ -391,7 +427,8 @@ static inline void gemm_colsg(device const float* A, device const EB* B,
 #pragma clang loop unroll(full)
   for (uint m = 0; m < 16u; ++m) acc[m] = 0.0f;
   for (uint k = lane; k < K; k += 32u) {
-    const float b = widen(BT ? B[n * ldb + k] : B[k * ldb + n]);
+    float b = widen(BT ? B[n * ldb + k] : B[k * ldb + n]);
+    if (BT && cs) b *= cs[k];
 #pragma clang loop unroll(full)
     for (uint m = 0; m < 16u; ++m) {
       const uint mc = min(m, M - 1u);
@@ -414,16 +451,20 @@ static inline void gemm_colsg(device const float* A, device const EB* B,
     if (ACC) {
       C[m * ldc + n] += alpha * acc[m];
     } else {
-      C[m * ldc + n] = apply_act(alpha * acc[m] + bv, act);
+      C[m * ldc + n] = apply_act(
+          ((!BT && cs) ? cs[n] * acc[m] : alpha * acc[m]) + bv, act);
     }
   }
 }
 
+// flags 128 / 256 (v17): per-column int8 scales in slot 3, for the NN / NT
+// form — the NT form applies them as B widens, the NN form in the epilogue.
 #define GEMM_OPERANDS(Z, EB, BIAS_EXPR)                                       \
   RF(0) + batch_off(p, (Z), 0u),                                              \
       (device const EB*)(RBASE(1) + p.off[1]) + batch_off(p, (Z), 1u),        \
-      WF(2) + batch_off(p, (Z), 2u), BIAS_EXPR, p.m, p.n, p.k, p.lda,         \
-      p.ldb, p.ldc, p.f[0], p.flags & 7u
+      WF(2) + batch_off(p, (Z), 2u), BIAS_EXPR,                               \
+      ((p.flags & 384u) ? RF(3) : (device const float*)0), p.m, p.n, p.k,     \
+      p.lda, p.ldb, p.ldc, p.f[0], p.flags & 7u
 #define GEMM_KERNELS(NAME, AT, BT, EB, ACC, BIAS_EXPR)                        \
   kernel void NAME(KSIG, device float* ws [[buffer(4)]],                      \
                    uint3 tg [[threadgroup_position_in_grid]],                 \
@@ -823,6 +864,109 @@ kernel void k_softmax_rows_bwd(KSIG, uint g [[thread_position_in_grid]],
   dot += simd_shuffle_xor(dot, 1u);
   for (uint c = lane; c < cols; c += 32u) dsr[c] = pr[c] * (dpr[c] - dot);
 }
+)msl";
+
+// =============================================================================
+// The relaxed GEMM family (plan v18, kFlagRelaxed; F2 #130). A second
+// library, compiled under Metal 4 when the device and OS admit it (macOS
+// 26, Apple GPUs): MetalPerformancePrimitives' matmul2d tensor op — on the
+// M5 the per-core neural accelerators — over bf16-rounded activations and
+// the EXACT stored weight (int8 levels, bf16, or f32) into f32
+// accumulators. The op fixes its own reduction order, so a dispatch is
+// bitwise run-to-run like every other kernel here; its bits differ from
+// the simdgroup kernels' and from the CPU's, which is what the numerics
+// certificate the plan must carry prices. Where the library cannot be
+// built the backend runs relaxed instructions on the exact kernels, which
+// every certificate admits.
+//
+// Two dispatches per GEMM. k_to_bf16 rounds A [M, K] (f32, leading
+// dimension lda, at off[0]) to bfloat16 — round to nearest, ties to even,
+// the rounding tool/frontier_exec.py models — packed into the backend's
+// scratch (buffer 6); flag 512 first multiplies column k by the k-th scale
+// in slot 3 (an NT int8 GEMM's reduction-index scales, folded before the
+// rounding). The GEMM kernel then multiplies the 64 x 32 tile its
+// threadgroup owns (four simdgroups) and applies the epilogue on the
+// cooperative destination tensor: f[0] (the per-tensor int8 scale, else
+// 1), flag 128 the per-column scale of an NN int8 GEMM (slot 3, N floats),
+// flag 8 the bias (slot 3), the activation in the low two bits, and flag
+// 1024 the addend (slot 3, M x N). The op bounds M, N and K from the
+// tensor extents, so ragged shapes need no edge path.
+// =============================================================================
+inline constexpr char kMetalRelaxedKernelHead[] = R"msl(
+#include <metal_stdlib>
+#include <metal_tensor>
+#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+using namespace metal;
+using namespace mpp::tensor_ops;
+
+)msl";
+
+inline constexpr char kMetalRelaxedKernelSource[] = R"msl(
+static inline bfloat to_bf16_rne(float v) {
+  uint u = as_type<uint>(v);
+  if ((u & 0x7F800000u) != 0x7F800000u)  // finite: round to nearest even
+    u = u + 0x7FFFu + ((u >> 16) & 1u);
+  return as_type<bfloat>((ushort)(u >> 16));
+}
+
+kernel void k_to_bf16(KSIG, device bfloat* bf [[buffer(6)]],
+                      uint g [[thread_position_in_grid]]) {
+  if (g >= p.m * p.k) return;
+  const uint r = g / p.k, c = g - r * p.k;
+  float v = RF(0)[r * p.lda + c];
+  if (p.flags & 512u) v *= RF(3)[c];
+  bf[g] = to_bf16_rne(v);
+}
+
+template <typename TB, bool NT>
+static inline void gemm_relaxed(device uchar* ar, device const uchar* ro,
+                                device const uchar* src, constant KArgs& p,
+                                device bfloat* abf, uint2 tg) {
+  constexpr auto desc = matmul2d_descriptor(
+      64, 32, static_cast<int>(dynamic_extent), false, NT, false);
+  matmul2d<desc, execution_simdgroups<4>> op;
+  tensor<device bfloat, dextents<int, 2>, tensor_inline> ta(
+      abf, dextents<int, 2>((int)p.k, (int)p.m));
+  device TB* b = (device TB*)(RBASE(1) + p.off[1]);
+  // NN: B is [K, N] with leading dimension ldb (extents N, K); NT: [N, K]
+  // (extents K, N). The contiguous axis strides 1, the other ldb.
+  const array<int, 2> bstride = {1, (int)p.ldb};
+  tensor<device TB, dextents<int, 2>, tensor_inline> tb(
+      b, NT ? dextents<int, 2>((int)p.k, (int)p.n)
+            : dextents<int, 2>((int)p.n, (int)p.k), bstride);
+  const uint m0 = tg.y * 64u, n0 = tg.x * 32u;
+  auto ma = ta.slice(0, (int)m0);
+  auto mb = NT ? tb.slice(0, (int)n0) : tb.slice((int)n0, 0);
+  auto ct = op.template get_destination_cooperative_tensor<
+      decltype(ma), decltype(mb), float>();
+  op.run(ma, mb, ct);
+  device float* c = WF(2);
+  const uint act = p.flags & 3u;
+#pragma clang loop unroll(full)
+  for (uint16_t i = 0; i < ct.get_capacity(); ++i) {
+    if (!ct.is_valid_element(i)) continue;
+    auto idx = ct.get_multidimensional_index(i);
+    const uint gn = n0 + (uint)idx[0], gm = m0 + (uint)idx[1];
+    if (gm >= p.m || gn >= p.n) continue;
+    float v = ct[i] * p.f[0];
+    if (p.flags & 128u) v *= RF(3)[gn];
+    if (p.flags & 8u) v += RF(3)[gn];
+    v = apply_act(v, act);
+    if (p.flags & 1024u) v += RF(3)[gm * p.n + gn];
+    c[gm * p.ldc + gn] = v;
+  }
+}
+#define RX_KERNEL(NAME, TB, NT)                                              \
+  kernel void NAME(KSIG, device bfloat* abf [[buffer(6)]],                   \
+                   uint2 tg [[threadgroup_position_in_grid]]) {              \
+    gemm_relaxed<TB, NT>(ar, ro, src, p, abf, tg);                           \
+  }
+RX_KERNEL(k_gemm_rx_nn_q8, int8_t, false)
+RX_KERNEL(k_gemm_rx_nt_q8, int8_t, true)
+RX_KERNEL(k_gemm_rx_nn_bf16, bfloat, false)
+RX_KERNEL(k_gemm_rx_nt_bf16, bfloat, true)
+RX_KERNEL(k_gemm_rx_nn_f32, float, false)
+RX_KERNEL(k_gemm_rx_nt_f32, float, true)
 )msl";
 
 }  // namespace seeml::update_rt

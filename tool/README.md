@@ -105,6 +105,22 @@ The priced number is a floor on the frontier, not the frontier: the
 interpreter dispatches op by op, with no graph compile or fusion. Never
 shipped, never imported by the compiler or the runtime.
 
+**`frontier_run.py`** is the frontier harness (SeeRL F1, #129): real
+`torch.compile` (eager or compiled, CPU or MPS, f32 or bf16) and MLX-LM
+LoRA (mlx_lm's own trainer, bf16 or true f32) runs on the same host, model,
+records, split, adapted set and tokens per step as an emitted SeeML package,
+each row a JSON in `seeml-bench`'s units (`step_ms`, `tokens_per_s`,
+`it_per_s`, validation loss and accuracy before and after, peak memory,
+warm-up), and `matrix` runs a plan of rows strictly serially and then
+applies the parity checks — the same records by hash, the same tokens per
+step, the adapter parameter count every row must show (a wrong rank is
+refused by name), and the step-0 validation loss the f32 / bf16 rows must
+share. Its module docstring is the list of parity rules, each one a
+comparison that was silently wrong until 2026-09-22 (the tied head SeeML
+adapts, mlx's uncorrected AdamW, an F32-stored checkpoint loaded as
+"bf16", MLX's TF32-class default matmul, `evaluate`'s dropped tail).
+Tier 2 for the framework rows; `seeml` and `check` are standard library.
+
 **`certify_numerics.py`** is the gate in front of any relaxed-reduction
 plan (P3): *no certificate, no relaxed plan*. It trains the plan twice
 through the frontier executor on the plan's own operands (its frozen
@@ -120,7 +136,14 @@ against `--max-site-error` / `--max-loss-deviation`, binds the result to
 the plan and corpus by SHA-256, and `verify` holds a measured run (a
 `frontier_exec.py diff` report) to the certified tolerances.
 `pack_update.py` refuses to package a plan beside a certificate that does
-not vouch for it, so a recompile voids a certificate loudly. The relaxed
+not vouch for it, so a recompile voids a certificate loudly. Since plan
+v18 the certifier also prices the `gemm.relaxed` site — the frozen-weight
+GEMMs a `--precision certified-bf16` plan marks, modelled as the Metal
+kernels compute them (the activation rounded to bfloat16 once, the weight
+exact) against its own tolerance (`--max-relaxed-gemm-error`, 2⁻⁷) — and
+`pack_update.py` refuses a relaxed plan that has no certificate, or one
+that never saw that site; `--source model.smf` binds a v17 plan's eval
+program to the model file it scores. The relaxed
 opcode family itself is core-plane work that does not exist yet: today the
 certificate is the measured answer to "what would relaxing cost this
 plan", and the contract that family will be admitted under.

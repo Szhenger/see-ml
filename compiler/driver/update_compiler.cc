@@ -154,13 +154,15 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   // --- 0. Fail fast: prove the training footprint fits local memory. -------
   // The teacher is a frozen forward — no backward caches its activations —
   // so it is estimated at its peak, not its sum; and --quantize-base stores
-  // frozen weights as int8 rodata at 1/4 size (under-counting the
+  // the student's frozen weights as int8 rodata at 1/4 size (under-counting the
   // unselected remainder keeps the bound a lower bound). Both matter:
   // an over-count here refuses compiles the exact final gate would pass.
   TrainingFootprint footprint = EstimateTrainingFootprint(source, batch);
+  // Only the student's weights take int8 storage: the teacher stays f32
+  // (E12 — it is the distillation target), so it is added after the cut.
+  if (config_.quantize_base) footprint.weight_bytes /= 4;
   if (wants_teacher)
     footprint += EstimateFrozenForwardFootprint(*teacher, batch);
-  if (config_.quantize_base) footprint.weight_bytes /= 4;
   // The merged deltas are full-size f32 whatever the base is stored as
   // (finding #8): under --quantize-base, 4x the weights they patch.
   footprint.delta_bytes =
@@ -593,8 +595,38 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   std::vector<sir::Operation*> train_ops;
   train_ops.reserve(block.numOps());
   block.walk([&](sir::Operation* op) { train_ops.push_back(op); });
-  auto train_instrs = LowerOps(train_ops, resolve_train, quant_scales, bf16_weights);
+  auto train_instrs = LowerOps(train_ops, resolve_train, quant_scales,
+                               bf16_weights, binding->quant_column_scales);
   if (!train_instrs) return std::unexpected(train_instrs.error());
+
+  // --- Relaxed arithmetic (plan v18, F2 / F4). -------------------------------
+  // Under --precision certified-bf16 every frozen-weight GEMM of the train
+  // stream (and so of the step program split from it below) — a product
+  // whose B operand is rodata: the base and teacher weights in f32, int8 or
+  // bf16, NN forward and NT dX — carries kFlagRelaxed. The adapter GEMMs
+  // (A and B live in the arena) and everything else stay exact, as does
+  // the eval program lowered separately below: the gate scores what ships
+  // in reference arithmetic. The bit is a permission the backend may
+  // decline; what it permits is bounded by the certificate the package
+  // must carry.
+  uint64_t relaxed_gemms = 0;
+  if (config_.precision == Precision::kCertifiedBf16) {
+    for (UpdateInstruction& ins : *train_instrs) {
+      const auto op = static_cast<OpCode>(ins.opcode);
+      const bool frozen_gemm =
+          (op == OpCode::kGemmNN || op == OpCode::kGemmNT ||
+           op == OpCode::kGemmNNQ8 || op == OpCode::kGemmNTQ8 ||
+           op == OpCode::kGemmNNBF16 || op == OpCode::kGemmNTBF16) &&
+          IsRodataRef(ins.in[1]);
+      if (!frozen_gemm) continue;
+      ins.flags |= kFlagRelaxed;
+      ++relaxed_gemms;
+    }
+    seeml::diag::Note(generating::kDriver,
+                      "relaxed arithmetic: " + std::to_string(relaxed_gemms) +
+                          " frozen-weight GEMM(s) carry kFlagRelaxed; the "
+                          "package needs a numerics certificate");
+  }
 
   // Under gradient accumulation the lowered stream is two programs: the
   // grad program (forward, backward, the folds) and the step program (clip,
@@ -624,7 +656,48 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
                                  "program");
   }
 
-  auto eval_instrs = LowerOps(primal_ops, resolve_train, quant_scales, bf16_weights);
+  // --- The eval program scores what ships (E12, #95, plan v17). ------------
+  // Training runs against the narrow copies (that is the memory the int8 /
+  // bf16 base buys); the commit patches the f32 weights of the source file.
+  // So the eval program — every gate and best-state score — reads those
+  // f32 weights straight from the file (source refs, bound at run time),
+  // and its GEMMs lower as plain f32 ones: W_f32 + (α/r)·A·B, the committed
+  // function up to the rounding of one addition per element. Possible only
+  // for a model that came from a file (the offsets and the hash that binds
+  // them); an in-memory compile keeps the in-plan proxy, and says so.
+  std::unordered_set<const sir::Value*> shipped;
+  const bool from_file = source.content_hash != 0;
+  auto narrow_student = [&](const sir::Value* v) {
+    auto src = build.weight_sources.find(v);
+    return src != build.weight_sources.end() &&
+           !std::string_view(v->id()).starts_with("t::") &&
+           src->second->data_offset != 0;
+  };
+  if (from_file) {
+    for (const auto& [w, s] : quant_scales)
+      if (narrow_student(w)) shipped.insert(w);
+    for (const sir::Value* w : bf16_weights)
+      if (narrow_student(w)) shipped.insert(w);
+  }
+  if (!from_file && (!quant_scales.empty() || !bf16_weights.empty()))
+    seeml::diag::Note(generating::kDriver,
+                      "the model was not loaded from a file, so the eval "
+                      "program scores the narrow in-plan weights — a proxy "
+                      "for the committed f32 model");
+  auto resolve_eval =
+      [&](const sir::Value* v) -> std::expected<uint64_t, std::string> {
+    if (shipped.contains(v))
+      return MakeSourceRef(build.weight_sources.at(v)->data_offset);
+    return resolve_train(v);
+  };
+  std::unordered_map<const sir::Value*, float> eval_quant;
+  for (const auto& [w, s] : quant_scales)
+    if (!shipped.contains(w)) eval_quant.emplace(w, s);
+  std::unordered_set<const sir::Value*> eval_bf16;
+  for (const sir::Value* w : bf16_weights)
+    if (!shipped.contains(w)) eval_bf16.insert(w);
+  auto eval_instrs = LowerOps(primal_ops, resolve_eval, eval_quant, eval_bf16,
+                              binding->quant_column_scales);
   if (!eval_instrs) return std::unexpected(eval_instrs.error());
 
   auto resolve_merge =
@@ -638,7 +711,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   std::vector<sir::Operation*> merge_ops;
   merge_ops.reserve(merge->block->numOps());
   merge->block->walk([&](sir::Operation* op) { merge_ops.push_back(op); });
-  auto merge_instrs = LowerOps(merge_ops, resolve_merge, quant_scales, bf16_weights);
+  auto merge_instrs = LowerOps(merge_ops, resolve_merge, quant_scales,
+                               bf16_weights, binding->quant_column_scales);
   if (!merge_instrs) return std::unexpected(merge_instrs.error());
 
   phase("lower", block.numOps());
@@ -909,6 +983,8 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   result.merge_instruction_count = header.merge_instr_count;
   result.eval_instruction_count = header.eval_instr_count;
   result.rodata_size = header.rodata_size;
+  result.scores_shipped = !shipped.empty();
+  result.relaxed_gemms = relaxed_gemms;
   // What the plan carries, from the pass that decided on exact shapes.
   result.attention_tiled =
       attention_decision.tiled && attention_decision.attention_ops > 0;

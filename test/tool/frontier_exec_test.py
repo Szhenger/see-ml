@@ -365,6 +365,54 @@ class InterpreterSelfCheck(unittest.TestCase):
         np.testing.assert_allclose(out[4:6], [1, 2] @ (q * 0.5))
         np.testing.assert_allclose(out[8:10], [1, 2] @ h)
 
+    def test_relaxed_gemms_round_the_activation_to_bf16_only_when_asked(self):
+        # v18: kFlagRelaxed on a frozen-weight GEMM. The exact reference
+        # ignores the bit; a backend in relaxed mode rounds A to bf16 once
+        # (ties to even) and multiplies against the exact weight; the count
+        # the packer gates on sees the train and step programs.
+        self.assertEqual(fx.round_bf16(np, np.float32(1.00390625)), 1.0)
+        self.assertEqual(fx.round_bf16(np, np.float32(1.01171875)), 1.015625)
+        self.assertEqual(fx.round_bf16(np, np.float32(1.0)), 1.0)
+        self.assertTrue(np.isnan(fx.round_bf16(np, np.float32("nan"))))
+        self.assertEqual(fx.round_bf16(np, np.float64(3.0)).dtype, np.float64)
+        w = np.array([[1.0, -2.0], [0.5, 4.0]], np.float32)
+        a = np.array([1.00390625, 2.00390625], np.float32)  # not bf16-exact
+        ops = [(1, fx.FLAG_RELAXED, (0, fx.RODATA_BIT, 16, N), (1, 2, 2)),
+               (1, 0, (0, fx.RODATA_BIT, 32, N), (1, 2, 2))]
+        blob = assemble(64, train=ops, rodata=w.tobytes())
+        self.assertEqual(fx.formats.relaxed_gemm_count(blob), 1)
+        plan = fx.Plan(blob)
+        self.assertEqual(plan.relaxed_gemms, 1)
+        for relaxed in (False, True):
+            backend = fx.NumpyBackend("float64")
+            backend.relaxed_gemms = relaxed
+            ex = fx.Executor(plan, backend)
+            ex.mem.stage(0, a.tobytes())
+            ex.execute("train")
+            out = np.frombuffer(ex.mem.export(), "<f4")
+            expect_a = fx.round_bf16(np, a) if relaxed else a
+            np.testing.assert_allclose(out[4:6], expect_a.astype(np.float64) @ w,
+                                       rtol=1e-6)
+            np.testing.assert_allclose(out[8:10], a.astype(np.float64) @ w,
+                                       rtol=1e-6)  # the unflagged GEMM
+        self.assertNotEqual(list(fx.round_bf16(np, a)), list(a))
+        # The certificate's relaxed dX form folds the k-scale into A first.
+        q = np.array([[3, -1], [2, 5]], np.int8)  # W as [N, K]
+        s = np.array([0.5, 0.25], np.float32)     # one scale per k
+        rodata = q.tobytes().ljust(16, b"\0") + s.tobytes()
+        ops = [(30, fx.FLAG_RELAXED | fx.formats.FLAG_Q8_COL_SCALE,
+                (0, fx.RODATA_BIT, 16, fx.RODATA_BIT | 16), (1, 2, 2))]
+        plan = fx.Plan(assemble(64, train=ops, rodata=rodata))
+        backend = fx.NumpyBackend("float64")
+        backend.relaxed_gemms = True
+        ex = fx.Executor(plan, backend)
+        ex.mem.stage(0, a.tobytes())
+        ex.execute("train")
+        out = np.frombuffer(ex.mem.export(), "<f4")
+        folded = fx.round_bf16(np, a * s).astype(np.float64)
+        np.testing.assert_allclose(out[4:6], folded @ q.astype(np.float64).T,
+                                   rtol=1e-6)
+
     def test_slot_memory_survives_arena_reuse(self):
         """SlotMemory (the GPU backends' model) under the aliasing the arena
         allocator really produces: overlapping writes, sub-range reads."""
@@ -513,20 +561,23 @@ class DifferentialSuite(unittest.TestCase):
             if done.returncode != 0:
                 raise AssertionError(f"{name}: compile failed\n{done.stdout}")
             cls.plans[name] = (os.path.join(out, "update_plan.seeu"),
-                               os.path.join(cls.dir, corpus))
+                               os.path.join(cls.dir, corpus),
+                               os.path.join(cls.dir, model))
 
     @classmethod
     def tearDownClass(cls):
         cls._tmp.cleanup()
 
     def diff(self, name, *extra):
-        plan, corpus = self.plans[name]
+        plan, corpus, model = self.plans[name]
         report = os.path.join(self.dir, name + ".json")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            # --source: a v17 narrow-storage plan's eval program reads the
+            # shipped f32 weights from the model file (E12).
             status = fx.main(["diff", plan, "--corpus", corpus, "--probe",
                               PROBE, "--steps", "3", "--report", report,
-                              *extra])
+                              "--source", model, *extra])
         with open(report) as f:
             return status, json.load(f), buf.getvalue()
 
@@ -573,7 +624,7 @@ class DifferentialSuite(unittest.TestCase):
                     self.assertEqual(status, 0, log)
 
     def test_the_probe_is_strict_about_arguments_and_paths(self):
-        plan, _ = self.plans["mlp_mse_sgd"]
+        plan, _, _ = self.plans["mlp_mse_sgd"]
         work = os.path.join(self.dir, "probe")
         os.makedirs(work, exist_ok=True)
         arena = os.path.join(work, "arena.in")
@@ -698,7 +749,7 @@ class DifferentialSuite(unittest.TestCase):
         self.assertAlmostEqual(ran["val_final_loss"], float(after), 4)
 
     def test_run_trains_and_price_reports(self):
-        plan, corpus = self.plans["dec_f32"]
+        plan, corpus, _ = self.plans["dec_f32"]
         report = os.path.join(self.dir, "run.json")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):

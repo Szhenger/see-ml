@@ -15,16 +15,31 @@
 namespace seeml::update {
 
 // A tensor reference is a 64-bit word: bit 63 selects the address space
-// (0 = mutable arena, 1 = read-only rodata), bits 0..62 are a byte offset.
+// (0 = mutable arena, 1 = read-only rodata), bits 0..61 are a byte offset.
+// Bit 62 (plan v17, E12 #95) selects a third, read-only space: the SOURCE
+// MODEL FILE the plan was compiled from, bound by the engine at run time
+// (BindSourceModel). A source ref's offset is an absolute SMF data offset —
+// the very offset the emit table patches — so an eval program lowered
+// against it reads the f32 weights that ship, not the plan's int8 / bf16
+// copies of them. Source refs are admitted in the eval program only.
 inline constexpr uint64_t kRodataBit = 1ULL << 63;
+inline constexpr uint64_t kSourceBit = 1ULL << 62;
 inline constexpr uint64_t kNullRef = ~0ULL;
 
 inline constexpr uint64_t MakeArenaRef(uint64_t offset) { return offset; }
 inline constexpr uint64_t MakeRodataRef(uint64_t offset) {
   return offset | kRodataBit;
 }
+inline constexpr uint64_t MakeSourceRef(uint64_t offset) {
+  return offset | kSourceBit;
+}
 inline constexpr bool IsRodataRef(uint64_t ref) { return (ref & kRodataBit) != 0; }
-inline constexpr uint64_t RefOffset(uint64_t ref) { return ref & ~kRodataBit; }
+inline constexpr bool IsSourceRef(uint64_t ref) {
+  return (ref & (kRodataBit | kSourceBit)) == kSourceBit;
+}
+inline constexpr uint64_t RefOffset(uint64_t ref) {
+  return ref & ~(kRodataBit | kSourceBit);
+}
 
 enum class OpCode : uint16_t {
   kNop = 0,
@@ -245,8 +260,39 @@ inline constexpr uint16_t kEpilogueFlagsMask =
 // never bits. It excludes the bias / activation epilogue (kGemmNN's in[3]
 // holds one ref), and the narrow-weight GEMMs do not take it.
 inline constexpr uint16_t kFlagGemmAddend = 1u << 3;  // in[3] = addend ref [M,N]
+// --- Per-column int8 scales (plan v17, E12 #95). ------------------------------
+// kGemmNNQ8 / kGemmNTQ8 only: in[3] is a rodata ref to one f32 scale per
+// OUTPUT COLUMN of the quantized weight W [K, M] (float[M]) instead of the
+// per-tensor scale's bits. A per-tensor max-abs scale lets one outlier
+// column (LLM projections carry |w| outliers 10-50x the bulk) collapse
+// every other column to a few int8 levels; a column's own scale keeps its
+// resolution. In the forward (NN) the scale is the output column's —
+// C[m, n] = act(s[n] * sum_k A[m, k] * q[k, n]); in the dX GEMM (NT, W read
+// as [N = K, M]) it is the REDUCTION index's, applied as each int8 element
+// widens — C[m, n] = sum_k A[m, k] * (q[n, k] * s[k]).
+inline constexpr uint16_t kFlagQ8ColScale = 1u << 4;  // in[3] = scales ref
+// --- Relaxed arithmetic (plan v18, F2 #130 / F4 #132). ------------------------
+// The six frozen-weight GEMMs (kGemmNN / kGemmNT and their int8 and bf16
+// forms) may carry this bit: the backend MAY compute the product with a
+// certified relaxed kernel. On Metal that is the tensor-op family, which
+// rounds the f32 activations to bf16 once at the GEMM input and multiplies
+// them against the exact stored weight (bf16 or int8; an f32 weight runs in
+// the GPU's reduced-precision mode) into f32 accumulators; on the CPU it is
+// a vendor BLAS (Accelerate) for f32 weights. The exact portable kernel is
+// always a valid execution of a relaxed instruction — the bit is a
+// permission, not a demand. The old path never emits it: a compiler sets it
+// only under --precision certified-bf16, only in the train and step
+// programs (the eval program scores what ships in exact arithmetic), and
+// tool/pack_update.py refuses to package such a plan unless a numerics
+// certificate (tool/certify_numerics.py) vouches for it — the certificate
+// binds to the plan's hash, so it cannot live inside the plan it certifies,
+// and the on-device validator gates the bit on the version alone. Relaxed
+// kernels stay run-to-run bitwise on a device (fixed reduction order, no
+// atomics); their bits differ from the reference's, so a relaxed plan
+// compares to the exact one at the certificate's tolerance.
+inline constexpr uint16_t kFlagRelaxed = 1u << 5;
 inline constexpr uint16_t kKnownFlagsMask =
-    kEpilogueFlagsMask | kFlagGemmAddend;
+    kEpilogueFlagsMask | kFlagGemmAddend | kFlagQ8ColScale | kFlagRelaxed;
 
 enum class EpilogueAct : uint16_t { kNone = 0, kRelu = 1, kGelu = 2, kSilu = 3 };
 

@@ -1473,6 +1473,55 @@ TEST(GemmRedesign, SixVariantsAgainstADoubleReferenceAtATileCrossingShape) {
   }
 }
 
+TEST(Gemm, PerColumnInt8ScalesAgainstADoubleReference) {
+  // v17 (E12, #95): the NN form scales each output column in its epilogue
+  // (before the activation); the NT form — W read as [N, K] — scales each
+  // int8 element by its reduction index's scale as it widens. Values
+  // against a double reference at a tile-crossing ragged shape, 1 and 8
+  // threads; the two forms are the forward and the dX GEMM of one weight.
+  const size_t M = 37, N = 517, K = 131;
+  const auto A = RandnVector(M * K, 4101);
+  std::vector<int8_t> q(K * N), qt(N * K);
+  for (size_t i = 0; i < q.size(); ++i) {
+    q[i] = static_cast<int8_t>((i * 131 + 17) % 255 - 127);
+    qt[i] = static_cast<int8_t>((i * 89 + 5) % 255 - 127);
+  }
+  std::vector<float> cs_n(N), cs_k(K);
+  for (size_t i = 0; i < N; ++i) cs_n[i] = 1e-3f * static_cast<float>(1 + i % 29);
+  for (size_t i = 0; i < K; ++i) cs_k[i] = 2e-3f * static_cast<float>(1 + i % 17);
+  for (const size_t threads : {size_t{1}, size_t{8}}) {
+    ScopedThreads scoped(threads);
+    std::vector<float> nn(M * N), nt(M * N);
+    k::GemmNNQ8(A.data(), q.data(), nn.data(), M, N, K, 99.0f,
+                seeml::update::EpilogueAct::kRelu, k::kDefaultGemmTiles,
+                cs_n.data());
+    k::GemmNTQ8(A.data(), qt.data(), nt.data(), M, N, K, 99.0f,
+                k::kDefaultGemmTiles, cs_k.data());
+    double worst_nn = 0.0, worst_nt = 0.0;
+    for (size_t m = 0; m < M; ++m)
+      for (size_t n = 0; n < N; ++n) {
+        double s_nn = 0.0, s_nt = 0.0, mag_nn = 0.0, mag_nt = 0.0;
+        for (size_t kk = 0; kk < K; ++kk) {
+          const double a = A[m * K + kk];
+          const double t_nn = a * q[kk * N + n];
+          const double t_nt = a * (static_cast<double>(qt[n * K + kk]) *
+                                   cs_k[kk]);
+          s_nn += t_nn;
+          s_nt += t_nt;
+          mag_nn += std::fabs(t_nn);
+          mag_nt += std::fabs(t_nt);
+        }
+        const double want_nn = std::max(0.0, cs_n[n] * s_nn);  // relu
+        worst_nn = std::max(worst_nn, std::fabs(nn[m * N + n] - want_nn) /
+                                          (1.0 + cs_n[n] * mag_nn));
+        worst_nt = std::max(worst_nt,
+                            std::fabs(nt[m * N + n] - s_nt) / (1.0 + mag_nt));
+      }
+    EXPECT_TRUE(worst_nn < 2e-6);
+    EXPECT_TRUE(worst_nt < 2e-6);
+  }
+}
+
 TEST(GemmRedesign, TheNNFamilyIsTheReferenceReductionExactly) {
   for (const GemmShape& sh : kGemmShapes) {
     const size_t M = sh.M, N = sh.N, K = sh.K;

@@ -62,6 +62,8 @@ struct OptimizerSpec {
   bool allow_zero_lr = false;
 };
 
+enum class Precision : uint8_t { kF32 = 0, kCertifiedBf16 = 1 };
+
 struct UpdateConfig {
   int64_t batch = 32;
   LossKind loss = LossKind::kSoftmaxXEnt;
@@ -85,6 +87,13 @@ struct UpdateConfig {
   // the committed model is patched from the pristine f32 file. Mutually
   // exclusive with quantize_base (one storage precision per weight).
   bool bf16_base = false;
+  // Arithmetic (plan v18, F2 #130 / F4 #132). kF32 is the reference: every
+  // kernel exact, every backend's bits its own. kCertifiedBf16 marks the
+  // frozen-weight GEMMs of the train and step programs kFlagRelaxed — the
+  // backend may run them on a certified relaxed kernel (Metal tensor ops
+  // over bf16-rounded activations and the exact stored weight; Accelerate
+  // on the CPU) — and the package must carry a numerics certificate.
+  Precision precision = Precision::kF32;
   // Fuse GEMM -> AddBias -> activation chains into flagged GEMM epilogues
   // wherever the SIR use-lists prove no other reader of the intermediates
   // (teacher subgraphs, unadapted layers). Bitwise-neutral by construction;

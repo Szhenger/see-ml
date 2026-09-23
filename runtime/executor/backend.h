@@ -82,6 +82,14 @@ class ExecutorBackend {
       uint8_t* arena, uint64_t arena_bytes, const uint8_t* rodata,
       uint64_t rodata_bytes, uint64_t rodata_mapped_bytes) = 0;
 
+  /// Binds the third, read-only address space (plan v17): the source model
+  /// file, mapped by the engine, that the eval program's source refs read.
+  /// `data` stays valid until the next BindSource or the backend's
+  /// destruction; nullptr unbinds. A backend binds it wherever it binds
+  /// rodata (a GPU backend wraps the mapping as a buffer).
+  [[nodiscard]] virtual std::expected<void, std::string> BindSource(
+      const uint8_t* data, uint64_t bytes) = 0;
+
   /// Tells the backend how the loaded plan wants its kernels run beyond
   /// what the instruction stream says — today the CPU GEMM tile geometry
   /// the compiler wrote into the header (v11). Called after every
@@ -106,6 +114,11 @@ class ExecutorBackend {
 /// The reference backend: the portable kernel library, thread-count
 /// invariant by construction (kernel_policy.h).
 std::unique_ptr<ExecutorBackend> CreateCpuBackend();
+
+/// True when the CPU backend computes a relaxed (v18) instruction with the
+/// exact portable kernel — every build but one with SEEML_ACCELERATE, where
+/// the frozen-weight f32 GEMMs run on Accelerate's SGEMM instead.
+bool CpuBackendRelaxedIsExact();
 
 /// A resolved backend choice. `resolved` names what was actually built
 /// (kAuto never survives resolution); `note` explains a fallback the

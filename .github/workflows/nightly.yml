@@ -31,8 +31,56 @@ on:
           would otherwise stay red; the epoch baseline is left alone).
         type: boolean
         default: false
+      frontier:
+        description: >-
+          Also run the frontier row (tool/frontier_run.py, F1 #129) on a
+          self-hosted Apple-silicon runner: SeeML cpu / metal, torch.compile
+          and MLX-LM on SmolLM-135M with the parity checks. Trend only.
+        type: boolean
+        default: false
 
 jobs:
+  frontier:
+    name: Frontier row (self-hosted Apple silicon, opt-in)
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.frontier }}
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the tools
+        run: sh build/build.sh
+      - name: Python plane (tier 2)
+        run: |
+          python3 -m pip install --user -r tool/requirements-pinned.txt \
+            transformers tokenizers mlx mlx-lm
+      - name: Export SmolLM-135M and compile the package
+        run: |
+          python3 tool/export_model.py --hf "$SEEML_FRONTIER_MODEL_DIR" out/frontier/smollm135.smf \
+            --seq-len 128 --text-corpus docs/usage.md out/frontier/docs.sds
+          ./build/seeml-update-compile --source out/frontier/smollm135.smf --out out/frontier/pkg/ \
+            --data-batch 512 --loss xent --lora-rank 8 --lora-alpha 16 --optimizer adamw \
+            --lr 1e-4 --lr-schedule const --quantize-base --steps 300 --no-embed
+          python3 tool/pack_update.py out/frontier/pkg/ --build
+      - name: The frontier row
+        env:
+          SEEML_THREADS: "10"
+        run: |
+          cat > out/frontier/plan.json <<EOF
+          {"model_dir": "$SEEML_FRONTIER_MODEL_DIR", "rank": 8, "rows": [
+            {"kind": "seeml", "args": ["--package", "out/frontier/pkg", "--model", "out/frontier/smollm135.smf", "--data", "out/frontier/docs.sds", "--backend", "metal", "--threads", "10"]},
+            {"kind": "seeml", "args": ["--package", "out/frontier/pkg", "--model", "out/frontier/smollm135.smf", "--data", "out/frontier/docs.sds", "--backend", "cpu", "--lo", "5", "--hi", "15", "--repeats", "1", "--quality-steps", "0", "--threads", "10"]},
+            {"kind": "torch", "args": ["--model-dir", "$SEEML_FRONTIER_MODEL_DIR", "--corpus", "docs/usage.md", "--device", "mps", "--compile", "1", "--dtype", "bf16"]},
+            {"kind": "torch", "args": ["--model-dir", "$SEEML_FRONTIER_MODEL_DIR", "--corpus", "docs/usage.md", "--device", "cpu", "--compile", "1", "--dtype", "f32"]},
+            {"kind": "mlx", "args": ["--model-dir", "$SEEML_FRONTIER_MODEL_DIR", "--corpus", "docs/usage.md", "--dtype", "bf16"]}
+          ]}
+          EOF
+          python3 tool/frontier_run.py matrix out/frontier/plan.json --out out/frontier/frontier.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontier-row
+          path: out/frontier/*.json
+
   tsan:
     name: ThreadSanitizer (full suites)
     runs-on: ubuntu-latest

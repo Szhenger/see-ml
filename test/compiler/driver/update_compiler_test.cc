@@ -4,9 +4,12 @@
 // selection, and the compile-time error surface.
 // =============================================================================
 
+#include <algorithm>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -40,6 +43,14 @@ std::vector<UpdateInstruction> TrainProgramOf(const CompiledUpdate& compiled) {
   std::vector<UpdateInstruction> instrs(h.train_instr_count);
   std::memcpy(instrs.data(), compiled.plan.data() + h.train_instr_offset,
               h.train_instr_count * sizeof(UpdateInstruction));
+  return instrs;
+}
+
+std::vector<UpdateInstruction> EvalProgramOf(const CompiledUpdate& compiled) {
+  const PlanHeader h = HeaderOf(compiled);
+  std::vector<UpdateInstruction> instrs(h.eval_instr_count);
+  std::memcpy(instrs.data(), compiled.plan.data() + h.eval_instr_offset,
+              h.eval_instr_count * sizeof(UpdateInstruction));
   return instrs;
 }
 
@@ -332,6 +343,46 @@ TEST(UpdateCompiler, GradientAccumulationSplitsAnSgdStream) {
   }
 }
 
+TEST(UpdateCompiler, CertifiedBf16MarksOnlyTheFrozenGemmsOfTraining) {
+  // --precision certified-bf16 (plan v18): kFlagRelaxed on every train /
+  // step GEMM whose B is rodata (NN forward, NT dX), on nothing else, and
+  // on no eval instruction; the f32 default emits no bit at all, so the
+  // two plans differ only in those flags.
+  SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 53);
+  for (int storage = 0; storage < 3; ++storage) {
+    UpdateConfig exact = BaseConfig(kBatch);
+    exact.quantize_base = storage == 1;
+    exact.bf16_base = storage == 2;
+    UpdateConfig relaxed = exact;
+    relaxed.precision = Precision::kCertifiedBf16;
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate a, UpdateCompiler(exact).Compile(model));
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate b, UpdateCompiler(relaxed).Compile(model));
+    EXPECT_EQ(a.relaxed_gemms, 0u);
+    const auto ta = TrainProgramOf(a), tb = TrainProgramOf(b);
+    ASSERT_EQ(ta.size(), tb.size());
+    uint64_t flagged = 0;
+    for (size_t i = 0; i < ta.size(); ++i) {
+      const auto op = static_cast<OpCode>(tb[i].opcode);
+      const bool frozen =
+          (op == OpCode::kGemmNN || op == OpCode::kGemmNT ||
+           op == OpCode::kGemmNNQ8 || op == OpCode::kGemmNTQ8 ||
+           op == OpCode::kGemmNNBF16 || op == OpCode::kGemmNTBF16) &&
+          IsRodataRef(tb[i].in[1]);
+      EXPECT_EQ((tb[i].flags & kFlagRelaxed) != 0, frozen);
+      EXPECT_EQ(tb[i].flags & ~kFlagRelaxed, ta[i].flags);
+      EXPECT_EQ(ta[i].flags & kFlagRelaxed, 0u);
+      flagged += frozen;
+    }
+    // Every adapted weight: one forward, and one dX for all but the first.
+    EXPECT_EQ(flagged, 2 * b.adapters.size() - 1);
+    EXPECT_EQ(b.relaxed_gemms, flagged);
+    for (const auto& ins : EvalProgramOf(b))
+      EXPECT_EQ(ins.flags & kFlagRelaxed, 0u);
+    EXPECT_EQ(HeaderOf(b).version, kSeeuVersion);
+    EXPECT_GE(kSeeuVersion, kSeeuRelaxedVersion);
+  }
+}
+
 TEST(UpdateCompiler, Bf16BaseHalvesRodataAndLowersTheWideningGemms) {
   SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 53);
   UpdateConfig f32 = BaseConfig(kBatch);
@@ -456,6 +507,91 @@ TEST(UpdateCompiler, LoraSitesCostNoActivationSizedPassOfTheirOwn) {
             HeaderOf(folded).train_instr_count + 3);
   EXPECT_EQ(HeaderOf(plain).eval_instr_count,
             HeaderOf(folded).eval_instr_count + 2);
+}
+
+TEST(UpdateCompiler, PerColumnInt8ScalesKeepTheBulkOfAnOutlierWeight) {
+  // E12 (#95): LLM projections carry |w| outliers 10-50x the bulk. Under a
+  // per-tensor max-abs scale one outlier column sets the step for every
+  // column, collapsing the bulk to a few int8 levels; per-column scales
+  // (v17) give each column its own. Plant one column at 50x the bulk —
+  // with raw mt19937_64 bits, never a distribution — compile, and read the
+  // plan's own levels and scales back: the bulk's dequantization error
+  // falls by well over 10x, while the outlier column's own error cannot
+  // (its scale is the per-tensor one either way) and does not change.
+  const int64_t in_dim = 64, hidden = 48, out_dim = 3;
+  SmfModel model = MakeMlp(in_dim, hidden, out_dim, 57);
+  SmfTensor* w = nullptr;
+  for (SmfTensor& t : model.tensors)
+    if (t.is_const && t.dims.size() == 2 && t.dims[0] == in_dim) w = &t;
+  ASSERT_NE(w, nullptr);
+  const size_t K = static_cast<size_t>(w->dims[0]);
+  const size_t Mc = static_cast<size_t>(w->dims[1]);
+  std::mt19937_64 bits(4242);
+  auto unit = [&] {  // [-1, 1), exact in f32, portable
+    return static_cast<float>(static_cast<double>(bits() >> 40) /
+                                  static_cast<double>(1ull << 23) -
+                              1.0);
+  };
+  std::vector<float> wf(K * Mc);
+  const size_t outlier = 7;
+  for (size_t k = 0; k < K; ++k)
+    for (size_t m = 0; m < Mc; ++m)
+      wf[k * Mc + m] = (m == outlier ? 50.0f : 1.0f) * 0.02f * unit();
+  w->data = seeml::testing::AsPayload(wf);
+  w->byte_size = wf.size() * sizeof(float);
+
+  UpdateConfig config = BaseConfig(kBatch);
+  config.quantize_base = true;
+  ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                       UpdateCompiler(config).Compile(model));
+  uint64_t levels_ref = kNullRef;
+  for (const auto& a : compiled.adapters)
+    if (a.weight_name == w->name) levels_ref = a.weight_rodata_ref;
+  ASSERT_NE(levels_ref, kNullRef);
+  uint64_t scales_ref = kNullRef;
+  for (const UpdateInstruction& ins : TrainProgramOf(compiled))
+    if (ins.opcode == static_cast<uint16_t>(OpCode::kGemmNNQ8) &&
+        ins.in[1] == levels_ref) {
+      EXPECT_TRUE((ins.flags & kFlagQ8ColScale) != 0);
+      scales_ref = ins.in[3];
+    }
+  ASSERT_TRUE(IsRodataRef(scales_ref));
+  const PlanHeader h = HeaderOf(compiled);
+  const uint8_t* rodata = compiled.plan.data() + h.rodata_offset;
+  const auto* q = reinterpret_cast<const int8_t*>(rodata + RefOffset(levels_ref));
+  const auto* cs = reinterpret_cast<const float*>(rodata + RefOffset(scales_ref));
+
+  float tensor_max = 0.0f;
+  for (float v : wf) tensor_max = std::max(tensor_max, std::fabs(v));
+  const float per_tensor = tensor_max / 127.0f;
+  double bulk_sq_col = 0.0, bulk_sq_ten = 0.0, bulk_abs_col = 0.0,
+         bulk_abs_ten = 0.0, out_max_col = 0.0, out_max_ten = 0.0;
+  for (size_t k = 0; k < K; ++k)
+    for (size_t m = 0; m < Mc; ++m) {
+      const float v = wf[k * Mc + m];
+      const double e_col = std::fabs(q[k * Mc + m] * cs[m] - v);
+      const float lvl = std::clamp(std::round(v / per_tensor), -127.0f, 127.0f);
+      const double e_ten = std::fabs(lvl * per_tensor - v);
+      if (m == outlier) {
+        out_max_col = std::max(out_max_col, e_col);
+        out_max_ten = std::max(out_max_ten, e_ten);
+      } else {
+        bulk_sq_col += e_col * e_col;
+        bulk_sq_ten += e_ten * e_ten;
+        bulk_abs_col += e_col;
+        bulk_abs_ten += e_ten;
+      }
+    }
+  const double rms_ratio = std::sqrt(bulk_sq_ten / bulk_sq_col);
+  const double mean_ratio = bulk_abs_ten / bulk_abs_col;
+  std::fprintf(stderr,
+               "per-column int8: bulk RMS error down %.1fx, mean-abs %.1fx; "
+               "outlier column max-abs %.3g vs %.3g\n",
+               rms_ratio, mean_ratio, out_max_col, out_max_ten);
+  EXPECT_GT(rms_ratio, 10.0);
+  EXPECT_GT(mean_ratio, 10.0);
+  EXPECT_EQ(cs[outlier], per_tensor);  // the outlier's scale is the tensor's
+  EXPECT_NEAR(out_max_col, out_max_ten, 1e-9);
 }
 
 TEST(UpdateCompiler, NarrowWeightGemmsKeepTheirOwnInstruction) {

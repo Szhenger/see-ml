@@ -49,6 +49,12 @@ struct EmitOptions {
   /// disk once (the .seeu) for tool/pack_update.py to embed with .incbin —
   /// the only route that stays seconds and ~1x plan size at 100M+ params.
   bool embed_plan_tu = true;
+  /// The plan carries relaxed GEMMs (v18, --precision certified-bf16): the
+  /// build script then compiles the CPU backend with SEEML_ACCELERATE on
+  /// Apple hosts (F4), so those GEMMs run on Accelerate's matrix units —
+  /// SEEML_NO_ACCELERATE=1 keeps the portable kernels. An exact plan's
+  /// script never links Accelerate.
+  bool relaxed_plan = false;
 };
 
 [[nodiscard]] std::expected<EmitPaths, std::string> EmitNativePackage(

@@ -72,6 +72,9 @@ class ManifestAgreement(unittest.TestCase):
         grown = copy.deepcopy(abi)
         grown["smf"]["op_kinds"]["conv"] = 12
         cases.append((grown, "smf.op_kinds"))
+        moved_bit = copy.deepcopy(abi)
+        moved_bit["seeu"]["source_bit"] = 61  # the v17 address space
+        cases.append((moved_bit, "seeu.source_bit"))
         for doctored, where in cases:
             problems = formats.check_against(doctored)
             self.assertEqual(len(problems), 1, problems)

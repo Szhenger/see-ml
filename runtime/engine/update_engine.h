@@ -260,6 +260,21 @@ class UpdateEngine {
   /// copy it patches (no TOCTOU window); calling this right after load
   /// merely fails fast — a mismatched model costs one file scan instead of
   /// a full training run. Plans with no hash binding (hash 0) always pass.
+  /// Binds the source model file for the eval program (plan v17, E12 #95).
+  /// A plan compiled with --quantize-base / --bf16-base from a model FILE
+  /// scores what ships: its eval program reads the student's frozen weights
+  /// as the f32 the commit patches, straight from this file, instead of the
+  /// plan's narrow copies. The file is verified against source_model_hash,
+  /// checked to cover every extent the eval program reads, and mapped
+  /// read-only for the engine's lifetime (or the next plan load). Until it
+  /// is bound such a plan refuses to evaluate. A plan that does not need it
+  /// (scores_shipped() == false) accepts the call as VerifySourceModel.
+  [[nodiscard]] std::expected<void, std::string> BindSourceModel(
+      const std::string& source_model_path);
+  /// The eval program reads the source model file (v17): its losses are
+  /// the shipped function's, not the in-plan proxy's.
+  bool scores_shipped() const { return source_required_ > 0; }
+
   [[nodiscard]] std::expected<void, std::string> VerifySourceModel(
       const std::string& source_model_path) const;
 
@@ -356,6 +371,15 @@ class UpdateEngine {
   std::unique_ptr<ExecutorBackend> backend_;
   BackendKind backend_kind_ = BackendKind::kCpu;
   std::string backend_note_;
+  // The bound source model (v17): a read-only mmap of the file, and the
+  // byte extent the eval program's source refs need from it (0 = none).
+  struct SourceMapping {
+    const uint8_t* data = nullptr;
+    uint64_t bytes = 0;
+    ~SourceMapping();
+    void Release();
+  } source_;
+  uint64_t source_required_ = 0;
   uint64_t step_ = 0;                     // 1-indexed AdamW timestep
   uint64_t horizon_ = 0;                  // run LR horizon; 0 = plan default
 

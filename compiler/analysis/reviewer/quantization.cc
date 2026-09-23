@@ -16,6 +16,14 @@ namespace {
 /// every user reads it as the weight operand of a matmul kernel — those
 /// kernels widen on the way into the tile; any other consumer would need
 /// the f32 bytes.
+/// Teacher weights stay f32 (E12, #95): the teacher is the distillation
+/// TARGET, and quantizing it moved the target the student was scored
+/// against. It is also read from a different file than the one a plan
+/// scores its shipped model from, so its bytes must be in the plan as-is.
+bool IsTeacherWeight(const sir::Value* v) {
+  return std::string_view(v->id()).starts_with("t::");
+}
+
 bool MatmulWeightOnly(const sir::Value* v) {
   for (const sir::Operation* user : v->users()) {
     const std::string_view m = user->mnemonic();
@@ -37,6 +45,7 @@ std::unordered_set<const sir::Value*> SelectBf16Weights(
     if (op->mnemonic() != "sc_mem.weight") return;
     const sir::Value* v = op->result(0);
     if (!build.weight_sources.contains(v)) return;
+    if (IsTeacherWeight(v)) return;
     if (MatmulWeightOnly(v)) selected.insert(v);
   });
   return selected;
@@ -50,6 +59,7 @@ std::unordered_map<const sir::Value*, float> SelectQuantizedWeights(
     const sir::Value* v = op->result(0);
     auto src = build.weight_sources.find(v);
     if (src == build.weight_sources.end()) return;
+    if (IsTeacherWeight(v)) return;
     if (!MatmulWeightOnly(v)) return;
 
     const auto* data = reinterpret_cast<const float*>(src->second->data.data());

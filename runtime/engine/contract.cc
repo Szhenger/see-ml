@@ -136,10 +136,20 @@ std::expected<void, std::string> VerifyExecutorContract(
     std::span<const up::EmitEntry> emit_table, const up::PlanHeader& header) {
   for (const auto* program : {&train, &merge, &eval, &step})
     for (const up::UpdateInstruction& ins : *program) {
+      // Only the eval program may read the source model file (v17).
       if (auto r = ValidateInstruction(ins, header.arena_size,
-                                       header.rodata_size, header.version);
+                                       header.rodata_size, header.version,
+                                       /*allow_source=*/program == &eval);
           !r)
         return r;
+      // The relaxed bit (v18) belongs to the train and step programs: the
+      // eval program scores the model that ships in exact arithmetic, and
+      // the merge program has no GEMM a certificate covers.
+      if ((ins.flags & up::kFlagRelaxed) &&
+          (program == &eval || program == &merge))
+        return diag::executing::Error(
+            "a relaxed GEMM outside the train / step programs (opcode " +
+            std::to_string(ins.opcode) + ")");
       // Label provenance for the class-indexed kernels. The softmax pair
       // indexes probability rows with raw i32 labels
       // (probs[n*C + labels[n]]) — the one place a validated instruction

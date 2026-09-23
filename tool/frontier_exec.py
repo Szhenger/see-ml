@@ -80,6 +80,13 @@ from seeml import formats  # noqa: E402
 SEEU_MAGIC = formats.SEEU_MAGIC
 SEEU_OLDEST, SEEU_NEWEST = formats.SEEU_OLDEST_READABLE, formats.SEEU_VERSION
 RODATA_BIT = formats.RODATA_BIT
+SOURCE_BIT = formats.SOURCE_BIT
+FLAG_RELAXED = formats.FLAG_RELAXED
+
+
+def is_source_ref(ref):
+    """A v17 source-model ref: bit 62 set, bit 63 clear."""
+    return ref & (RODATA_BIT | SOURCE_BIT) == SOURCE_BIT
 NULL_REF = formats.NULL_REF
 
 _HEADER = formats.PLAN_HEADER.struct
@@ -107,6 +114,20 @@ class Instruction:
 
 def bits_f32(word):
     return struct.unpack("<f", struct.pack("<I", word & 0xFFFFFFFF))[0]
+
+
+def round_bf16(np, t):
+    """`t` rounded to the nearest bfloat16 (ties to even) and widened back
+    — the one rounding a relaxed GEMM (plan v18, kFlagRelaxed) applies to
+    its f32 activation input before the tensor-op multiply. Values already
+    representable pass through exactly, as do NaN and the infinities."""
+    t = np.asarray(t)
+    a = np.ascontiguousarray(t.astype(np.float32))
+    u = a.view(np.uint32)
+    rounded = (u + np.uint32(0x7FFF) + ((u >> 16) & np.uint32(1))) & np.uint32(
+        0xFFFF0000)
+    r = np.where(np.isnan(a), u, rounded).astype(np.uint32).view(np.float32)
+    return r.astype(t.dtype) if t.dtype != np.float32 else r
 
 
 def f32_bits(value):
@@ -157,6 +178,10 @@ class Plan:
         if self.persistent_size > self.arena_size:
             raise PlanError(f"{path}: persistent segment exceeds the arena")
         self.grad_accum = max(1, self.grad_accum_steps)
+        # v18: the frozen-weight GEMMs a certified relaxed kernel may run.
+        self.relaxed_gemms = sum(
+            1 for name in ("train", "step") for i in self.sections[name]
+            if i.flags & FLAG_RELAXED)
 
     def _bounds(self, what, off, size):
         if off > len(self.blob) or size > len(self.blob) - off:
@@ -383,6 +408,13 @@ class SyntheticCorpus:
 
 class NumpyBackend:
     arena_views = True  # tensors are zero-copy views of the arena bytes
+    # Model the relaxed GEMM family (v18): round each kFlagRelaxed GEMM's
+    # activation input to bf16 first. Off, every backend computes the
+    # exact reference; `--relaxed` and the certifier's relaxed arm turn it on.
+    relaxed_gemms = False
+
+    def relax_input(self, a):
+        return round_bf16(self.np, a)
 
     def __init__(self, compute="float64"):
         import numpy as np
@@ -499,6 +531,11 @@ class TorchBackend:
         if self.dev.type == "mps":
             self.torch.mps.synchronize()
 
+    relaxed_gemms = False
+
+    def relax_input(self, a):
+        return a.to(self.torch.bfloat16).to(a.dtype)
+
     def matmul(self, a, b):
         return self.torch.matmul(a, b)
 
@@ -593,6 +630,11 @@ class MlxBackend:
     def sync(self, tensors=()):
         self.mx.eval(*tensors) if tensors else self.mx.synchronize()
 
+    relaxed_gemms = False
+
+    def relax_input(self, a):
+        return a.astype(self.mx.bfloat16).astype(a.dtype)
+
     def matmul(self, a, b):
         return self.mx.matmul(a, b)
 
@@ -680,20 +722,39 @@ class Memory:
         self.arena = plan.initial_arena()
         self.recorder = None
         self._frozen = {}
+        self.source = None  # v17: the source model file's bytes (E12)
 
     # Frozen weights: f32 as stored, int8 and bf16 widened once. A frontier
     # framework holds its weights in a dtype it can multiply; the on-the-fly
     # dequantization is the C++ runtime's memory trade, not part of the
     # arithmetic being checked or priced.
-    def frozen(self, ref, shape, kind="<f4", scale=1.0):
-        key = (ref, shape, kind, scale)
+    def frozen(self, ref, shape, kind="<f4", scale=1.0, colscale=None):
+        key = (ref, shape, kind, scale, colscale)
         if key not in self._frozen:
-            np, off = self.np, self.plan.rodata_offset + (ref & ~RODATA_BIT)
-            n = _count(shape)
-            if off + n * _DTYPE_BYTES[kind] > len(self.plan.blob):
-                raise PlanError("a rodata operand lies outside the plan")
-            raw = np.frombuffer(self.plan.blob, kind, n, off)
-            if kind == "<i1":
+            np, n = self.np, _count(shape)
+            if is_source_ref(ref):
+                # v17: the eval program reads the shipped f32 weights from
+                # the source model file, at their absolute SMF offsets.
+                if self.source is None:
+                    raise PlanError("the eval program reads the source "
+                                    "model: pass --source model.smf")
+                blob, off = self.source, ref & ~SOURCE_BIT
+                if off + n * _DTYPE_BYTES[kind] > len(blob):
+                    raise PlanError("a source operand lies outside the "
+                                    "model file")
+            else:
+                blob = self.plan.blob
+                off = self.plan.rodata_offset + (ref & ~RODATA_BIT)
+                if off + n * _DTYPE_BYTES[kind] > len(blob):
+                    raise PlanError("a rodata operand lies outside the plan")
+            raw = np.frombuffer(blob, kind, n, off)
+            if kind == "<i1" and colscale is not None:
+                cols = shape[-1]
+                off_s = self.plan.rodata_offset + (colscale & ~RODATA_BIT)
+                cs = np.frombuffer(self.plan.blob, "<f4", cols, off_s)
+                host = (raw.astype(np.float32).reshape(shape) *
+                        cs.reshape((1, cols))).reshape(-1)
+            elif kind == "<i1":
                 host = raw.astype(np.float32) * np.float32(scale)
             elif kind == "<u2":  # bfloat16: f32's top 16 bits, exactly
                 host = (raw.astype(np.uint32) << 16).view(np.float32)
@@ -710,7 +771,7 @@ class Memory:
             raise PlanError("an arena operand lies outside the arena")
 
     def read(self, ref, shape, kind="<f4"):
-        if ref != NULL_REF and ref & RODATA_BIT:
+        if ref != NULL_REF and (ref & RODATA_BIT or is_source_ref(ref)):
             return self.frozen(ref, tuple(shape), kind)
         return self._read(ref, tuple(shape), kind)
 
@@ -878,15 +939,32 @@ def _rope(x, t, b, s, h, d, base, sign):
                         even * sin + odd * cos).reshape((b * s, h * d))
 
 
-def _gemm_operands(m, ins, kind, transposed_b):
+def _gemm_operands(m, x, ins, kind, transposed_b):
     rows, cols, inner = ins.out
     a = m.read(ins.src[0], (rows, inner))
     shape = (cols, inner) if transposed_b else (inner, cols)
+    # v18: under the relaxed model the activation is rounded to bf16 once,
+    # exactly where the Metal tensor-op kernel rounds it; the stored weight
+    # (f32, int8 levels, bf16) enters exact.
+    relaxed = bool(ins.flags & FLAG_RELAXED) and getattr(x, "relaxed_gemms",
+                                                          False)
     if kind == "<f4":
         b = m.read(ins.src[1], shape)
+    elif kind == "<i1" and ins.flags & formats.FLAG_Q8_COL_SCALE:
+        if relaxed and transposed_b:
+            # The relaxed dX kernel folds the reduction index's scale into
+            # the activation before rounding: bf16(A[m, k] * s[k]) . q[n, k].
+            s = m.frozen(ins.src[3], (inner,), "<f4")
+            q = m.frozen(ins.src[1], shape, kind, 1.0)
+            return x.relax_input(a * s), q.T
+        # v17: one scale per output column of W — the last axis of B in
+        # both the NN ([K, M]) and the NT ([N = K, M]) reading.
+        b = m.frozen(ins.src[1], shape, kind, 1.0, colscale=ins.src[3])
     else:
         scale = bits_f32(ins.src[3]) if kind == "<i1" else 1.0
         b = m.frozen(ins.src[1], shape, kind, scale)
+    if relaxed:
+        a = x.relax_input(a)
     return a, (b.T if transposed_b else b)
 
 
@@ -900,7 +978,7 @@ def _addend(m, ins, c):
 
 def _gemm_nn(kind):
     def op(m, x, ins, step):
-        a, b = _gemm_operands(m, ins, kind, False)
+        a, b = _gemm_operands(m, x, ins, kind, False)
         c = _addend(m, ins, x.matmul(a, b))
         if ins.flags & 1:  # the fused epilogue: C = act(A@B + bias)
             c = c + m.read(ins.src[3], (ins.out[1],))
@@ -910,7 +988,7 @@ def _gemm_nn(kind):
 
 def _gemm_nt(kind):
     def op(m, x, ins, step):
-        a, b = _gemm_operands(m, ins, kind, True)
+        a, b = _gemm_operands(m, x, ins, kind, True)
         m.write(ins.src[2], _addend(m, ins, x.matmul(a, b)))
     return op
 
@@ -1335,10 +1413,13 @@ assert sorted(INTERPRETER) == sorted(OPCODES)
 class Executor:
     """One plan bound to one backend: the engine's loop, minus the gate."""
 
-    def __init__(self, plan, backend):
+    def __init__(self, plan, backend, source=None):
         self.plan, self.x = plan, backend
         mem = ArenaMemory if backend.arena_views else SlotMemory
         self.mem = mem(plan, backend)
+        if source:
+            with open(source, "rb") as f:
+                self.mem.source = f.read()
         self.step = 0
         self.horizon = 0  # the run's LR horizon; 0 = the plan's default
         unknown = sorted({i.opcode for s in plan.sections.values() for i in s}
@@ -1483,13 +1564,15 @@ def read_trace(np, path):
 class Probe:
     """seeml-plan-probe, the C++ side of the comparison."""
 
-    def __init__(self, path, plan_path, backend="cpu", threads=None):
+    def __init__(self, path, plan_path, backend="cpu", threads=None,
+                 source=None):
         if not (path and os.path.isfile(path) and os.access(path, os.X_OK)):
             raise PlanError(f"no seeml-plan-probe at {path!r} — build the "
                             "tree (sh build/build.sh) or pass --probe")
         self.base = [path, "--plan", plan_path, "--backend", backend]
         if threads:
             self.base += ["--threads", str(threads)]
+        self.source = source  # v17: passed to eval sections
         self.tmp = tempfile.TemporaryDirectory(prefix="seeml-frontier-")
 
     def close(self):
@@ -1504,6 +1587,8 @@ class Probe:
                            "--arena-out", a_out,
                            "--lr-bits", f"{f32_bits(scalars['lr']):08x}",
                            "--step", str(scalars["step"])] + extra
+        if section == "eval" and self.source:
+            cmd += ["--source", self.source]
         done = subprocess.run(cmd, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, text=True)
         if done.returncode != 0:
@@ -1587,11 +1672,14 @@ def cmd_diff(args):
         backend = make_backend(args.backend)
     except ImportError as e:
         raise PlanError(f"backend '{args.backend}' is unavailable: {e}")
+    if getattr(args, "relaxed", False):
+        backend.relaxed_gemms = True
     corpus = (Corpus(np, args.corpus) if args.corpus
               else SyntheticCorpus(np, plan, args.seed))
     corpus.check(plan)
-    ex = Executor(plan, backend)
-    probe = Probe(args.probe, args.plan, args.cpp_backend, args.threads)
+    ex = Executor(plan, backend, args.source)
+    probe = Probe(args.probe, args.plan, args.cpp_backend, args.threads,
+                  args.source)
     differ = Differ(np, args.rtol, args.atol)
 
     def both(label, section, scalars):
@@ -1670,6 +1758,8 @@ def cmd_run(args):
         backend = make_backend(args.backend)
     except ImportError as e:
         raise PlanError(f"backend '{args.backend}' is unavailable: {e}")
+    if getattr(args, "relaxed", False):
+        backend.relaxed_gemms = True
     corpus = Corpus(np, args.corpus)
     corpus.check(plan)
     val = None
@@ -1677,7 +1767,7 @@ def cmd_run(args):
         corpus, val = corpus.split_validation(args.val_fraction)
     if not args.no_shuffle:
         corpus.enable_shuffle(args.seed)
-    ex = Executor(plan, backend)
+    ex = Executor(plan, backend, args.source)
     steps = args.steps or plan.default_steps
     ex.horizon = steps  # a fresh run anneals over its own length
     report = {"plan": args.plan, "backend": backend.name,
@@ -1842,7 +1932,9 @@ def cmd_info(args):
              else "")
           + (f", {plan.seq_len}-token records" if plan.input_kind else ""))
     print("sections: " + ", ".join(
-        f"{name} {len(plan.sections[name])}" for name in SECTIONS))
+        f"{name} {len(plan.sections[name])}" for name in SECTIONS)
+          + (f"; {plan.relaxed_gemms} relaxed GEMM(s) (v18: a certified "
+             "kernel may run them)" if plan.relaxed_gemms else ""))
     print(f"GEMM FLOPs per optimizer step: "
           f"{plan.gemm_flops() * plan.grad_accum:,}")
     for name, where in sorted(plan.histogram().items()):
@@ -1883,7 +1975,15 @@ def build_parser():
         sp.add_argument("--threads", type=int, default=None,
                         help="SEEML thread count for the C++ probe")
         sp.add_argument("--report", metavar="JSON", default=None)
+        sp.add_argument("--source", metavar="SMF", default=None,
+                        help="the model the plan was compiled from — a v17 "
+                             "plan's eval program reads its f32 weights")
 
+        sp.add_argument("--relaxed", action="store_true",
+                        help="model the relaxed GEMM family (v18): round each "
+                             "kFlagRelaxed GEMM's activation input to bf16, "
+                             "as the certified Metal kernels do; default: the "
+                             "exact reference")
     diff = sub.add_parser("diff", help="compare every write against the "
                                        "C++ runtime")
     common(diff)
