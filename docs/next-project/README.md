@@ -8,7 +8,9 @@ incident analysis. This document merges the deliverables of both reports into
 the objectives of one project, and partitions every finding by its root
 cause. The issue bodies live in [`issues/`](issues/);
 [`tool/create_next_project.sh`](../../tool/create_next_project.sh)
-materializes them as GitHub Issues and a GitHub Project board.*
+materializes them as GitHub Issues and a GitHub Project board. The six
+`f*.md` bodies added on 2026-09-18 are the **SeeRL v1.0.0.A** milestone
+(F1–F6, from the Frontier Outlook), reconciled by the same script.*
 
 ## The paradigm change
 
@@ -127,8 +129,34 @@ gh auth login            # then: gh auth refresh -s project
 tool/create_next_project.sh
 ```
 
-The script is idempotent: it creates the labels, files one GitHub Issue per
-body in `issues/` (skipping any title that already exists), creates the
-**“SeeML Two-Plane Overhaul”** GitHub Project with `Plane` / `Origin` /
-`Priority` fields, and adds both the new issues and the existing
-#59–#67/#69–#71 to the board.
+The script reconciles, so the bodies stay the source of truth after the
+first run. `--dry-run` prints every write it would make and makes none.
+
+Each body is a Markdown file with a front matter the script reads:
+
+| key | required | meaning |
+|---|---|---|
+| `title` | yes | the issue title; the match key for an existing issue |
+| `labels` | yes | comma-separated; a plane label is kept at the script's colour table, any other label is created grey when missing |
+| `plane`, `priority` | yes | the board's `Plane` / `Priority` single-select values |
+| `origin` | no | the board's `Origin` value (`Frontier Outlook` for F1–F6); blank leaves the field unset |
+| `milestone` | no | the issue's milestone, upserted by title (`SeeRL v1.0.0.A` for F1–F6) |
+
+What the file owns, and what it does not:
+
+- **the body** — an open issue whose live body differs from the file is
+  edited to the file;
+- **labels as a floor** — every label the file names is present; labels
+  added live for triage (`sev:*`, `good first issue`, …) are kept;
+- **the milestone, when the file names one** — a body without
+  `milestone:` leaves the live milestone alone;
+- **closed issues are history** — their body, labels and milestone are
+  left alone and only their board fields are reconciled.
+
+Then it creates or reuses the **“SeeML Two-Plane Overhaul”** GitHub
+Project with `Plane` / `Origin` / `Priority` fields — their option sets
+are the union of what the bodies and the roadmap rows name, and an option
+an existing field lacks is printed as an `ACTION:` line for the web UI,
+since the Projects CLI cannot append one — and adds both the new issues
+and the existing #59–#67/#69–#71 to the board, writing a field only when
+its value differs.

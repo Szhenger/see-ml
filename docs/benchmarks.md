@@ -257,49 +257,6 @@ The harness, raw JSON and loss curves are in `out/frontier-2026-09-22/`
 (not committed); the full report is the SeeML Frontier Harness page of
 2026-09-22.
 
-### The relaxed GEMM family, measured (plan v18, 2026-09-23)
-
-`--precision certified-bf16` is priced by the certificate first and by
-the harness second. SmolLM-135M, the docs corpus, r8 / α16, AdamW 1e-4,
-512 tokens per step, Apple M5, `tool/certify_numerics.py certify --steps 2
---max-site-error 1e-4 --max-loss-deviation 1e-2` (about 25 CPU-minutes
-per plan; the reference reductions' own site tolerance of 1e-5 is
-already too tight for a 49,152-wide softmax, which observes 3.9e-5). Each
-plan marks 419 GEMMs relaxed; two steps make 838 priced instances:
-
-| plan | `gemm.relaxed` observed / bound | loss deviation | validation deviation | verdict |
-|---|---:|---:|---:|---|
-| int8 base (E12 per-column scales) | 6.2e-3 / 3.1e-2 | 2.3e-4 | 2.4e-6 | granted |
-| f32 base | 5.5e-3 / 2.9e-2 | 3.3e-4 | 2.8e-7 | granted |
-
-The CPU row (`tool/frontier_run.py seeml --backend cpu`, 10 threads, the
-package the certificate vouches for, its `build.sh` linking Accelerate
-because the plan is relaxed; step = the slope from the 5-step to the
-15-step run, then a 60-step quality run):
-
-| package | step ms | tok/s | val loss 0 → 60 | run a ≡ run b |
-|---|---:|---:|---:|---|
-| f32 base, exact | 1,830 | 280 | 4.574264 → 4.311599 | bitwise (the reference) |
-| f32 base, `certified-bf16` (Accelerate SGEMM) | 681–708 | 724–752 | 4.574264 → 4.311598 | bitwise |
-
-2.6× on the CPU step from the frozen-weight GEMMs alone. Against
-`torch.compile`'s 847 tok/s on this model (the frontier row above), the
-f32-base CPU package moves from 0.35× (the report's 299 tok/s; 280 in
-this session's exact re-measurement) to 0.85–0.89×, with the 60-step
-validation loss equal to six decimals. The harness refused one of the
-three rows as "not a measurement" — its 5-step run paid the cold-cache
-load of the source model and the lo→hi slope came out negative — which
-is what the check is for; the repeat row is the one quoted. int8 and
-bf16 bases stay on the portable CPU kernels (unchanged rows). The Metal
-rows of the relaxed family (the tensor-op kernels: 7.5 TFLOP/s on bf16
-activations × exact int8 weights in the microbenchmark, against the
-exact kernel's 3.0–3.4 on the same shapes) were not measured in the
-session that wrote this — its sandbox could not reach the Metal compiler
-service; the plan is `out/frontier-2026-09-22/f2_measure/plan_metal.json`
-and the honest expectation, from the step profile (int8 base GEMMs ≈ 50 %
-of the step, adapter GEMMs ≈ 32 %), is about 1.4× on the step, not F2's
-≥ 0.9× of MLX-LM bf16.
-
 ## Tier C — Memory (the gate that refuses compiles)
 
 | metric | definition | what it gates |
