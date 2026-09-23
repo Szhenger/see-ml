@@ -38,7 +38,7 @@ QWEN = {"layers": 24, "dim": 896, "heads": 14, "kv_heads": 2, "ffn": 4864,
 
 def a_row(system, precision, **over):
     r = {"system": system, "backend": "gpu", "precision": precision,
-         "records_digest": "abc", "tokens_per_step": 512,
+         "records_digest": "abc", "tokens_per_step": 512, "tokens_per_s": 1000.0,
          "val_loss": [4.5744, 4.0], "adapter_params": None}
     r.update(over)
     return r
@@ -73,6 +73,10 @@ class ParityTest(unittest.TestCase):
 
     def test_each_rule_refuses_alone(self):
         base = [a_row("torch.compile", "f32")]
+        self.assertTrue(any("not a measurement" in p for p in fr.parity_problems(
+            base + [a_row("SeeML", "f32", suspect=True)])))
+        self.assertTrue(any("not a measurement" in p for p in fr.parity_problems(
+            base + [a_row("SeeML", "f32", val_loss=None)])))
         self.assertTrue(any("different records" in p for p in fr.parity_problems(
             base + [a_row("MLX-LM LoRA", "bf16", records_digest="xyz")])))
         self.assertTrue(any("tokens per step" in p for p in fr.parity_problems(

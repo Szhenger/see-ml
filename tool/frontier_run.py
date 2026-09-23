@@ -98,6 +98,21 @@ def records_digest(records):
     return hashlib.sha256(records.astype("<i4").tobytes()).hexdigest()[:16]
 
 
+def sds_records_digest(path):
+    """The same digest over a token corpus (SDS v2, i32 records) — how a
+    SeeML row proves it trained on the frameworks' records. Standard
+    library only."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from seeml import formats
+    with open(path, "rb") as f:
+        head = f.read(formats.SDS_HEADER_BYTES)
+        h = dict(zip(formats.SDS_HEADER.names, formats.SDS_HEADER.unpack_from(head, 0)))
+        if h["magic"] != formats.SDS_MAGIC or h["input_kind"] != 1:
+            return None
+        body = f.read(h["num_samples"] * (h["input_dim"] + 1) * 4)
+    return hashlib.sha256(body).hexdigest()[:16]
+
+
 # --- Rule 2: the adapted set -------------------------------------------------
 
 def hf_geometry(model_dir):
@@ -468,6 +483,9 @@ def cmd_seeml(args):
             sha = h.hexdigest()
             os.remove(model_out)
         device = re.search(r"backend \w+ \(([^\n]*)\)", out)
+        if rc not in (0, 3):  # 3 = the gate declined: a result, not a failure
+            raise SystemExit(f"frontier_run: model_update exited {rc} on the {steps}-step "
+                             f"run:\n{out[-1500:]}")
         return {"steps": steps, "exit": rc, "wall_s": wall, "peak_rss_bytes": rss,
                 "report": report, "committed_sha256": sha,
                 "device": device.group(1) if device else None}
@@ -505,6 +523,7 @@ def cmd_seeml(args):
         device=(quality or runs[0])["device"], threads=args.threads,
         config=dict(steps=args.quality_steps, tokens_per_step=tokens,
                     lo=args.lo, hi=args.hi, repeats=args.repeats),
+        records_digest=sds_records_digest(args.data),
         adapters=len(compile_report["adapters"]),
         adapter_params=sum(a["rank"] * (a["k"] + a["m"]) for a in compile_report["adapters"]),
         arena_bytes=compile_report["arena_bytes"], plan_bytes=compile_report["plan_bytes"],
@@ -534,6 +553,10 @@ def cmd_seeml(args):
 def parity_problems(rows, geom=None, rank=None, val0_tol=0.02):
     """Every reason the rows are not one comparison (empty = they are)."""
     problems = []
+    for r in rows:
+        if r.get("suspect") or not r.get("val_loss") or not r.get("tokens_per_s"):
+            problems.append(f"{r['system']} / {r['backend']} / {r['precision']}: "
+                            "not a measurement (a failed or suspect run)")
     digests = {r.get("records_digest") for r in rows if r.get("records_digest")}
     if len(digests) > 1:
         problems.append(f"rows train on different records: {sorted(digests)}")
