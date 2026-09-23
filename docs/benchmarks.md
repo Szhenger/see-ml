@@ -56,11 +56,18 @@ number dressed as lm-eval output. Quality metrics against a real model
 (SmolLM-135M val loss/accuracy vs the torch reference) live in the
 validation field reports, where the corpus is real text.
 
-Reference frontier numbers for the same host class, for scale: on Apple
-M4, `mlx_lm.lora` on SmolLM-135M (bf16, r8, GPU) reports ~6.4 It/sec and
-~1,600 Tokens/sec at 1.28 GB peak; `torch.compile` on CPU reaches ~40% MFU
-against the AMX peak. SeeML's CPU path sits at 4–13% MFU on the same
-shapes — the gap the C2 SIMD and G1b Metal projects are priced against.
+Reference frontier numbers, measured on this host class (Apple M5, 16 GB,
+2026-09-22, same model, corpus, split and 512 tokens per step as SeeML —
+"The frontier row, measured" below): on SmolLM-135M, `mlx_lm`'s LoRA
+trainer reaches 4,605 tok/s in bf16 (9.0 it/s, 1.34 GB peak) and 2,240 in
+true f32; `torch.compile` reaches 3,761 tok/s on MPS in bf16, 2,099 in f32,
+and 847 on the CPU in f32 (Accelerate/AMX). SeeML's Metal backend trains
+the same model at 1,802 tok/s (f32 math, int8 base) — 0.80× the f32
+frontier and 0.39× the bf16 one — and its CPU package at 332, 0.39× of
+`torch.compile`. Half precision (F2) and the CPU matrix units (F4) are the
+gaps those ratios price. (The v1.2.4 report's M4 anchors — MLX ~1,600
+tok/s "bf16", torch.compile ~40% MFU — were carried from another machine;
+the MLX run was f32, since SmolLM-135M's safetensors store F32.)
 
 ## Tier A — Training throughput (the headline numbers)
 
@@ -177,6 +184,101 @@ projection, 208 of them per step at this geometry — had run scalar since
 each block first (bit-identical, see `gemm.cc`) took the backward from
 6.6 s to 1.1 s and the row from 65 to 233 tok/s.
 
+### The frontier row, measured (2026-09-22)
+
+The first same-host frontier measurement: the emitted `model_update`
+package against `torch.compile` and `mlx_lm`'s LoRA trainer on four
+Hugging Face checkpoints imported with `export_model.py --hf`, all at one
+configuration — this repository's documentation as the corpus (129-id
+records, the tail 10 % held out, identical ids in every stack), LoRA r8 /
+α16 on the seven projections and the head, AdamW 1e-4 with weight decay
+0.01, constant LR, no clipping, 4 records × 128 targets = 512 loss tokens
+per step, 300 steps, 10 threads. Apple M5 (10-core GPU, 16 GB), main at
+e146646, torch 2.14.0, mlx 0.32.2 / mlx-lm 0.31.3, warm chip, strictly
+serial. SeeML's step is the steps-regression slope on the package binary;
+PyTorch's is the median step after warm-up; MLX's is the trainer's own
+`It/sec` × 512. Tokens per second, higher is better:
+
+| model | SeeML `metal` (int8 base) | SeeML `cpu` | torch.compile MPS f32 / bf16 | torch.compile CPU f32 | MLX-LM true f32 / bf16 |
+|---|---:|---:|---:|---:|---:|
+| SmolLM-135M | 1,802 | 332 | 2,099 / 3,761 | 847 | 2,240 / 4,605 |
+| SmolLM2-135M | 1,754 | 335 | 2,184 / 3,833 | 842 | 2,234 / 4,690 |
+| SmolLM2-360M | 830 | 133 | 1,041 / 2,121 | 445 | 1,009 / 2,324 |
+| Qwen2.5-0.5B | 636 | 102 | 767 / 1,668 | 345 | 734 / 1,768 |
+
+Read across a row: SeeML's f32-math Metal package runs at 0.79–0.87× the
+f32 frontier and 0.36–0.39× the bf16 one; its CPU package at 0.30–0.40× of
+`torch.compile` on the CPU (PyTorch eager is 2.2–3.2× SeeML there, so the
+matrix units are the whole CPU gap; `torch.compile` adds 1.06–1.16× over
+eager). Half precision is worth 1.75–2.4× to the frontier end to end on
+this GPU — the F2 budget. SeeML's base storage barely moves its Metal step
+(int8 1,802, bf16 1,756, f32 1,776 on SmolLM-135M) but the per-tensor int8
+base costs +0.10–0.14 nats of validation loss at step 0 on every model and
++0.05 at step 300 on SmolLM-135M (E12, #128, is the fix). Where the
+arithmetic matches, the answers match: SeeML f32 and PyTorch start from the
+same validation loss (4.5743 vs 4.5744) and end within 0.005; two Metal
+runs of each 135M model are bitwise identical; the CPU and Metal backends
+agree to 1e-5. Peak process memory on SmolLM-135M: SeeML 1.89 GB, MLX-LM
+1.34 GB (bf16) / 2.11 GB (f32), PyTorch MPS 2.4–2.6 GB. `torch.compile`
+pays 40–54 s of warm-up whenever a graph is new to Inductor's cache (6–9 s
+when it is not); SeeML's package has none.
+
+Parity rules a frontier row must pin, learned the hard way: cast the base
+dtype explicitly (SmolLM-135M's safetensors are stored F32 although its
+config says bfloat16, so `mlx_lm` runs it in f32 unasked); pass
+`bias_correction=True` to `mlx.optimizers.AdamW` (its default is off, which
+roughly triples the first update and changes the loss trajectory);
+`MLX_ENABLE_TF32=0` for a true-f32 MLX row (the default matmul is 1.3–1.5×
+faster and not f32); adapt the head in the frameworks too (the importer
+writes the tied head as its own weight and SeeML adapts it); and note that
+`mlx_lm`'s `evaluate` drops the ragged validation tail (48 of 50 records).
+The harness, raw JSON and loss curves are in `out/frontier-2026-09-22/`
+(not committed); the full report is the SeeML Frontier Harness page of
+2026-09-22.
+
+### The relaxed GEMM family, measured (plan v18, 2026-09-23)
+
+`--precision certified-bf16` is priced by the certificate first and by
+the harness second. SmolLM-135M, the docs corpus, r8 / α16, AdamW 1e-4,
+512 tokens per step, Apple M5, `tool/certify_numerics.py certify --steps 2
+--max-site-error 1e-4 --max-loss-deviation 1e-2` (about 25 CPU-minutes
+per plan; the reference reductions' own site tolerance of 1e-5 is
+already too tight for a 49,152-wide softmax, which observes 3.9e-5). Each
+plan marks 419 GEMMs relaxed; two steps make 838 priced instances:
+
+| plan | `gemm.relaxed` observed / bound | loss deviation | validation deviation | verdict |
+|---|---:|---:|---:|---|
+| int8 base (E12 per-column scales) | 6.2e-3 / 3.1e-2 | 2.3e-4 | 2.4e-6 | granted |
+| f32 base | 5.5e-3 / 2.9e-2 | 3.3e-4 | 2.8e-7 | granted |
+
+The CPU row (`tool/frontier_run.py seeml --backend cpu`, 10 threads, the
+package the certificate vouches for, its `build.sh` linking Accelerate
+because the plan is relaxed; step = the slope from the 5-step to the
+15-step run, then a 60-step quality run):
+
+| package | step ms | tok/s | val loss 0 → 60 | run a ≡ run b |
+|---|---:|---:|---:|---|
+| f32 base, exact | 1,830 | 280 | 4.574264 → 4.311599 | bitwise (the reference) |
+| f32 base, `certified-bf16` (Accelerate SGEMM) | 681–708 | 724–752 | 4.574264 → 4.311598 | bitwise |
+
+2.6× on the CPU step from the frozen-weight GEMMs alone. Against
+`torch.compile`'s 847 tok/s on this model (the frontier row above), the
+f32-base CPU package moves from 0.35× (the report's 299 tok/s; 280 in
+this session's exact re-measurement) to 0.85–0.89×, with the 60-step
+validation loss equal to six decimals. The harness refused one of the
+three rows as "not a measurement" — its 5-step run paid the cold-cache
+load of the source model and the lo→hi slope came out negative — which
+is what the check is for; the repeat row is the one quoted. int8 and
+bf16 bases stay on the portable CPU kernels (unchanged rows). The Metal
+rows of the relaxed family (the tensor-op kernels: 7.5 TFLOP/s on bf16
+activations × exact int8 weights in the microbenchmark, against the
+exact kernel's 3.0–3.4 on the same shapes) were not measured in the
+session that wrote this — its sandbox could not reach the Metal compiler
+service; the plan is `out/frontier-2026-09-22/f2_measure/plan_metal.json`
+and the honest expectation, from the step profile (int8 base GEMMs ≈ 50 %
+of the step, adapter GEMMs ≈ 32 %), is about 1.4× on the step, not F2's
+≥ 0.9× of MLX-LM bf16.
+
 ## Tier C — Memory (the gate that refuses compiles)
 
 | metric | definition | what it gates |
@@ -219,10 +321,10 @@ pure speedup*, no correctness tax).
 
 ## Pricing the frontier on a plan (`tool/frontier_exec.py`)
 
-The anchors above (torch.compile 2.8–5.6×, MLX ~20× in the v1.2.4 report)
-were measured on hand-matched PyTorch/MLX programs. `frontier_exec.py price`
-regenerates that comparison for **any compiled plan**, by interpreting the
-plan's own instruction stream through the frontier frameworks:
+The frontier row above was measured on hand-matched PyTorch/MLX programs
+for four real models. `frontier_exec.py price` regenerates that kind of
+comparison for **any compiled plan**, by interpreting the plan's own
+instruction stream through the frontier frameworks:
 
 ```sh
 python3 tool/frontier_exec.py price out/pkg/update_plan.seeu \
@@ -260,7 +362,9 @@ LoRA r16, 512 tokens/step, f32 base, 2026-09-17):
 | SeeML C++ `metal` | 29.7 | 17,237 | 905 | 8.37× |
 
 So on this plan the Accelerate exception is worth **at least 2.5×** on the
-CPU, and the C++ Metal backend already runs above what op-by-op MLX reaches.
+CPU (2.2–3.4× on the real models above), and the C++ Metal backend runs
+above what op-by-op MLX reaches — the real `mlx_lm` trainer, which
+compiles its step, is the 0.80× (f32) / 0.39× (bf16) of the frontier row.
 
 The same tool is the runtime's differential oracle — `frontier_exec.py
 diff` — described in [tool/README.md](../tool/README.md).
