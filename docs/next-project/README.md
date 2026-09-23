@@ -137,7 +137,7 @@ Each body is a Markdown file with a front matter the script reads:
 | key | required | meaning |
 |---|---|---|
 | `title` | yes | the issue title; the match key for an existing issue |
-| `labels` | yes | comma-separated; every label named is upserted (plane labels from the script's colour table, others grey) |
+| `labels` | yes | comma-separated; a plane label is kept at the script's colour table, any other label is created grey when missing |
 | `plane`, `priority` | yes | the board's `Plane` / `Priority` single-select values |
 | `origin` | no | the board's `Origin` value (`Frontier Outlook` for F1–F6); blank leaves the field unset |
 | `milestone` | no | the issue's milestone, upserted by title (`SeeRL v1.0.0.A` for F1–F6) |

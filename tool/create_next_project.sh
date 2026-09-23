@@ -61,7 +61,7 @@ EXISTING_ITEMS="
 "
 
 # Labels the bodies use that GitHub does not create by default: name|color|description.
-# Any other label a body names is upserted grey with an empty description.
+# Any other label a body names is created grey, only when it is missing.
 LABEL_TABLE="
 python-plane|3572A5|Build-host Python subsystem (the frontier plane)
 core-plane|0E4D64|Deterministic C++ core (device plane)
@@ -83,6 +83,14 @@ mutate() {  # mutate "<what>" gh-args...
   if [ "$DRY_RUN" = 1 ]; then echo "   would: $what" >&2; return 0; fi
   gh "$@"
 }
+# A paginated read as ONE array (gh api --paginate emits one array per
+# page; a test that reads them page by page sees only the last one).
+gh_pages() { gh api --paginate "$1" | jq -s 'add // []'; }
+# A body reaches gh through a file, never through a pipe into mutate: a
+# pipe into a command that does not read it (a dry run, a labels-only
+# edit) is a SIGPIPE race that aborts the script under pipefail.
+TMPD=$(mktemp -d -t next-project)
+trap 'rm -rf "$TMPD"' EXIT
 
 # --- front-matter helpers -------------------------------------------------
 fm() {  # fm <file> <key>  (empty when the key is absent)
@@ -103,17 +111,26 @@ norm() { tr -d '\r' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'; }
 list_json() { jq -R -c 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != "")) | unique'; }
 
 BODIES=("$ISSUE_DIR"/*.md)
+for f in "${BODIES[@]}"; do  # fail loudly, before any write, on a body that is not one
+  for k in title labels plane priority; do
+    [ -n "$(fm "$f" "$k")" ] || { echo "error: $(basename "$f") has no '$k:' in its front matter" >&2; exit 1; }
+  done
+done
 
 # --- labels: every label any body names ----------------------------------
 echo "== labels"
-have_labels=$(gh label list -R "$REPO" --limit 500 --json name | jq -c '[.[].name]')
+# GitHub label names are case-insensitive: every comparison lower-cases both sides.
+have_labels=$(gh label list -R "$REPO" --limit 500 --json name,color,description |
+  jq -c 'map({name: (.name | ascii_downcase), color: (.color | ascii_downcase), description: (.description // "")})')
 wanted_labels=$(for f in "${BODIES[@]}"; do fm "$f" labels; done | paste -sd, - | list_json)
 jq -r '.[]' <<< "$wanted_labels" | while IFS= read -r l; do
+  live=$(jq -r --arg l "$l" '.[] | select(.name == ($l | ascii_downcase)) | "\(.color)|\(.description)"' <<< "$have_labels" | head -1)
   row=$(awk -F'|' -v l="$l" '$1 == l' <<< "$LABEL_TABLE")
   if [ -n "$row" ]; then
     color=$(cut -d'|' -f2 <<< "$row"); desc=$(cut -d'|' -f3 <<< "$row")
-    mutate "upsert label '$l'" label create "$l" -R "$REPO" --force -c "$color" -d "$desc" >/dev/null
-  elif ! jq -e --arg l "$l" 'index($l) != null' <<< "$have_labels" >/dev/null; then
+    [ "$live" = "$(tr '[:upper:]' '[:lower:]' <<< "$color")|$desc" ] ||
+      mutate "upsert label '$l' (#$color, '$desc')" label create "$l" -R "$REPO" --force -c "$color" -d "$desc" >/dev/null
+  elif [ -z "$live" ]; then
     mutate "create label '$l' (grey)" label create "$l" -R "$REPO" -c EDEDED -d "" >/dev/null
   fi
 done
@@ -121,7 +138,7 @@ echo "   ok: $(jq -r 'join(" ")' <<< "$wanted_labels")"
 
 # --- milestones: every milestone any body names --------------------------
 echo "== milestones"
-have_ms=$(gh api --paginate "repos/$REPO/milestones?state=all&per_page=100" | jq -c '[.[].title]')
+have_ms=$(gh_pages "repos/$REPO/milestones?state=all&per_page=100" | jq -c '[.[].title]')
 for f in "${BODIES[@]}"; do fm "$f" milestone; done | sed '/^$/d' | LC_ALL=C sort -u |
 while IFS= read -r m; do
   if jq -e --arg m "$m" 'index($m) != null' <<< "$have_ms" >/dev/null; then echo "   ok: $m"
@@ -130,7 +147,7 @@ done
 
 # --- issues: one fetch, then create or edit per body ---------------------
 echo "== issues"
-LIVE=$(gh api --paginate "repos/$REPO/issues?state=all&per_page=100" |
+LIVE=$(gh_pages "repos/$REPO/issues?state=all&per_page=100" |
   jq -c '.[] | select(.pull_request == null) |
          {number, title, state, body: (.body // ""), milestone: (.milestone.title // ""),
           labels: ([.labels[].name] | unique)}')
@@ -143,12 +160,13 @@ for f in "${BODIES[@]}"; do
   origin=$(fm "$f" origin)
   priority=$(fm "$f" priority)
   milestone=$(fm "$f" milestone)
-  want_body=$(body "$f" | norm)
+  body "$f" > "$TMPD/body"
+  want_body=$(norm < "$TMPD/body")
 
   live=$(jq -c --arg t "$title" 'select(.title == $t)' <<< "$LIVE" | head -1)
   if [ -z "$live" ]; then
-    url=$(body "$f" | mutate "create issue '$title' [labels: ${labels_csv:-none}; milestone: ${milestone:-none}]" \
-      issue create -R "$REPO" -t "$title" -F - \
+    url=$(mutate "create issue '$title' [labels: ${labels_csv:-none}; milestone: ${milestone:-none}]" \
+      issue create -R "$REPO" -t "$title" -F "$TMPD/body" \
       ${labels_csv:+-l "$labels_csv"} ${milestone:+-m "$milestone"})
     [ -n "$url" ] || url="https://github.com/$REPO/issues/new?title=$(basename "$f")"
     [ "$DRY_RUN" = 1 ] || echo "   created: $url  ($(basename "$f"))"
@@ -159,22 +177,23 @@ for f in "${BODIES[@]}"; do
       echo "   closed, left alone (#$num): $title"
     else
       live_body=$(jq -r .body <<< "$live" | norm)
-      add_labels=$(jq -r --argjson want "$labels_json" '($want - .labels) | join(",")' <<< "$live")
+      add_labels=$(jq -r --argjson want "$labels_json" \
+        '[.labels[] | ascii_downcase] as $have | [$want[] | . as $w | select(($have | index($w | ascii_downcase)) == null)] | join(",")' <<< "$live")
       live_ms=$(jq -r .milestone <<< "$live")
-      what=""
-      [ "$live_body" = "$want_body" ] || what="$what body"
+      # Each change sets its own flag here; nothing is re-parsed from the
+      # printed list (a label named "milestone-blocker" is just a label).
+      what=""; body_flag=""; ms_flag=""
+      [ "$live_body" = "$want_body" ] || { what="$what body"; body_flag=1; }
       [ -z "$add_labels" ] || what="$what labels(+$add_labels)"
-      if [ -n "$milestone" ] && [ "$live_ms" != "$milestone" ]; then what="$what milestone"; fi
+      if [ -n "$milestone" ] && [ "$live_ms" != "$milestone" ]; then what="$what milestone"; ms_flag=1; fi
       what="${what# }"
       if [ -z "$what" ]; then
         echo "   in sync (#$num): $title"
       else
         # bash 3.2 + set -u refuses "${empty[@]}": each flag is passed
         # through a guarded expansion instead of an array.
-        body_flag=""; case "$what" in *body*) body_flag=1 ;; esac
-        ms_flag=""; case "$what" in *milestone*) ms_flag=1 ;; esac
-        body "$f" | mutate "edit #$num [$what]" issue edit "$num" -R "$REPO" \
-          ${body_flag:+-F -} \
+        mutate "edit #$num [$what]" issue edit "$num" -R "$REPO" \
+          ${body_flag:+-F "$TMPD/body"} \
           ${add_labels:+--add-label "$add_labels"} \
           ${ms_flag:+-m "$milestone"} >/dev/null
         [ "$DRY_RUN" = 1 ] || echo "   edited #$num [$what]: $title"
@@ -194,11 +213,12 @@ proj_json=$(gh project list --owner "$OWNER" --format json --limit 100 |
   jq -c --arg t "$PROJECT_TITLE" 'first(.projects[] | select(.title == $t)) // empty')
 if [ -n "$proj_json" ]; then
   echo "   reusing existing project"
-elif [ "$DRY_RUN" = 1 ]; then
-  echo "   would: create project '$PROJECT_TITLE' — nothing to reconcile against yet; stopping" >&2
-  exit 0
 else
-  proj_json=$(gh project create --owner "$OWNER" --title "$PROJECT_TITLE" --format json)
+  proj_json=$(mutate "create project '$PROJECT_TITLE'" project create --owner "$OWNER" --title "$PROJECT_TITLE" --format json)
+  if [ -z "$proj_json" ]; then
+    echo "   (nothing to reconcile the board against yet; stopping)" >&2
+    exit 0
+  fi
 fi
 proj_num=$(jq -r '.number' <<< "$proj_json")
 proj_id=$(jq -r '.id' <<< "$proj_json")
@@ -206,7 +226,8 @@ proj_url=$(jq -r '.url // empty' <<< "$proj_json")
 echo "   project #$proj_num ${proj_url:+at $proj_url}"
 
 fields_json=$(gh project field-list "$proj_num" --owner "$OWNER" --format json)
-PENDING_FIELDS=""  # fields a dry run would have created: their values cannot be set yet
+WARNED=""
+PENDING_FIELDS=""  # dry run only: fields it would have created, whose values it cannot preview
 
 ensure_field() {  # ensure_field <name> <comma-separated options>
   local have missing
@@ -214,7 +235,7 @@ ensure_field() {  # ensure_field <name> <comma-separated options>
   if [ -z "$have" ]; then
     mutate "create field '$1' with options [$2]" project field-create "$proj_num" --owner "$OWNER" \
       --name "$1" --data-type SINGLE_SELECT --single-select-options "$2" >/dev/null
-    PENDING_FIELDS="$PENDING_FIELDS $1 "
+    [ "$DRY_RUN" = 1 ] && PENDING_FIELDS="$PENDING_FIELDS $1 "
     return 0
   fi
   # The field exists: an option it lacks has to be added by hand (the
@@ -234,7 +255,7 @@ ensure_field "Plane"    "$(opts plane 2)"
 ensure_field "Origin"   "$(opts origin 3)"
 ensure_field "Priority" "P0,P1,P2"
 
-[ "$DRY_RUN" = 1 ] || fields_json=$(gh project field-list "$proj_num" --owner "$OWNER" --format json)
+[ "$DRY_RUN" = 1 ] || fields_json=$(gh project field-list "$proj_num" --owner "$OWNER" --format json)  # sees the fields just created
 # One fetch of the board: item ids and current field values, so a run
 # that changes nothing writes nothing.
 items_json=$(gh project item-list "$proj_num" --owner "$OWNER" --format json --limit 500)
@@ -247,8 +268,9 @@ set_field() {  # set_field <item-id> <item-url> <field-name> <option-name>
   oid=$(jq -r --arg n "$3" --arg o "$4" \
     '.fields[] | select(.name == $n) | .options[] | select(.name == $o) | .id' \
     <<< "$fields_json")
-  if [ -z "$fid" ] || [ -z "$oid" ]; then
-    echo "   warn: no option '$4' for field '$3' (see ACTION above)" >&2; return 0
+  if [ -z "$fid" ] || [ -z "$oid" ]; then  # said once per missing option; the ACTION line above names the fix
+    case "$WARNED" in *"|$3=$4|"*) ;; *) WARNED="$WARNED|$3=$4|"; echo "   warn: '$4' not set on any item: field '$3' lacks it (see ACTION above)" >&2 ;; esac
+    return 0
   fi
   # item-list keys a field's value by its lower-cased name.
   key=$(tr '[:upper:]' '[:lower:]' <<< "$3")
