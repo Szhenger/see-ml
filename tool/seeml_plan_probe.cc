@@ -8,6 +8,7 @@
 //                    [--trace trace.bin | --time N | --profile N]
 //                    [--lr-bits 0xHHHHHHHH]
 //                    [--step N] [--backend cpu|metal|auto] [--threads N]
+//                    [--source model.smf]
 //                    [--version]
 //
 // A pure function of its inputs: (plan, section, arena image, step scalars)
@@ -163,6 +164,7 @@ bool ParseU64(const std::string& s, int base, uint64_t* out) {
 /// Everything the command line says, parsed and range-checked.
 struct Options {
   fs::path plan, arena_in, arena_out, trace;  // trace empty = no trace
+  fs::path source;  // v17: the model file an eval program reads (E12)
   std::string section;
   rt::BackendKind backend = rt::BackendKind::kCpu;
   uint32_t lr_bits = 0;
@@ -228,6 +230,7 @@ int ParseOptions(int argc, char** argv, Options* opts) {
   const auto threads = args.TakeValue("--threads");
   const auto timed = args.TakeValue("--time");
   const auto profiled = args.TakeValue("--profile");
+  const auto source = args.TakeValue("--source");
   if (const auto& flag = args.MissingValue())
     return Usage(*flag + " is missing its value");
   if (const auto unknown = args.FirstUnknown())
@@ -272,6 +275,13 @@ int ParseOptions(int argc, char** argv, Options* opts) {
   opts->plan = *in_plan;
   opts->arena_in = *in_arena;
   opts->arena_out = *out_arena;
+  if (source) {
+    if (*section != "eval")
+      return Usage("--source applies to --section eval only");
+    const auto in_source = InputFile(*source, &why);
+    if (!in_source) return Fail(why);
+    opts->source = *in_source;
+  }
   if (trace) {
     const auto out_trace = OutputFile(*trace, &why);
     if (!out_trace) return Fail(why);
@@ -372,7 +382,8 @@ std::string LoadProgram(const std::vector<uint8_t>& plan,
   out->extents.reserve(out->instructions.size());
   for (size_t i = 0; i < out->instructions.size(); ++i) {
     auto e = rt::DescribeInstruction(out->instructions[i], h.arena_size,
-                                     h.rodata_size, h.version);
+                                     h.rodata_size, h.version,
+                                     /*allow_source=*/section == "eval");
     if (!e) return "instruction " + std::to_string(i) + ": " + e.error();
     out->extents.push_back(*e);
   }
@@ -546,6 +557,30 @@ int main(int argc, char** argv) {
                             plan.size() - h.rodata_offset);
       !r)
     return Fail("bind: " + r.error());
+  // v17: an eval program that reads the source model needs the file, and
+  // the file must be the one the plan was compiled from and cover every
+  // extent the program reads — the engine's BindSourceModel checks, here.
+  std::vector<uint8_t> source_bytes;
+  uint64_t source_needed = 0;
+  for (const rt::InstructionExtents& ex : program.extents)
+    for (size_t i = 0; i < ex.count; ++i)
+      if (ex.ranges[i].source)
+        source_needed =
+            std::max(source_needed, ex.ranges[i].off + ex.ranges[i].bytes);
+  if (source_needed > 0) {
+    if (opts.source.empty())
+      return Fail("the eval program reads the source model: pass --source");
+    if (!ReadFile(opts.source, &source_bytes))
+      return Fail("cannot read --source");
+    if (up::ContentHash64(source_bytes.data(), source_bytes.size()) !=
+        h.source_model_hash)
+      return Fail("--source does not match the plan's source_model_hash");
+    if (source_bytes.size() < source_needed)
+      return Fail("--source is shorter than the eval program reads");
+    if (auto r = backend.BindSource(source_bytes.data(), source_bytes.size());
+        !r)
+      return Fail("bind source: " + r.error());
+  }
   rt::kernels::KernelPolicy policy;
   if (h.gemm_tile_k) policy.gemm_tiles.k = h.gemm_tile_k;
   if (h.gemm_tile_n) policy.gemm_tiles.n = h.gemm_tile_n;

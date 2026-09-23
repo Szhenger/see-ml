@@ -513,20 +513,23 @@ class DifferentialSuite(unittest.TestCase):
             if done.returncode != 0:
                 raise AssertionError(f"{name}: compile failed\n{done.stdout}")
             cls.plans[name] = (os.path.join(out, "update_plan.seeu"),
-                               os.path.join(cls.dir, corpus))
+                               os.path.join(cls.dir, corpus),
+                               os.path.join(cls.dir, model))
 
     @classmethod
     def tearDownClass(cls):
         cls._tmp.cleanup()
 
     def diff(self, name, *extra):
-        plan, corpus = self.plans[name]
+        plan, corpus, model = self.plans[name]
         report = os.path.join(self.dir, name + ".json")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            # --source: a v17 narrow-storage plan's eval program reads the
+            # shipped f32 weights from the model file (E12).
             status = fx.main(["diff", plan, "--corpus", corpus, "--probe",
                               PROBE, "--steps", "3", "--report", report,
-                              *extra])
+                              "--source", model, *extra])
         with open(report) as f:
             return status, json.load(f), buf.getvalue()
 
@@ -573,7 +576,7 @@ class DifferentialSuite(unittest.TestCase):
                     self.assertEqual(status, 0, log)
 
     def test_the_probe_is_strict_about_arguments_and_paths(self):
-        plan, _ = self.plans["mlp_mse_sgd"]
+        plan, _, _ = self.plans["mlp_mse_sgd"]
         work = os.path.join(self.dir, "probe")
         os.makedirs(work, exist_ok=True)
         arena = os.path.join(work, "arena.in")
@@ -698,7 +701,7 @@ class DifferentialSuite(unittest.TestCase):
         self.assertAlmostEqual(ran["val_final_loss"], float(after), 4)
 
     def test_run_trains_and_price_reports(self):
-        plan, corpus = self.plans["dec_f32"]
+        plan, corpus, _ = self.plans["dec_f32"]
         report = os.path.join(self.dir, "run.json")
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):

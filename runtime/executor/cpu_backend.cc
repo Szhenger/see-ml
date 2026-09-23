@@ -34,6 +34,10 @@ constexpr const char* kNonFiniteNorm =
     "and optimizer state untouched";
 
 float KlTemperatureOf(uint64_t word) { return BitsToF32(word & 0xFFFFFFFFu); }
+// v17: the q8 GEMM's in[3] is a ref to per-column scales, not scale bits.
+bool ColScaled(const up::UpdateInstruction& ins) {
+  return (ins.flags & up::kFlagQ8ColScale) != 0;
+}
 float KlLossScaleOf(uint64_t word) {
   const uint64_t hi = word >> 32;
   return hi == 0 ? 1.0f : BitsToF32(hi);
@@ -52,6 +56,11 @@ class CpuBackend final : public ExecutorBackend {
     rodata_ = rodata;
     return {};
   }
+  std::expected<void, std::string> BindSource(const uint8_t* data,
+                                              uint64_t) override {
+    source_ = data;
+    return {};
+  }
 
   void Configure(const k::KernelPolicy& policy) override { policy_ = policy; }
 
@@ -65,6 +74,8 @@ class CpuBackend final : public ExecutorBackend {
     const uint64_t offset = up::RefOffset(ref);
     if (up::IsRodataRef(ref))
       return reinterpret_cast<const float*>(rodata_ + offset);
+    if (up::IsSourceRef(ref))  // v17: validated against the bound file
+      return reinterpret_cast<const float*>(source_ + offset);
     return reinterpret_cast<const float*>(arena_ + offset);
   }
   const int8_t* ReadPtrQ8(uint64_t ref) const {
@@ -82,6 +93,7 @@ class CpuBackend final : public ExecutorBackend {
 
   uint8_t* arena_ = nullptr;
   const uint8_t* rodata_ = nullptr;
+  const uint8_t* source_ = nullptr;  // v17: the bound source model file
   k::KernelPolicy policy_;  // the plan header's tiles; defaults until told
 };
 
@@ -121,13 +133,16 @@ std::expected<void, std::string> CpuBackend::Execute(
     case up::OpCode::kGemmNNQ8:
       k::GemmNNQ8(ReadPtr(ins.in[0]), ReadPtrQ8(ins.in[1]),
                   WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2],
-                  BitsToF32(ins.in[3]), up::EpilogueActOf(ins.flags),
-                  policy_.gemm_tiles);
+                  ColScaled(ins) ? 1.0f : BitsToF32(ins.in[3]),
+                  up::EpilogueActOf(ins.flags), policy_.gemm_tiles,
+                  ColScaled(ins) ? ReadPtr(ins.in[3]) : nullptr);
       break;
     case up::OpCode::kGemmNTQ8:
       k::GemmNTQ8(ReadPtr(ins.in[0]), ReadPtrQ8(ins.in[1]),
                   WritePtr(ins.in[2]), ins.out[0], ins.out[1], ins.out[2],
-                  BitsToF32(ins.in[3]), policy_.gemm_tiles);
+                  ColScaled(ins) ? 1.0f : BitsToF32(ins.in[3]),
+                  policy_.gemm_tiles,
+                  ColScaled(ins) ? ReadPtr(ins.in[3]) : nullptr);
       break;
     case up::OpCode::kAddEW:
       k::AddEW(ReadPtr(ins.in[0]), ReadPtr(ins.in[1]), WritePtr(ins.in[2]),

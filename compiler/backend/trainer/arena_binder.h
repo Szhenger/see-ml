@@ -56,6 +56,11 @@ struct RodataPack {
   uint64_t bytes = 0;                 // at that offset
   Storage storage = Storage::kF32;
   float scale = 0.0f;                 // kInt8: the per-tensor dequant scale
+  // kInt8 (plan v17): one scale per output column of W [K, M], stored as
+  // f32 at `scales_offset` right after the int8 levels; the levels are
+  // quantized per column. Empty = the per-tensor form above.
+  std::vector<float> column_scales{};
+  uint64_t scales_offset = 0;
 };
 
 struct ArenaBinding {
@@ -72,6 +77,8 @@ struct ArenaBinding {
   // repeated zero-filling resize.
   std::vector<RodataPack> rodata_packs;
   uint64_t rodata_size = 0;
+  // v17: int8 weight -> rodata ref of its per-column scale vector.
+  std::unordered_map<const seeml::sir::Value*, uint64_t> quant_column_scales{};
 };
 
 /// Writes one pack's bytes to `dst` (`pack.bytes` long; gaps between packs

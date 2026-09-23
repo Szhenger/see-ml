@@ -434,6 +434,14 @@ TEST(MetalBackend, GemmShapesMatchCpuOnEveryKernelPath) {
       {OpCode::kGemmAccNN, kF32, false, false, true, 0, "acc"},
       {OpCode::kGemmNNQ8, kQ8, false, false, false, 0, "nn.q8"},
       {OpCode::kGemmNTQ8, kQ8, false, true, false, 0, "nt.q8"},
+      // v17: per-column scales (a rodata vector in slot 3).
+      {OpCode::kGemmNNQ8, kQ8, false, false, false,
+       static_cast<uint16_t>(kFlagQ8ColScale |
+                             (static_cast<uint16_t>(EpilogueAct::kGelu)
+                              << kFlagEpilogueActShift)),
+       "nn.q8.cols+gelu"},
+      {OpCode::kGemmNTQ8, kQ8, false, true, false, kFlagQ8ColScale,
+       "nt.q8.cols"},
       {OpCode::kGemmNNBF16, kBF16, false, false, false,
        static_cast<uint16_t>(kFlagEpilogueBias), "nn.bf16+bias"},
       {OpCode::kGemmNTBF16, kBF16, false, true, false, 0, "nt.bf16"},
@@ -454,7 +462,18 @@ TEST(MetalBackend, GemmShapesMatchCpuOnEveryKernelPath) {
         std::vector<float> arena(arena_floats);
         for (auto& x : arena) x = unit(rng);  // C starts non-zero (Acc)
         const size_t elem = v.kind == kQ8 ? 1 : v.kind == kBF16 ? 2 : 4;
-        std::vector<uint8_t> rodata(skew + b_elems * elem);
+        // Per-column scales ride after B, f32-aligned: N floats for the NN
+        // form, K for the NT form (W read as [N, K]).
+        const bool cols = (v.flags & kFlagQ8ColScale) != 0;
+        const size_t scale_n = v.bt ? sh.k : sh.n;
+        const size_t scale_off = (skew + b_elems * elem + 3) & ~size_t{3};
+        std::vector<uint8_t> rodata(cols ? scale_off + scale_n * 4
+                                         : skew + b_elems * elem);
+        if (cols)
+          for (size_t i = 0; i < scale_n; ++i) {
+            const float sc = 0.002f + 0.0001f * static_cast<float>(i % 97);
+            std::memcpy(rodata.data() + scale_off + i * 4, &sc, 4);
+          }
         for (size_t i = 0; i < b_elems; ++i) {
           const float x = unit(rng);
           uint8_t* dst = rodata.data() + skew + i * elem;
@@ -470,6 +489,7 @@ TEST(MetalBackend, GemmShapesMatchCpuOnEveryKernelPath) {
         ins.in[2] = MakeArenaRef(c_off);
         if (v.flags & (kFlagEpilogueBias | kFlagGemmAddend))
           ins.in[3] = MakeArenaRef(bias_off);
+        else if (cols) ins.in[3] = MakeRodataRef(scale_off);
         else if (v.kind == kQ8) ins.in[3] = F32Bits(0.01f);
         else if (v.acc) ins.in[3] = F32Bits(0.5f);
         ins.out[0] = sh.m; ins.out[1] = sh.n; ins.out[2] = sh.k;

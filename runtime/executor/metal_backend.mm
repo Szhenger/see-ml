@@ -226,6 +226,8 @@ class MetalBackend final : public ExecutorBackend {
                                         const uint8_t* rodata,
                                         uint64_t rodata_bytes,
                                         uint64_t rodata_mapped_bytes) override;
+  std::expected<void, std::string> BindSource(const uint8_t* data,
+                                              uint64_t bytes) override;
   std::expected<void, std::string> Execute(const up::UpdateInstruction& ins,
                                            const StepParams& params) override;
   std::expected<void, std::string> Flush() override;
@@ -256,6 +258,10 @@ class MetalBackend final : public ExecutorBackend {
   id<MTLBuffer> arena_buf_ = nil;
   id<MTLBuffer> rodata_buf_ = nil;
   bool rodata_zero_copy_ = false;
+  // v17: the source model file the eval program's source refs read, wrapped
+  // zero-copy when the mapping is page-aligned (the engine mmaps it), else
+  // copied once. Bound at buffer index 5 on every encoder.
+  id<MTLBuffer> source_buf_ = nil;
   uint8_t* arena_ = nullptr;
   uint64_t arena_bytes_ = 0;
   const uint8_t* rodata_ = nullptr;
@@ -516,13 +522,42 @@ std::expected<void, std::string> MetalBackend::Bind(
   }
 }
 
+std::expected<void, std::string> MetalBackend::BindSource(const uint8_t* data,
+                                                          uint64_t bytes) {
+  @autoreleasepool {
+    if (auto r = Flush(); !r) return r;  // nothing in flight reads the old one
+    if (auto r = cpu_->BindSource(data, bytes); !r) return r;
+    if (!data || bytes == 0) {
+      source_buf_ = nil;
+      return {};
+    }
+    const uint64_t page = static_cast<uint64_t>(getpagesize());
+    const uint64_t wrapped = (bytes + page - 1) & ~(page - 1);
+    id<MTLBuffer> buf = nil;
+    if (reinterpret_cast<uintptr_t>(data) % page == 0)
+      buf = [device_ newBufferWithBytesNoCopy:const_cast<uint8_t*>(data)
+                                       length:wrapped
+                                      options:MTLResourceStorageModeShared
+                                  deallocator:nil];
+    if (!buf)
+      buf = [device_ newBufferWithBytes:data
+                                 length:bytes
+                                options:MTLResourceStorageModeShared];
+    if (!buf) return std::unexpected("cannot wrap the source model for the GPU");
+    source_buf_ = buf;
+    return {};
+  }
+}
+
 const InstructionExtents* MetalBackend::ExtentsOf(
     const up::UpdateInstruction& ins) {
   std::string key(reinterpret_cast<const char*>(&ins), sizeof(ins));
   auto it = extents_.find(key);
   if (it != extents_.end()) return &it->second;
+  // The engine validated every program (the eval one with source refs);
+  // describing an instruction here only recovers the extents it proved.
   auto ex = DescribeInstruction(ins, arena_bytes_, rodata_bytes_,
-                                up::kSeeuVersion);
+                                up::kSeeuVersion, /*allow_source=*/true);
   if (!ex) return nullptr;
   return &extents_.emplace(std::move(key), *ex).first->second;
 }
@@ -530,7 +565,7 @@ const InstructionExtents* MetalBackend::ExtentsOf(
 bool MetalBackend::HazardWithPending(const InstructionExtents& ex) const {
   for (size_t i = 0; i < ex.count; ++i) {
     const OperandExtent& e = ex.ranges[i];
-    if (e.rodata) continue;  // never written by anyone
+    if (e.rodata || e.source) continue;  // never written by anyone
     const Extent mine{e.off, e.bytes};
     for (const Extent& w : pending_writes_)
       if (Overlaps(mine, w)) return true;
@@ -544,7 +579,7 @@ bool MetalBackend::HazardWithPending(const InstructionExtents& ex) const {
 void MetalBackend::RecordPending(const InstructionExtents& ex) {
   for (size_t i = 0; i < ex.count; ++i) {
     const OperandExtent& e = ex.ranges[i];
-    if (e.rodata) continue;
+    if (e.rodata || e.source) continue;
     (e.write ? pending_writes_ : pending_reads_).push_back({e.off, e.bytes});
   }
 }
@@ -560,6 +595,7 @@ std::expected<void, std::string> MetalBackend::EnsureEncoder() {
   }
   [enc_ setBuffer:arena_buf_ offset:0 atIndex:0];
   [enc_ setBuffer:(rodata_buf_ ? rodata_buf_ : arena_buf_) offset:0 atIndex:1];
+  [enc_ setBuffer:(source_buf_ ? source_buf_ : arena_buf_) offset:0 atIndex:5];
   [enc_ setBuffer:scratch_ offset:0 atIndex:3];
   // Every tiled GEMM kernel declares the split-K workspace at index 4 and
   // reads it only when it splits; the binding must still exist (an unbound
@@ -656,6 +692,7 @@ std::expected<void, std::string> MetalBackend::Encode(
   auto ref = [&](int slot, uint64_t r) {
     a.off[slot] = up::RefOffset(r);
     if (up::IsRodataRef(r)) a.space |= 1u << slot;
+    if (up::IsSourceRef(r)) a.space |= 1u << (8 + slot);  // v17
   };
   auto u32 = [](uint64_t v) { return static_cast<uint32_t>(v); };
   auto hi = [](uint64_t v) { return static_cast<uint32_t>(v >> 32); };
@@ -743,8 +780,16 @@ std::expected<void, std::string> MetalBackend::Encode(
     case up::OpCode::kGemmNTQ8:
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]);
       a.m = u32(ins.out[0]); a.n = u32(ins.out[1]); a.k = u32(ins.out[2]);
-      a.f[0] = BitsToF32(ins.in[3]);  // dequant scale
       a.flags = static_cast<uint32_t>(up::EpilogueActOf(ins.flags));
+      if (ins.flags & up::kFlagQ8ColScale) {
+        // v17: per-column scales in slot 3 — the NN form scales output
+        // columns in the epilogue (128), the NT form scales B as it widens.
+        ref(3, ins.in[3]);
+        a.f[0] = 1.0f;
+        a.flags |= op == up::OpCode::kGemmNNQ8 ? 128u : 256u;
+      } else {
+        a.f[0] = BitsToF32(ins.in[3]);  // the per-tensor dequant scale
+      }
       if (op == up::OpCode::kGemmNNQ8)
         DispatchGemm(kPGemmNNQ8, a, false, false, 1);
       else

@@ -36,7 +36,9 @@ uint64_t F32BitsPair(float hi, float lo) {
 std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
     const std::vector<sir::Operation*>& ops, const ResolveFn& resolve,
     const std::unordered_map<const sir::Value*, float>& quant_scales,
-    const std::unordered_set<const sir::Value*>& bf16_weights) {
+    const std::unordered_set<const sir::Value*>& bf16_weights,
+    const std::unordered_map<const sir::Value*, uint64_t>&
+        quant_column_scales) {
   std::vector<UpdateInstruction> instrs;
   instrs.reserve(ops.size());  // ~1 instruction per non-storage op
   std::string error;
@@ -146,6 +148,13 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
         }
       }
       ins.flags = MakeEpilogueFlags(fused_bias, act);
+      // v17: the int8 weight's own column scales, by rodata ref.
+      if (q8)
+        if (auto cs = quant_column_scales.find(op->operand(1));
+            cs != quant_column_scales.end()) {
+          ins.in[3] = cs->second;
+          ins.flags |= kFlagQ8ColScale;
+        }
     } else if (m == "sc_low.gemm_acc") {
       const sir::Value* a = op->operand(0);
       const sir::Value* b = op->operand(1);

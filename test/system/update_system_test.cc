@@ -143,14 +143,29 @@ TEST(UpdateSystem, Step0Identity) {
 /// the compiled forward pass (the plan must be built emit_optimizer=false so
 /// executions do not mutate the parameters). Nudges lora_B off zero first so
 /// gradients w.r.t. A are non-degenerate.
+///
+/// A central difference only estimates the derivative where the loss is
+/// smooth across the step; a ReLU pre-activation inside it (a kink) fails
+/// the check with no bug present. Where the kinks fall depends on the data,
+/// and std::normal_distribution is implemented differently by libstdc++ and
+/// libc++ — so a check on normal_distribution data that passes on macOS can
+/// land on a kink on Linux. `portable` nudges with raw mt19937_64 bits
+/// (fully specified by the standard), for callers whose data is portable
+/// too (PortableUniform), so both platforms check the same coordinates.
+float PortableUniform(std::mt19937_64& rng) {  // [-1, 1), same everywhere
+  return static_cast<float>(static_cast<double>(rng() >> 11) * 0x1p-52 - 1.0);
+}
+
 void GradientCheck(const CompiledUpdate& compiled, UpdateEngine& engine,
-                   uint64_t nudge_seed, double tol = 2e-2) {
+                   uint64_t nudge_seed, double tol = 2e-2,
+                   bool portable = false) {
   std::mt19937_64 rng(nudge_seed);
   std::normal_distribution<float> dist(0.0f, 1.0f);
   for (const auto& p : compiled.params)
     for (uint64_t i = 0; i < p.count; ++i)
       if (p.id.find(".lora_B") != std::string::npos)
-        WriteArenaF32(engine, p.param_ref, i, 0.05f * dist(rng));
+        WriteArenaF32(engine, p.param_ref, i,
+                      0.05f * (portable ? PortableUniform(rng) : dist(rng)));
 
   engine.ExecuteTrainOnce();
   const double eps = 2e-3;
@@ -724,6 +739,91 @@ TEST(UpdateSystem, TransformerTrainsMergesAndCommits) {
 // 8. Quantized base weights (int8 rodata)
 // =============================================================================
 
+TEST(UpdateSystem, TheGateScoresTheModelThatShips) {
+  // E12 (#95). Under --quantize-base / --bf16-base the adapter trains
+  // against the narrow weights, but the commit patches the f32 source file:
+  // the function that ships is W_f32 + delta. A plan compiled from a file
+  // scores exactly that — its eval program reads the f32 weights from the
+  // bound model — so the gated validation loss IS the committed model's
+  // (up to the rounding of W + delta in the file), and the step-0 score is
+  // the source model's, not the quantized source's. The in-plan proxy an
+  // in-memory compile keeps is further from the truth: that gap is what
+  // the gate used to certify.
+  const int64_t in_dim = 8, hidden = 16, out_dim = 3, batch = 8;
+  for (const bool bf16 : {false, true}) {
+    SmfModel model = MakeMlp(in_dim, hidden, out_dim, 71);
+    ScopedTempDir dir;
+    const std::string src = dir.File("source.smf");
+    ASSERT_OK(SaveSmf(src, model));
+    ASSERT_OK_AND_ASSIGN(SmfModel saved, LoadSmf(src));
+    UpdateConfig config = BaseConfig(batch);
+    config.optimizer.lr = 5e-3f;
+    config.quantize_base = !bf16;
+    config.bf16_base = bf16;
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate shipped,
+                         UpdateCompiler(config).Compile(saved));
+    // SaveSmf stamps offsets and the hash onto `model`: the proxy compiles
+    // a fresh, never-saved copy of the same network.
+    SmfModel in_memory = MakeMlp(in_dim, hidden, out_dim, 71);
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate proxy,
+                         UpdateCompiler(config).Compile(in_memory));
+    EXPECT_TRUE(shipped.scores_shipped);
+    EXPECT_FALSE(proxy.scores_shipped);
+
+    ASSERT_OK_AND_ASSIGN(Dataset train, MakeClassificationData(96, in_dim, 72));
+    ASSERT_OK_AND_ASSIGN(Dataset val, MakeClassificationData(40, in_dim, 73));
+    TrainOptions options = Quiet();
+    options.validation = &val;
+
+    UpdateEngine engine;
+    ASSERT_OK(engine.LoadFromMemory(shipped.plan.data(), shipped.plan.size()));
+    EXPECT_TRUE(engine.scores_shipped());
+    // Unbound, the plan refuses to score anything.
+    EXPECT_ERROR_CONTAINS(engine.Evaluate(val), "BindSourceModel");
+    ASSERT_OK(engine.BindSourceModel(src));
+    ASSERT_OK_AND_ASSIGN(auto report, engine.Train(train, 60, options));
+    ASSERT_OK(engine.RunMerge());
+    const std::string out = dir.File("updated.smf");
+    ASSERT_OK(engine.CommitToModel(src, out));
+
+    UpdateEngine twin;  // the same training, scored by the in-plan proxy
+    ASSERT_OK(twin.LoadFromMemory(proxy.plan.data(), proxy.plan.size()));
+    ASSERT_OK_AND_ASSIGN(Dataset train2,
+                         MakeClassificationData(96, in_dim, 72));
+    ASSERT_OK_AND_ASSIGN(auto proxied, twin.Train(train2, 60, options));
+
+    // The truth: an f32 plan compiled from each file, evaluated as is.
+    auto f32_loss = [&](const std::string& path) -> float {
+      auto m = LoadSmf(path);
+      if (!m) return -1.0f;
+      UpdateConfig f32 = BaseConfig(batch);
+      auto c = UpdateCompiler(f32).Compile(*m);
+      if (!c) return -1.0f;
+      UpdateEngine e;
+      if (!e.LoadFromMemory(c->plan.data(), c->plan.size())) return -1.0f;
+      if (!e.BindSourceModel(path)) return -1.0f;
+      auto l = e.Evaluate(val);
+      return l ? *l : -1.0f;
+    };
+    const float source_loss = f32_loss(src);
+    const float committed_loss = f32_loss(out);
+    ASSERT_GT(source_loss, 0.0f);
+    ASSERT_GT(committed_loss, 0.0f);
+    // Step 0: B = 0, so the shipped eval is the source model exactly.
+    EXPECT_EQ(report.val_initial_loss, source_loss);
+    // The end: the gated score is the committed model's.
+    EXPECT_NEAR(report.val_final_loss, committed_loss,
+                2e-5 * (1.0 + committed_loss));
+    // The proxy scored something else — at step 0 (the quantized source)
+    // and at the end — and the shipped score is the closer.
+    EXPECT_NE(proxied.val_initial_loss, source_loss);
+    EXPECT_LT(std::fabs(report.val_final_loss - committed_loss),
+              std::fabs(proxied.val_final_loss - committed_loss));
+    // Training itself is unchanged: both ran against the narrow weights.
+    EXPECT_EQ(report.final_avg_loss, proxied.final_avg_loss);
+  }
+}
+
 TEST(UpdateSystem, QuantizedBaseTrainsAndCommitsWithoutBakingError) {
   const int64_t in_dim = 8, hidden = 16, out_dim = 2, batch = 8;
   SmfModel model = MakeMlp(in_dim, hidden, out_dim, 5);
@@ -743,21 +843,31 @@ TEST(UpdateSystem, QuantizedBaseTrainsAndCommitsWithoutBakingError) {
 
   // The quantized network is the function being trained: its compiled
   // backward must still match finite differences of its compiled forward.
+  // Weights, inputs and nudges are portable bits: this network has 128
+  // ReLU pre-activations per batch, and on normal_distribution data a
+  // finite-difference step lands on one of them for some platforms and not
+  // others (see GradientCheck).
   {
+    std::mt19937_64 rng(7);
+    SmfModel gmodel = MakeMlp(in_dim, hidden, out_dim, 5);
+    for (auto& t : gmodel.tensors) {
+      if (!t.is_const) continue;
+      std::vector<float> w(t.data.size() / sizeof(float));
+      for (auto& v : w) v = 0.5f * PortableUniform(rng);
+      std::memcpy(t.data.data(), w.data(), t.data.size());
+    }
     UpdateConfig gc = config;
     gc.emit_optimizer = false;
     ASSERT_OK_AND_ASSIGN(CompiledUpdate gplan,
-                         UpdateCompiler(gc).Compile(model));
+                         UpdateCompiler(gc).Compile(gmodel));
     UpdateEngine ge;
     ASSERT_OK(ge.LoadFromMemory(gplan.plan.data(), gplan.plan.size()));
-    std::mt19937_64 rng(7);
-    std::normal_distribution<float> dist(0.0f, 1.0f);
     std::vector<float> x(batch * in_dim);
-    for (auto& v : x) v = dist(rng);
+    for (auto& v : x) v = PortableUniform(rng);
     std::vector<int32_t> labels(batch);
     for (auto& l : labels) l = static_cast<int32_t>(rng() % out_dim);
     FillSlots(ge, x, labels);
-    GradientCheck(gplan, ge, 7);
+    GradientCheck(gplan, ge, 7, /*tol=*/2e-2, /*portable=*/true);
   }
 
   // End-to-end on the saved artifact: train, merge, commit. The committed

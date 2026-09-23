@@ -136,8 +136,10 @@ std::expected<void, std::string> VerifyExecutorContract(
     std::span<const up::EmitEntry> emit_table, const up::PlanHeader& header) {
   for (const auto* program : {&train, &merge, &eval, &step})
     for (const up::UpdateInstruction& ins : *program) {
+      // Only the eval program may read the source model file (v17).
       if (auto r = ValidateInstruction(ins, header.arena_size,
-                                       header.rodata_size, header.version);
+                                       header.rodata_size, header.version,
+                                       /*allow_source=*/program == &eval);
           !r)
         return r;
       // Label provenance for the class-indexed kernels. The softmax pair

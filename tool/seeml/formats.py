@@ -97,9 +97,10 @@ SDS_HEADER_BYTES = SDS_HEADER.size
 # --- SEEU: the update plan (source/plan/schema.h, instruction.h) -------------
 
 SEEU_MAGIC = 0x55454553  # "SEEU"
-SEEU_VERSION = 16
+SEEU_VERSION = 17
 SEEU_OLDEST_READABLE = 4
 RODATA_BIT = 1 << 63
+SOURCE_BIT = 1 << 62  # v17: the source model file (E12), eval program only
 NULL_REF = (1 << 64) - 1
 RODATA_ALIGNMENT = 16384
 GEMM_PANEL_FLOATS = 8192
@@ -163,6 +164,8 @@ FLAG_EPILOGUE_ACT_SHIFT = 1
 FLAG_EPILOGUE_ACT_MASK = 6
 # The f32 GEMMs (v14): C = D + A@B, D's ref in in[3]; excludes the epilogue.
 FLAG_GEMM_ADDEND = 8
+# The int8 GEMMs (v17): in[3] is a rodata ref to per-output-column scales.
+FLAG_Q8_COL_SCALE = 16
 
 # kFusedMap micro-program: one byte per stage, packed into an operand word.
 FUSED_STAGES = {"end": 0, "add": 1, "mul": 2, "scale": 3, "relu": 4,
@@ -233,6 +236,7 @@ def check_against(abi: Dict[str, Any]) -> List[str]:
     same("seeu.oldest_readable", SEEU_OLDEST_READABLE,
          seeu["oldest_readable"])
     same("seeu.rodata_bit", RODATA_BIT, 1 << seeu["rodata_bit"])
+    same("seeu.source_bit", SOURCE_BIT, 1 << seeu["source_bit"])
     same("seeu.rodata_alignment", RODATA_ALIGNMENT, seeu["rodata_alignment"])
     same("seeu.gemm_panel_floats", GEMM_PANEL_FLOATS,
          seeu["gemm_panel_floats"])
@@ -240,7 +244,8 @@ def check_against(abi: Dict[str, Any]) -> List[str]:
     same("seeu.flags", {"epilogue_bias": FLAG_EPILOGUE_BIAS,
                         "epilogue_act_shift": FLAG_EPILOGUE_ACT_SHIFT,
                         "epilogue_act_mask": FLAG_EPILOGUE_ACT_MASK,
-                        "gemm_addend": FLAG_GEMM_ADDEND},
+                        "gemm_addend": FLAG_GEMM_ADDEND,
+                        "q8_col_scale": FLAG_Q8_COL_SCALE},
          seeu["flags"])
     same("seeu.fused_stages", FUSED_STAGES, seeu["fused_stages"])
     same("seeu.fused_stage", {"kind_mask": FUSED_KIND_MASK,

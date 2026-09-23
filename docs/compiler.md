@@ -216,14 +216,18 @@ Training moves A and B; it never touches W. So how does the update reach the mod
 
 The frozen base weights dominate the plan's size, and during training they are only ever *read* — by matmuls. Can we store them smaller? `SelectQuantizedWeights` (`analysis/reviewer/quantization.cc`) says yes, carefully.
 
-The scheme is **per-tensor symmetric int8**. For a weight tensor `w`:
+The scheme is **per-column symmetric int8** (since E12, #95; plan v17 — earlier plans used one scale per tensor). For a weight `W [K, M]`, each output column `m` gets its own scale:
 
 ```
-scale = max|wᵢ| / 127         (or 1.0 for an all-zero tensor)
-qᵢ    = clamp(round(wᵢ / scale), −127, +127)     stored as int8
+scale[m] = max_k |W[k, m]| / 127     (1.0 for an all-zero column)
+q[k, m]  = clamp(round(W[k, m] / scale[m]), −127, +127)     stored as int8
 ```
 
-Each float becomes one byte — a 4× shrink — and dequantization is a single multiply by `scale`, which the GEMM kernels fuse into their existing scaling multiply (so it's *free*). Why symmetric, and why 127 rather than 128? Because mapping `[−max, +max]` onto `[−127, +127]` keeps zero exactly representable and the two directions perfectly balanced; the asymmetric −128 slot buys one extra value at the cost of that symmetry, and isn't worth it here.
+The `M` scales follow the int8 levels in rodata, and the GEMM carries a reference to them (`kFlagQ8ColScale`). Why per column: LLM projections carry a few outlier columns with |w| 10–50× the bulk, and a single max-abs scale for the whole tensor lets those set the step for every column, collapsing the bulk to a handful of levels. On a planted 50× outlier column the per-column form cuts the bulk's dequantization error 51× (RMS and mean-abs alike); the outlier column's own error cannot move — its scale is the tensor's either way — and does not. In the forward GEMM the scale belongs to the output column and joins the B panel as it widens; in the dX GEMM (`dC @ Wᵀ`) the same scale sits on the reduction axis, so each task scales its A rows once and runs the unchanged NT core. Measured at SmolLM-135M shapes the per-column form costs +0.9–2.3% of GEMM time, single- and 8-threaded.
+
+Each float becomes one byte — a 4× shrink, plus four bytes per column — and dequantization rides the widening the kernels do anyway. Why symmetric, and why 127 rather than 128? Because mapping `[−max, +max]` onto `[−127, +127]` keeps zero exactly representable and the two directions perfectly balanced; the asymmetric −128 slot buys one extra value at the cost of that symmetry, and isn't worth it here.
+
+**What the gate scores.** Training runs against the int8 (or bf16) copies — that is the memory they buy — but the commit patches the pristine f32 weights of the source file, so the function that ships is `W_f32 + Δ`, not `W_q + Δ`. Since E12 a plan compiled from a model file lowers its *eval* program against the f32 weights themselves: the student's frozen GEMMs become plain f32 GEMMs over source refs into that file (plan v17), mapped by the engine at run time. Every evaluation — the gate's before (exactly the source model at step 0, where `B = 0`) and after, and every best-state score — measures the model that ships. The teacher is not quantized at all: it is the distillation target, and it lives in a different file.
 
 Eligibility is strict: *every* user of the tensor must be a matmul, with the tensor on the *weight* side. One use as an activation, or by any other op, disqualifies the whole tensor — those consumers would need dequantized floats, and there's no place to put them. LoRA adapters, gradients, and activations always stay f32; quantizing what you're *training* would be a very different (and lossier) design.
 
