@@ -1,36 +1,48 @@
 #!/usr/bin/env bash
-# Reconcile the Two-Plane Overhaul with GitHub: the bodies in
-# docs/next-project/issues/ are the source of truth for one Issue each
-# (title, labels, milestone, body), plus a Project (v2) board carrying the
-# new issues and the existing roadmap issues, with Plane / Origin /
-# Priority single-select fields set per item.
+# Reconcile the Two-Plane Overhaul with GitHub. The bodies in
+# docs/next-project/issues/ are the source of truth for one Issue each,
+# plus a Project (v2) board carrying those issues and the existing roadmap
+# issues, with Plane / Origin / Priority single-select fields per item.
 #
 # Prereqs: gh (authenticated) + jq. Projects need the extra scope once:
 #     gh auth refresh -s project
 #
-# Idempotent and convergent: every label a body names is upserted, every
-# milestone a body names is upserted, an issue is created when no issue
-# carries its exact title and EDITED when the live body, labels or
-# milestone differ from the file (so a committed edit to a body reaches
-# GitHub on the next run), the project is reused if the title matches,
-# existing fields / options are reused, and item-add is a no-op for
-# present items. The issue list is fetched once, paginated, so the
-# title match does not silently stop at a page boundary.
+# What the file owns, and what it does not (docs/next-project/README.md,
+# "Materializing the board"):
+#   * the issue's body, compared after the same normalization GitHub applies;
+#   * its labels as a FLOOR: every label the file names is present, labels
+#     added live for triage (sev:*, good first issue, ...) are kept;
+#   * its milestone, only when the file names one (`milestone:`);
+#   * an issue that is CLOSED is left alone — its body is history — and
+#     only its board fields are reconciled.
+# Every label and milestone a body names is upserted; the issue list and
+# the board are each fetched once, paginated, so nothing stops at a page
+# boundary; a board field is written only when its value differs. A
+# single-select option that an existing field lacks cannot be added by the
+# Projects CLI (the option-edit mutation refuses to append): the script
+# names it as an ACTION for the web UI and carries on.
 #
-# A single-select option that an existing field lacks cannot be added by
-# the Projects CLI (the option-edit mutation rejects it): the script says
-# which option to add in the web UI and carries on.
-#
-#     tool/create_next_project.sh            # reconcile
-#     tool/create_next_project.sh --dry-run  # say what would change, touch nothing
+#     tool/create_next_project.sh              # reconcile
+#     tool/create_next_project.sh --dry-run    # print every write it would make, touch nothing
 set -euo pipefail
+
+usage() {
+  echo "usage: $0 [--dry-run | -n]" >&2
+  exit "${1:-2}"
+}
+DRY_RUN=0
+case "${1:-}" in
+  "") ;;
+  --dry-run|-n) DRY_RUN=1 ;;
+  -h|--help) usage 0 ;;
+  *) echo "error: unknown argument '$1'" >&2; usage ;;
+esac
+[ $# -le 1 ] || usage
 
 REPO="Szhenger/see-ml"
 OWNER="Szhenger"
 PROJECT_TITLE="SeeML Two-Plane Overhaul"
 ISSUE_DIR="$(cd "$(dirname "$0")/../docs/next-project/issues" && pwd)"
-DRY_RUN=0
-[ "${1:-}" = "--dry-run" ] && DRY_RUN=1
 
 # Existing roadmap issues to pull onto the board: number|Plane|Origin|Priority
 EXISTING_ITEMS="
@@ -62,61 +74,71 @@ for bin in gh jq; do
 done
 gh auth status >/dev/null 2>&1 || { echo "error: run 'gh auth login' first" >&2; exit 1; }
 
-run() {  # run <cmd...>: execute, or print under --dry-run
-  if [ "$DRY_RUN" = 1 ]; then echo "   would: $*"; else "$@"; fi
+# Reads call gh directly. Every WRITE goes through mutate, which under
+# --dry-run prints the intent on stderr (so a caller's stdout redirect
+# cannot swallow it) and does nothing; otherwise it runs the command and
+# passes its stdout through for the caller to capture or discard.
+mutate() {  # mutate "<what>" gh-args...
+  local what="$1"; shift
+  if [ "$DRY_RUN" = 1 ]; then echo "   would: $what" >&2; return 0; fi
+  gh "$@"
 }
 
 # --- front-matter helpers -------------------------------------------------
 fm() {  # fm <file> <key>  (empty when the key is absent)
   awk -v key="$2" '
-    /^---$/ { c++; next }
+    /^---$/ && c < 2 { c++; next }
     c == 1 && $0 ~ "^" key ": " {
       sub("^" key ": ", ""); gsub(/^"|"$/, ""); print; exit
     }' "$1"
 }
-body() { awk '/^---$/ { c++; next } c >= 2 { print }' "$1"; }
-# GitHub stores CRLF-free text and drops a trailing newline: compare the
+# Only the first two `---` lines fence the front matter; a horizontal rule
+# inside the body is body.
+body() { awk '/^---$/ && c < 2 { c++; next } c >= 2 { print }' "$1"; }
+# GitHub stores CRLF-free text and drops trailing blank lines: compare the
 # same normalization on both sides.
 norm() { tr -d '\r' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'; }
-sorted_csv() { tr ',' '\n' | sed '/^$/d' | sort -u | paste -sd, -; }
+# A comma-separated front-matter list as a sorted, trimmed, unique JSON
+# array — all set arithmetic on labels happens in jq, in one ordering.
+list_json() { jq -R -c 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(. != "")) | unique'; }
 
 BODIES=("$ISSUE_DIR"/*.md)
 
 # --- labels: every label any body names ----------------------------------
 echo "== labels"
-have_labels=$(gh label list -R "$REPO" --limit 500 --json name | jq -r '.[].name')
-wanted=$(for f in "${BODIES[@]}"; do fm "$f" labels; done | sorted_csv | tr ',' '\n')
-while IFS= read -r l; do
-  [ -n "$l" ] || continue
-  row=$(grep -F "$l|" <<< "$LABEL_TABLE" | grep "^$l|" || true)
+have_labels=$(gh label list -R "$REPO" --limit 500 --json name | jq -c '[.[].name]')
+wanted_labels=$(for f in "${BODIES[@]}"; do fm "$f" labels; done | paste -sd, - | list_json)
+jq -r '.[]' <<< "$wanted_labels" | while IFS= read -r l; do
+  row=$(awk -F'|' -v l="$l" '$1 == l' <<< "$LABEL_TABLE")
   if [ -n "$row" ]; then
     color=$(cut -d'|' -f2 <<< "$row"); desc=$(cut -d'|' -f3 <<< "$row")
-    run gh label create "$l" -R "$REPO" --force -c "$color" -d "$desc" >/dev/null
-  elif ! grep -qx "$l" <<< "$have_labels"; then
-    run gh label create "$l" -R "$REPO" -c EDEDED -d "" >/dev/null
+    mutate "upsert label '$l'" label create "$l" -R "$REPO" --force -c "$color" -d "$desc" >/dev/null
+  elif ! jq -e --arg l "$l" 'index($l) != null' <<< "$have_labels" >/dev/null; then
+    mutate "create label '$l' (grey)" label create "$l" -R "$REPO" -c EDEDED -d "" >/dev/null
   fi
-done <<< "$wanted"
-echo "   ok: $(tr '\n' ' ' <<< "$wanted")"
+done
+echo "   ok: $(jq -r 'join(" ")' <<< "$wanted_labels")"
 
 # --- milestones: every milestone any body names --------------------------
 echo "== milestones"
-have_ms=$(gh api --paginate "repos/$REPO/milestones?state=all&per_page=100" | jq -r '.[].title')
-for f in "${BODIES[@]}"; do fm "$f" milestone; done | sed '/^$/d' | sort -u |
+have_ms=$(gh api --paginate "repos/$REPO/milestones?state=all&per_page=100" | jq -c '[.[].title]')
+for f in "${BODIES[@]}"; do fm "$f" milestone; done | sed '/^$/d' | LC_ALL=C sort -u |
 while IFS= read -r m; do
-  if grep -qxF "$m" <<< "$have_ms"; then echo "   ok: $m"
-  else run gh api "repos/$REPO/milestones" -f title="$m" >/dev/null; echo "   $([ "$DRY_RUN" = 1 ] && echo would create || echo created): $m"; fi
+  if jq -e --arg m "$m" 'index($m) != null' <<< "$have_ms" >/dev/null; then echo "   ok: $m"
+  else mutate "create milestone '$m'" api "repos/$REPO/milestones" -f title="$m" >/dev/null; fi
 done
 
 # --- issues: one fetch, then create or edit per body ---------------------
 echo "== issues"
 LIVE=$(gh api --paginate "repos/$REPO/issues?state=all&per_page=100" |
   jq -c '.[] | select(.pull_request == null) |
-         {number, title, body: (.body // ""), milestone: (.milestone.title // ""),
-          labels: ([.labels[].name] | sort | join(","))}')
+         {number, title, state, body: (.body // ""), milestone: (.milestone.title // ""),
+          labels: ([.labels[].name] | unique)}')
 ITEMS=""  # url|Plane|Origin|Priority
 for f in "${BODIES[@]}"; do
   title=$(fm "$f" title)
-  labels=$(fm "$f" labels | sorted_csv)
+  labels_json=$(fm "$f" labels | list_json)
+  labels_csv=$(jq -r 'join(",")' <<< "$labels_json")
   plane=$(fm "$f" plane)
   origin=$(fm "$f" origin)
   priority=$(fm "$f" priority)
@@ -125,48 +147,37 @@ for f in "${BODIES[@]}"; do
 
   live=$(jq -c --arg t "$title" 'select(.title == $t)' <<< "$LIVE" | head -1)
   if [ -z "$live" ]; then
-    label_args=()
-    IFS=',' read -ra ls <<< "$labels"
-    for l in "${ls[@]}"; do label_args+=(-l "$l"); done
-    ms_args=(); [ -n "$milestone" ] && ms_args=(-m "$milestone")
-    if [ "$DRY_RUN" = 1 ]; then
-      url="https://github.com/$REPO/issues/new"
-      echo "   would create: $title  ($(basename "$f"))"
-    else
-      url=$(body "$f" | gh issue create -R "$REPO" -t "$title" -F - "${label_args[@]}" ${ms_args[@]+"${ms_args[@]}"})
-      echo "   created: $url  ($(basename "$f"))"
-    fi
+    url=$(body "$f" | mutate "create issue '$title' [labels: ${labels_csv:-none}; milestone: ${milestone:-none}]" \
+      issue create -R "$REPO" -t "$title" -F - \
+      ${labels_csv:+-l "$labels_csv"} ${milestone:+-m "$milestone"})
+    [ -n "$url" ] || url="https://github.com/$REPO/issues/new?title=$(basename "$f")"
+    [ "$DRY_RUN" = 1 ] || echo "   created: $url  ($(basename "$f"))"
   else
     num=$(jq -r .number <<< "$live")
     url="https://github.com/$REPO/issues/$num"
-    live_body=$(jq -r .body <<< "$live" | norm)
-    live_labels=$(jq -r .labels <<< "$live")
-    live_ms=$(jq -r .milestone <<< "$live")
-    changes=()  # bash 3.2 + set -u: an empty array is "unset", hence the guarded expansions below
-    [ "$live_body" = "$want_body" ] || changes+=(body)
-    [ "$live_labels" = "$labels" ] || changes+=(labels)
-    [ "$live_ms" = "$milestone" ] || changes+=(milestone)
-    if [ "${changes[*]+${#changes[@]}}" = "" ]; then
-      echo "   in sync (#$num): $title"
+    if [ "$(jq -r .state <<< "$live")" = "closed" ]; then
+      echo "   closed, left alone (#$num): $title"
     else
-      edit_args=()
-      for c in "${changes[@]}"; do
-        case "$c" in
-          labels)
-            add=$(comm -13 <(tr ',' '\n' <<< "$live_labels" | sed '/^$/d') <(tr ',' '\n' <<< "$labels") | paste -sd, -)
-            rm_=$(comm -23 <(tr ',' '\n' <<< "$live_labels" | sed '/^$/d') <(tr ',' '\n' <<< "$labels") | paste -sd, -)
-            [ -n "$add" ] && edit_args+=(--add-label "$add")
-            [ -n "$rm_" ] && edit_args+=(--remove-label "$rm_") ;;
-          milestone)
-            if [ -n "$milestone" ]; then edit_args+=(-m "$milestone"); else edit_args+=(--remove-milestone); fi ;;
-          body) edit_args+=(-F -) ;;
-        esac
-      done
-      if [ "$DRY_RUN" = 1 ]; then
-        echo "   would edit #$num (${changes[*]}): $title"
+      live_body=$(jq -r .body <<< "$live" | norm)
+      add_labels=$(jq -r --argjson want "$labels_json" '($want - .labels) | join(",")' <<< "$live")
+      live_ms=$(jq -r .milestone <<< "$live")
+      what=""
+      [ "$live_body" = "$want_body" ] || what="$what body"
+      [ -z "$add_labels" ] || what="$what labels(+$add_labels)"
+      if [ -n "$milestone" ] && [ "$live_ms" != "$milestone" ]; then what="$what milestone"; fi
+      what="${what# }"
+      if [ -z "$what" ]; then
+        echo "   in sync (#$num): $title"
       else
-        body "$f" | gh issue edit "$num" -R "$REPO" ${edit_args[@]+"${edit_args[@]}"} >/dev/null
-        echo "   edited #$num (${changes[*]}): $title"
+        # bash 3.2 + set -u refuses "${empty[@]}": each flag is passed
+        # through a guarded expansion instead of an array.
+        body_flag=""; case "$what" in *body*) body_flag=1 ;; esac
+        ms_flag=""; case "$what" in *milestone*) ms_flag=1 ;; esac
+        body "$f" | mutate "edit #$num [$what]" issue edit "$num" -R "$REPO" \
+          ${body_flag:+-F -} \
+          ${add_labels:+--add-label "$add_labels"} \
+          ${ms_flag:+-m "$milestone"} >/dev/null
+        [ "$DRY_RUN" = 1 ] || echo "   edited #$num [$what]: $title"
       fi
     fi
   fi
@@ -184,7 +195,7 @@ proj_json=$(gh project list --owner "$OWNER" --format json --limit 100 |
 if [ -n "$proj_json" ]; then
   echo "   reusing existing project"
 elif [ "$DRY_RUN" = 1 ]; then
-  echo "   would create project '$PROJECT_TITLE'; stopping here (no project to reconcile against)"
+  echo "   would: create project '$PROJECT_TITLE' — nothing to reconcile against yet; stopping" >&2
   exit 0
 else
   proj_json=$(gh project create --owner "$OWNER" --title "$PROJECT_TITLE" --format json)
@@ -195,60 +206,71 @@ proj_url=$(jq -r '.url // empty' <<< "$proj_json")
 echo "   project #$proj_num ${proj_url:+at $proj_url}"
 
 fields_json=$(gh project field-list "$proj_num" --owner "$OWNER" --format json)
+PENDING_FIELDS=""  # fields a dry run would have created: their values cannot be set yet
 
 ensure_field() {  # ensure_field <name> <comma-separated options>
   local have missing
   have=$(jq -r --arg n "$1" '.fields[] | select(.name == $n) | .id' <<< "$fields_json" | head -1)
   if [ -z "$have" ]; then
-    run gh project field-create "$proj_num" --owner "$OWNER" --name "$1" \
-      --data-type SINGLE_SELECT --single-select-options "$2" >/dev/null
-    echo "   field created: $1 ($2)"
+    mutate "create field '$1' with options [$2]" project field-create "$proj_num" --owner "$OWNER" \
+      --name "$1" --data-type SINGLE_SELECT --single-select-options "$2" >/dev/null
+    PENDING_FIELDS="$PENDING_FIELDS $1 "
     return 0
   fi
   # The field exists: an option it lacks has to be added by hand (the
   # Projects option-edit mutation refuses to append). Say which.
-  missing=$(comm -23 <(tr ',' '\n' <<< "$2" | sort -u) \
-    <(jq -r --arg n "$1" '.fields[] | select(.name == $n) | .options[].name' <<< "$fields_json" | sort -u) |
-    paste -sd, -)
+  missing=$(jq -r --arg n "$1" --argjson want "$(list_json <<< "$2")" \
+    '[.fields[] | select(.name == $n) | .options[].name] as $have | ($want - $have) | join(", ")' \
+    <<< "$fields_json")
   [ -z "$missing" ] || echo "   ACTION: field '$1' lacks option(s) '$missing' — add in the web UI (project settings → $1), then rerun" >&2
 }
 # The option sets are the union of what the bodies and the roadmap rows
 # name, so a new origin or plane in a body is never silently unset.
 opts() {  # opts <front-matter key> <EXISTING_ITEMS column>
   { for f in "${BODIES[@]}"; do fm "$f" "$1"; done
-    sed '/^$/d' <<< "$EXISTING_ITEMS" | cut -d'|' -f"$2"; } | sed '/^$/d' | sort -u | paste -sd, -
+    sed '/^$/d' <<< "$EXISTING_ITEMS" | cut -d'|' -f"$2"; } | sed '/^$/d' | LC_ALL=C sort -u | paste -sd, -
 }
 ensure_field "Plane"    "$(opts plane 2)"
 ensure_field "Origin"   "$(opts origin 3)"
 ensure_field "Priority" "P0,P1,P2"
 
-fields_json=$(gh project field-list "$proj_num" --owner "$OWNER" --format json)
+[ "$DRY_RUN" = 1 ] || fields_json=$(gh project field-list "$proj_num" --owner "$OWNER" --format json)
+# One fetch of the board: item ids and current field values, so a run
+# that changes nothing writes nothing.
+items_json=$(gh project item-list "$proj_num" --owner "$OWNER" --format json --limit 500)
 
-set_field() {  # set_field <item-id> <field-name> <option-name>
-  local fid oid
-  [ -n "$3" ] || return 0
-  fid=$(jq -r --arg n "$2" '.fields[] | select(.name == $n) | .id' <<< "$fields_json")
-  oid=$(jq -r --arg n "$2" --arg o "$3" \
+set_field() {  # set_field <item-id> <item-url> <field-name> <option-name>
+  local fid oid key current
+  [ -n "$4" ] || return 0
+  case "$PENDING_FIELDS" in *" $3 "*) return 0 ;; esac  # would be created first
+  fid=$(jq -r --arg n "$3" '.fields[] | select(.name == $n) | .id' <<< "$fields_json")
+  oid=$(jq -r --arg n "$3" --arg o "$4" \
     '.fields[] | select(.name == $n) | .options[] | select(.name == $o) | .id' \
     <<< "$fields_json")
   if [ -z "$fid" ] || [ -z "$oid" ]; then
-    echo "   warn: no option '$3' for field '$2' (see ACTION above)" >&2; return 0
+    echo "   warn: no option '$4' for field '$3' (see ACTION above)" >&2; return 0
   fi
-  run gh project item-edit --id "$1" --project-id "$proj_id" \
-    --field-id "$fid" --single-select-option-id "$oid" >/dev/null
+  # item-list keys a field's value by its lower-cased name.
+  key=$(tr '[:upper:]' '[:lower:]' <<< "$3")
+  current=$(jq -r --arg u "$2" --arg k "$key" --arg n "$3" \
+    '.items[] | select(.content.url == $u) | (.[$k] // .[$n] // "")' <<< "$items_json" | head -1)
+  [ "$current" = "$4" ] && return 0
+  mutate "set $3 = '$4' on $2 (was '${current:-unset}')" project item-edit --id "$1" \
+    --project-id "$proj_id" --field-id "$fid" --single-select-option-id "$oid" >/dev/null
 }
 
 echo "== items"
 while IFS='|' read -r url plane origin priority; do
   [ -n "$url" ] || continue
-  if [ "$DRY_RUN" = 1 ]; then item_id="dry"
-  else
-    item_id=$(gh project item-add "$proj_num" --owner "$OWNER" --url "$url" \
-      --format json | jq -r '.id')
+  item_id=$(jq -r --arg u "$url" '.items[] | select(.content.url == $u) | .id' <<< "$items_json" | head -1)
+  if [ -z "$item_id" ]; then
+    item_id=$(mutate "add $url to the board" project item-add "$proj_num" --owner "$OWNER" \
+      --url "$url" --format json | jq -r '.id // empty')
+    [ -n "$item_id" ] || item_id="pending"
   fi
-  set_field "$item_id" "Plane" "$plane"
-  set_field "$item_id" "Origin" "$origin"
-  set_field "$item_id" "Priority" "$priority"
+  set_field "$item_id" "$url" "Plane" "$plane"
+  set_field "$item_id" "$url" "Origin" "$origin"
+  set_field "$item_id" "$url" "Priority" "$priority"
   echo "   $url  [$plane | ${origin:-—} | $priority]"
 done <<< "$ITEMS"
 
