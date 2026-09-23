@@ -131,6 +131,20 @@ const char* const kPipeNames[kPipeCount] = {
     "k_adamw_clip", "k_rope_fwd",
     "k_rope_bwd", "k_attn_softmax", "k_softmax_rows_bwd"};
 
+// The relaxed GEMM family (plan v18): a second library, present only where
+// Metal 4's tensor ops compile (macOS 26 on an Apple GPU). Two dispatches
+// per GEMM — the activation rounded to bf16 into the backend's scratch
+// (buffer 6), then the tensor-op tile with its epilogue; the exact kernels
+// stand in everywhere the library is missing or a shape is skinny.
+enum RxPipe : int {
+  kRxToBf16, kRxNNQ8, kRxNTQ8, kRxNNBF16, kRxNTBF16, kRxNNF32, kRxNTF32,
+  kRxPipeCount
+};
+const char* const kRxPipeNames[kRxPipeCount] = {
+    "k_to_bf16", "k_gemm_rx_nn_q8", "k_gemm_rx_nt_q8", "k_gemm_rx_nn_bf16",
+    "k_gemm_rx_nt_bf16", "k_gemm_rx_nn_f32", "k_gemm_rx_nt_f32"};
+constexpr uint32_t kRxTileM = 64, kRxTileN = 32, kRxThreads = 128;
+
 constexpr uint32_t kElementwiseGroup = 256;
 constexpr uint32_t kGemmTile = 64;
 constexpr uint32_t kGemmThreads = 128;  // 4 simdgroups of 32
@@ -219,6 +233,9 @@ class MetalBackend final : public ExecutorBackend {
     std::string s = device_ ? device_.name.UTF8String : "no device";
     s += rodata_buf_ == nil ? "" : (rodata_zero_copy_ ? ", rodata zero-copy"
                                                         : ", rodata copied");
+    s += relaxed_ ? ", relaxed GEMMs on tensor ops"
+                  : ", relaxed GEMMs on the exact kernels (" +
+                        relaxed_reason_ + ")";
     return s;
   }
 
@@ -255,6 +272,20 @@ class MetalBackend final : public ExecutorBackend {
   id<MTLBuffer> scratch_ = nil;
   id<MTLBuffer> splitk_ws_ = nil;  // split-K partials, grown on demand
   uint64_t splitk_ws_bytes_ = 0;
+  // The relaxed family (v18): its pipelines when the Metal 4 library built,
+  // the reason it did not otherwise, and the bf16 activation scratch.
+  id<MTLComputePipelineState> rx_pipes_[kRxPipeCount];
+  bool relaxed_ = false;
+  std::string relaxed_reason_ = "not built";
+  id<MTLBuffer> bf16_scratch_ = nil;
+  uint64_t bf16_scratch_bytes_ = 0;
+  bool EncodeRelaxedGemm(up::OpCode op, const up::UpdateInstruction& ins,
+                         KArgs a);
+  void NoteDispatchName(const char* name) {
+    if (!profile_) return;
+    if (!prof_pipes_.empty()) prof_pipes_ += '+';
+    prof_pipes_ += name;
+  }
   id<MTLBuffer> arena_buf_ = nil;
   id<MTLBuffer> rodata_buf_ = nil;
   bool rodata_zero_copy_ = false;
@@ -426,12 +457,62 @@ MetalBackend::Create() {
 #pragma clang diagnostic pop
     }
     NSError* err = nil;
-    NSString* src = [NSString stringWithUTF8String:kMetalKernelSource];
+    const std::string source = std::string(kMetalKernelHead) +
+                               kMetalKernelPrelude + kMetalKernelSource;
+    NSString* src = [NSString stringWithUTF8String:source.c_str()];
     id<MTLLibrary> lib = [be->device_ newLibraryWithSource:src
                                                    options:options
                                                      error:&err];
     if (!lib)
       return std::unexpected(NsError(err, "kernel library compilation failed"));
+    // The relaxed family: Metal 4 (macOS 26) and a GPU whose compiler
+    // accepts the tensor ops. Absent, relaxed instructions run exact.
+    for (int i = 0; i < kRxPipeCount; ++i) be->rx_pipes_[i] = nil;
+#if defined(__MAC_26_0) && __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+    if (@available(macOS 26.0, *)) {
+      MTLCompileOptions* rx_options = [MTLCompileOptions new];
+      rx_options.languageVersion = MTLLanguageVersion4_0;
+      rx_options.mathMode = MTLMathModeSafe;
+      rx_options.mathFloatingPointFunctions =
+          MTLMathFloatingPointFunctionsPrecise;
+      const std::string rx_source = std::string(kMetalRelaxedKernelHead) +
+                                    kMetalKernelPrelude +
+                                    kMetalRelaxedKernelSource;
+      NSError* rx_err = nil;
+      id<MTLLibrary> rx_lib = [be->device_
+          newLibraryWithSource:[NSString stringWithUTF8String:rx_source.c_str()]
+                       options:rx_options
+                         error:&rx_err];
+      if (!rx_lib) {
+        be->relaxed_reason_ =
+            NsError(rx_err, "Metal 4 tensor-op library did not compile");
+      } else {
+        be->relaxed_ = true;
+        for (int i = 0; i < kRxPipeCount && be->relaxed_; ++i) {
+          id<MTLFunction> fn = [rx_lib
+              newFunctionWithName:[NSString
+                                      stringWithUTF8String:kRxPipeNames[i]]];
+          be->rx_pipes_[i] =
+              fn ? [be->device_ newComputePipelineStateWithFunction:fn
+                                                              error:&rx_err]
+                 : nil;
+          if (!be->rx_pipes_[i]) {
+            be->relaxed_ = false;
+            be->relaxed_reason_ = std::string("pipeline '") +
+                                  kRxPipeNames[i] + "' failed";
+          }
+        }
+        if (be->relaxed_ &&
+            be->rx_pipes_[kRxNNQ8].threadExecutionWidth != 32) {
+          be->relaxed_ = false;
+          be->relaxed_reason_ = "tensor-op tiles need 32-wide simdgroups";
+        }
+      }
+    } else
+#endif
+    {
+      be->relaxed_reason_ = "Metal 4 needs macOS 26";
+    }
     for (int i = 0; i < kPipeCount; ++i) {
       id<MTLFunction> fn = [lib
           newFunctionWithName:[NSString stringWithUTF8String:kPipeNames[i]]];
@@ -686,6 +767,76 @@ void MetalBackend::DispatchGemm(Pipe pipe, KArgs a, bool at, bool bt,
   }
 }
 
+// The relaxed family (plan v18): true when the instruction carries
+// kFlagRelaxed, the Metal 4 library built, and the shape is one the tile
+// serves — then two dispatches (k_to_bf16, the tensor-op GEMM with its
+// epilogue) replace the exact kernels and the caller returns. Skinny
+// shapes (the exact dispatcher's per-thread forms) and batched GEMMs stay
+// exact: the permission is the compiler's, the choice the backend's.
+bool MetalBackend::EncodeRelaxedGemm(up::OpCode op,
+                                     const up::UpdateInstruction& ins,
+                                     KArgs a) {
+  if (!(ins.flags & up::kFlagRelaxed) || !relaxed_) return false;
+  if (a.batch > 1 || a.m <= kGemmSkinnyDim || a.n <= kGemmSkinnyDim ||
+      a.k <= kGemmSkinnyDim)
+    return false;
+  const bool nt = op == up::OpCode::kGemmNT || op == up::OpCode::kGemmNTQ8 ||
+                  op == up::OpCode::kGemmNTBF16;
+  RxPipe pipe;
+  switch (op) {
+    case up::OpCode::kGemmNN:     pipe = kRxNNF32; break;
+    case up::OpCode::kGemmNT:     pipe = kRxNTF32; break;
+    case up::OpCode::kGemmNNQ8:   pipe = kRxNNQ8; break;
+    case up::OpCode::kGemmNTQ8:   pipe = kRxNTQ8; break;
+    case up::OpCode::kGemmNNBF16: pipe = kRxNNBF16; break;
+    case up::OpCode::kGemmNTBF16: pipe = kRxNTBF16; break;
+    default: return false;
+  }
+  if (a.lda == 0) a.lda = a.k;
+  if (a.ldb == 0) a.ldb = nt ? a.k : a.n;
+  if (a.ldc == 0) a.ldc = a.n;
+  // The exact path's flag words: 8 bias, 128 NN column scales, 256 NT
+  // reduction scales (folded here into the conversion, 512), and the
+  // addend the exact path adds afterwards (here 1024, in the epilogue).
+  uint32_t conv_flags = 0;
+  if (a.flags & 256u) {
+    conv_flags = 512u;
+    a.flags &= ~256u;
+  }
+  if (ins.flags & up::kFlagGemmAddend) {
+    a.off[3] = up::RefOffset(ins.in[3]);
+    if (up::IsRodataRef(ins.in[3])) a.space |= 1u << 3;
+    a.flags |= 1024u;
+  }
+  const uint64_t need = uint64_t{a.m} * a.k * 2;
+  if (need > bf16_scratch_bytes_) {
+    const uint64_t bytes = std::max(need, std::max<uint64_t>(
+                                              bf16_scratch_bytes_ * 2, 1 << 20));
+    bf16_scratch_ = [device_ newBufferWithLength:bytes
+                                         options:MTLResourceStorageModePrivate];
+    bf16_scratch_bytes_ = bf16_scratch_ ? bytes : 0;
+    if (!bf16_scratch_) return false;  // no scratch: the exact kernels
+  }
+  [enc_ setBuffer:bf16_scratch_ offset:0 atIndex:6];
+  KArgs conv = a;
+  conv.flags = conv_flags;
+  NoteDispatchName(kRxPipeNames[kRxToBf16]);
+  [enc_ setComputePipelineState:rx_pipes_[kRxToBf16]];
+  [enc_ setBytes:&conv length:sizeof(conv) atIndex:2];
+  const uint64_t elems = uint64_t{a.m} * a.k;
+  [enc_ dispatchThreadgroups:MTLSizeMake((elems + kElementwiseGroup - 1) /
+                                             kElementwiseGroup,
+                                         1, 1)
+       threadsPerThreadgroup:MTLSizeMake(kElementwiseGroup, 1, 1)];
+  NoteDispatchName(kRxPipeNames[pipe]);
+  [enc_ setComputePipelineState:rx_pipes_[pipe]];
+  [enc_ setBytes:&a length:sizeof(a) atIndex:2];
+  [enc_ dispatchThreadgroups:MTLSizeMake((a.n + kRxTileN - 1) / kRxTileN,
+                                         (a.m + kRxTileM - 1) / kRxTileM, 1)
+       threadsPerThreadgroup:MTLSizeMake(kRxThreads, 1, 1)];
+  return true;
+}
+
 std::expected<void, std::string> MetalBackend::Encode(
     const up::UpdateInstruction& ins, const StepParams& params) {
   KArgs a;
@@ -741,6 +892,7 @@ std::expected<void, std::string> MetalBackend::Encode(
       // flags: bit 3 = bias present, low bits = EpilogueAct (1..3)
       a.flags = static_cast<uint32_t>(up::EpilogueActOf(ins.flags)) |
                 ((ins.flags & up::kFlagEpilogueBias) ? 8u : 0u);
+      if (EncodeRelaxedGemm(op, ins, a)) return {};
       DispatchGemm(kPGemmNN, a, false, false, 4);
       EncodeAddend(a.m * a.n);
       return {};
@@ -749,6 +901,8 @@ std::expected<void, std::string> MetalBackend::Encode(
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]);
       a.m = u32(ins.out[0]); a.n = u32(ins.out[1]); a.k = u32(ins.out[2]);
       a.f[0] = 1.0f;
+      if (op == up::OpCode::kGemmNT && EncodeRelaxedGemm(op, ins, a))
+        return {};
       if (op == up::OpCode::kGemmNT)
         DispatchGemm(kPGemmNT, a, false, true, 4);
       else
@@ -768,12 +922,14 @@ std::expected<void, std::string> MetalBackend::Encode(
       a.f[0] = 1.0f;
       a.flags = static_cast<uint32_t>(up::EpilogueActOf(ins.flags)) |
                 ((ins.flags & up::kFlagEpilogueBias) ? 8u : 0u);
+      if (EncodeRelaxedGemm(op, ins, a)) return {};
       DispatchGemm(kPGemmNNBF16, a, false, false, 2);
       return {};
     case up::OpCode::kGemmNTBF16:
       ref(0, ins.in[0]); ref(1, ins.in[1]); ref(2, ins.in[2]);
       a.m = u32(ins.out[0]); a.n = u32(ins.out[1]); a.k = u32(ins.out[2]);
       a.f[0] = 1.0f;
+      if (EncodeRelaxedGemm(op, ins, a)) return {};
       DispatchGemm(kPGemmNTBF16, a, false, true, 2);
       return {};
     case up::OpCode::kGemmNNQ8:
@@ -790,6 +946,7 @@ std::expected<void, std::string> MetalBackend::Encode(
       } else {
         a.f[0] = BitsToF32(ins.in[3]);  // the per-tensor dequant scale
       }
+      if (EncodeRelaxedGemm(op, ins, a)) return {};
       if (op == up::OpCode::kGemmNNQ8)
         DispatchGemm(kPGemmNNQ8, a, false, false, 1);
       else

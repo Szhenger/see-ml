@@ -599,6 +599,35 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
                                bf16_weights, binding->quant_column_scales);
   if (!train_instrs) return std::unexpected(train_instrs.error());
 
+  // --- Relaxed arithmetic (plan v18, F2 / F4). -------------------------------
+  // Under --precision certified-bf16 every frozen-weight GEMM of the train
+  // stream (and so of the step program split from it below) — a product
+  // whose B operand is rodata: the base and teacher weights in f32, int8 or
+  // bf16, NN forward and NT dX — carries kFlagRelaxed. The adapter GEMMs
+  // (A and B live in the arena) and everything else stay exact, as does
+  // the eval program lowered separately below: the gate scores what ships
+  // in reference arithmetic. The bit is a permission the backend may
+  // decline; what it permits is bounded by the certificate the package
+  // must carry.
+  uint64_t relaxed_gemms = 0;
+  if (config_.precision == Precision::kCertifiedBf16) {
+    for (UpdateInstruction& ins : *train_instrs) {
+      const auto op = static_cast<OpCode>(ins.opcode);
+      const bool frozen_gemm =
+          (op == OpCode::kGemmNN || op == OpCode::kGemmNT ||
+           op == OpCode::kGemmNNQ8 || op == OpCode::kGemmNTQ8 ||
+           op == OpCode::kGemmNNBF16 || op == OpCode::kGemmNTBF16) &&
+          IsRodataRef(ins.in[1]);
+      if (!frozen_gemm) continue;
+      ins.flags |= kFlagRelaxed;
+      ++relaxed_gemms;
+    }
+    seeml::diag::Note(generating::kDriver,
+                      "relaxed arithmetic: " + std::to_string(relaxed_gemms) +
+                          " frozen-weight GEMM(s) carry kFlagRelaxed; the "
+                          "package needs a numerics certificate");
+  }
+
   // Under gradient accumulation the lowered stream is two programs: the
   // grad program (forward, backward, the folds) and the step program (clip,
   // step, zero), split at the first step-program instruction — the
@@ -955,6 +984,7 @@ std::expected<CompiledUpdate, std::string> UpdateCompiler::CompileImpl(
   result.eval_instruction_count = header.eval_instr_count;
   result.rodata_size = header.rodata_size;
   result.scores_shipped = !shipped.empty();
+  result.relaxed_gemms = relaxed_gemms;
   // What the plan carries, from the pass that decided on exact shapes.
   result.attention_tiled =
       attention_decision.tiled && attention_decision.attention_ops > 0;

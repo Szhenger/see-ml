@@ -104,7 +104,18 @@ inline constexpr uint32_t kSeeuMagic = 0x55454553;  // "SEEU" little-endian
 // copies, so every gate and best-state evaluation scores the function that
 // ships. The q8 GEMMs also take a per-output-column scale vector (a rodata
 // ref in in[3] where the per-tensor scale bits were). Rejected below v17.
-inline constexpr uint32_t kSeeuVersion = 17;
+// v18: relaxed arithmetic (F2 #130 / F4 #132) — kFlagRelaxed on the six
+// frozen-weight GEMMs (f32, int8, bf16 weights; NN and NT), in the train
+// and step programs only: the backend may run the product on a certified
+// relaxed kernel (Metal tensor ops over bf16-rounded activations and the
+// exact stored weight; Accelerate on the CPU) or on the exact kernel.
+// Additive, one flag bit, rejected below v18 and in the eval program; the
+// old path never emits it, and a package carries it only beside a numerics
+// certificate. No header change: no spare word remains (see below).
+inline constexpr uint32_t kSeeuVersion = 18;
+
+// The version that admitted kFlagRelaxed.
+inline constexpr uint32_t kSeeuRelaxedVersion = 18;
 
 // The version that introduced source refs and per-column int8 scales.
 inline constexpr uint32_t kSeeuShippedEvalVersion = 17;

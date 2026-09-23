@@ -1196,6 +1196,87 @@ TEST(UpdateSystem, KernelBatchChangesNoTrainingBits) {
   seeml::update::SetParallelThreadCount(0);
 }
 
+TEST(UpdateSystem, RelaxedArithmeticChangesNoCpuBits) {
+  // Plan v18: --precision certified-bf16 marks the frozen-weight GEMMs
+  // kFlagRelaxed — a permission the CPU backend never takes. So at every
+  // storage precision (f32, int8, bf16 base) the relaxed plan trains the
+  // same losses, the same validation loss and the same persistent segment
+  // as the exact plan, byte for byte: the format change is inert on the
+  // reference backend, and what a certified kernel may change is bounded
+  // elsewhere (tool/certify_numerics.py).
+  const int64_t vocab = 16, dim = 8, heads = 2, seq = 4, ffn = 16, batch = 16;
+  SmfModel model =
+      seeml::testing::MakeTinyTokenDecoder(vocab, dim, heads, seq, ffn, 41);
+  for (int storage = 0; storage < 3; ++storage) {
+    std::vector<float> want_curve;
+    std::vector<uint8_t> want_state;
+    float want_val = 0.0f;
+    uint64_t want_relaxed = 0;
+    for (int relaxed = 0; relaxed < 2; ++relaxed) {
+      UpdateConfig config = BaseConfig(batch);
+      config.optimizer.lr = 5e-3f;
+      config.optimizer.kind = OptimizerKind::kAdamW;
+      config.quantize_base = storage == 1;
+      config.bf16_base = storage == 2;
+      config.precision = relaxed ? Precision::kCertifiedBf16
+                                 : Precision::kF32;
+      ASSERT_OK_AND_ASSIGN(CompiledUpdate compiled,
+                           UpdateCompiler(config).Compile(model));
+      const PlanHeader h = HeaderOf(compiled);
+      UpdateEngine engine;
+      ASSERT_OK(engine.LoadFromMemory(compiled.plan.data(),
+                                      compiled.plan.size()));
+      ASSERT_OK_AND_ASSIGN(Dataset data,
+                           seeml::testing::MakeTokenCorpus(128, 4, vocab, 43));
+      data.EnableShuffle(9);
+      TrainOptions options = Quiet();
+      options.record_loss_curve = true;
+      ASSERT_OK_AND_ASSIGN(auto report, engine.Train(data, 25, options));
+      ASSERT_OK_AND_ASSIGN(float val, engine.Evaluate(data));
+      std::vector<uint8_t> state(engine.arena(),
+                                 engine.arena() + h.persistent_size);
+      if (!relaxed) {
+        EXPECT_EQ(compiled.relaxed_gemms, 0u);
+        want_curve = report.loss_curve;
+        want_state = state;
+        want_val = val;
+        continue;
+      }
+      EXPECT_GT(compiled.relaxed_gemms, 0u);
+      ASSERT_EQ(report.loss_curve.size(), want_curve.size());
+      if (seeml::update_rt::CpuBackendRelaxedIsExact() || storage != 0) {
+        // The reference build, and the int8 / bf16 bases everywhere: the
+        // bit is inert.
+        EXPECT_EQ(val, want_val);
+        for (size_t i = 0; i < want_curve.size(); ++i)
+          EXPECT_EQ(report.loss_curve[i], want_curve[i]);
+        EXPECT_TRUE(state == want_state);
+      } else {
+        // SEEML_ACCELERATE: the f32-weight GEMMs ran on SGEMM — close to
+        // the exact run, and reproducible against itself.
+        EXPECT_NEAR(val, want_val, 1e-3f * std::fabs(want_val) + 1e-4f);
+        for (size_t i = 0; i < want_curve.size(); ++i)
+          EXPECT_NEAR(report.loss_curve[i], want_curve[i],
+                      1e-2f * std::fabs(want_curve[i]) + 1e-4f);
+        UpdateEngine again;
+        ASSERT_OK(again.LoadFromMemory(compiled.plan.data(),
+                                       compiled.plan.size()));
+        ASSERT_OK_AND_ASSIGN(Dataset data2, seeml::testing::MakeTokenCorpus(
+                                                128, 4, vocab, 43));
+        data2.EnableShuffle(9);
+        ASSERT_OK_AND_ASSIGN(auto report2, again.Train(data2, 25, options));
+        std::vector<uint8_t> state2(again.arena(),
+                                    again.arena() + h.persistent_size);
+        EXPECT_TRUE(state == state2);
+        for (size_t i = 0; i < report.loss_curve.size(); ++i)
+          EXPECT_EQ(report.loss_curve[i], report2.loss_curve[i]);
+      }
+      want_relaxed = compiled.relaxed_gemms;
+    }
+    EXPECT_GT(want_relaxed, 0u);
+  }
+}
+
 TEST(UpdateSystem, ANonFiniteGradientNormAbortsTheStep) {
   // The fused clip is the one kernel that can refuse (E3): an overflowed
   // gradient used to be scaled by 0 * inf = NaN into the adapters and the

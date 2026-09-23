@@ -81,6 +81,7 @@ SEEU_MAGIC = formats.SEEU_MAGIC
 SEEU_OLDEST, SEEU_NEWEST = formats.SEEU_OLDEST_READABLE, formats.SEEU_VERSION
 RODATA_BIT = formats.RODATA_BIT
 SOURCE_BIT = formats.SOURCE_BIT
+FLAG_RELAXED = formats.FLAG_RELAXED
 
 
 def is_source_ref(ref):
@@ -113,6 +114,20 @@ class Instruction:
 
 def bits_f32(word):
     return struct.unpack("<f", struct.pack("<I", word & 0xFFFFFFFF))[0]
+
+
+def round_bf16(np, t):
+    """`t` rounded to the nearest bfloat16 (ties to even) and widened back
+    — the one rounding a relaxed GEMM (plan v18, kFlagRelaxed) applies to
+    its f32 activation input before the tensor-op multiply. Values already
+    representable pass through exactly, as do NaN and the infinities."""
+    t = np.asarray(t)
+    a = np.ascontiguousarray(t.astype(np.float32))
+    u = a.view(np.uint32)
+    rounded = (u + np.uint32(0x7FFF) + ((u >> 16) & np.uint32(1))) & np.uint32(
+        0xFFFF0000)
+    r = np.where(np.isnan(a), u, rounded).astype(np.uint32).view(np.float32)
+    return r.astype(t.dtype) if t.dtype != np.float32 else r
 
 
 def f32_bits(value):
@@ -163,6 +178,10 @@ class Plan:
         if self.persistent_size > self.arena_size:
             raise PlanError(f"{path}: persistent segment exceeds the arena")
         self.grad_accum = max(1, self.grad_accum_steps)
+        # v18: the frozen-weight GEMMs a certified relaxed kernel may run.
+        self.relaxed_gemms = sum(
+            1 for name in ("train", "step") for i in self.sections[name]
+            if i.flags & FLAG_RELAXED)
 
     def _bounds(self, what, off, size):
         if off > len(self.blob) or size > len(self.blob) - off:
@@ -389,6 +408,13 @@ class SyntheticCorpus:
 
 class NumpyBackend:
     arena_views = True  # tensors are zero-copy views of the arena bytes
+    # Model the relaxed GEMM family (v18): round each kFlagRelaxed GEMM's
+    # activation input to bf16 first. Off, every backend computes the
+    # exact reference; `--relaxed` and the certifier's relaxed arm turn it on.
+    relaxed_gemms = False
+
+    def relax_input(self, a):
+        return round_bf16(self.np, a)
 
     def __init__(self, compute="float64"):
         import numpy as np
@@ -505,6 +531,11 @@ class TorchBackend:
         if self.dev.type == "mps":
             self.torch.mps.synchronize()
 
+    relaxed_gemms = False
+
+    def relax_input(self, a):
+        return a.to(self.torch.bfloat16).to(a.dtype)
+
     def matmul(self, a, b):
         return self.torch.matmul(a, b)
 
@@ -598,6 +629,11 @@ class MlxBackend:
 
     def sync(self, tensors=()):
         self.mx.eval(*tensors) if tensors else self.mx.synchronize()
+
+    relaxed_gemms = False
+
+    def relax_input(self, a):
+        return a.astype(self.mx.bfloat16).astype(a.dtype)
 
     def matmul(self, a, b):
         return self.mx.matmul(a, b)
@@ -903,19 +939,32 @@ def _rope(x, t, b, s, h, d, base, sign):
                         even * sin + odd * cos).reshape((b * s, h * d))
 
 
-def _gemm_operands(m, ins, kind, transposed_b):
+def _gemm_operands(m, x, ins, kind, transposed_b):
     rows, cols, inner = ins.out
     a = m.read(ins.src[0], (rows, inner))
     shape = (cols, inner) if transposed_b else (inner, cols)
+    # v18: under the relaxed model the activation is rounded to bf16 once,
+    # exactly where the Metal tensor-op kernel rounds it; the stored weight
+    # (f32, int8 levels, bf16) enters exact.
+    relaxed = bool(ins.flags & FLAG_RELAXED) and getattr(x, "relaxed_gemms",
+                                                          False)
     if kind == "<f4":
         b = m.read(ins.src[1], shape)
     elif kind == "<i1" and ins.flags & formats.FLAG_Q8_COL_SCALE:
+        if relaxed and transposed_b:
+            # The relaxed dX kernel folds the reduction index's scale into
+            # the activation before rounding: bf16(A[m, k] * s[k]) . q[n, k].
+            s = m.frozen(ins.src[3], (inner,), "<f4")
+            q = m.frozen(ins.src[1], shape, kind, 1.0)
+            return x.relax_input(a * s), q.T
         # v17: one scale per output column of W — the last axis of B in
         # both the NN ([K, M]) and the NT ([N = K, M]) reading.
         b = m.frozen(ins.src[1], shape, kind, 1.0, colscale=ins.src[3])
     else:
         scale = bits_f32(ins.src[3]) if kind == "<i1" else 1.0
         b = m.frozen(ins.src[1], shape, kind, scale)
+    if relaxed:
+        a = x.relax_input(a)
     return a, (b.T if transposed_b else b)
 
 
@@ -929,7 +978,7 @@ def _addend(m, ins, c):
 
 def _gemm_nn(kind):
     def op(m, x, ins, step):
-        a, b = _gemm_operands(m, ins, kind, False)
+        a, b = _gemm_operands(m, x, ins, kind, False)
         c = _addend(m, ins, x.matmul(a, b))
         if ins.flags & 1:  # the fused epilogue: C = act(A@B + bias)
             c = c + m.read(ins.src[3], (ins.out[1],))
@@ -939,7 +988,7 @@ def _gemm_nn(kind):
 
 def _gemm_nt(kind):
     def op(m, x, ins, step):
-        a, b = _gemm_operands(m, ins, kind, True)
+        a, b = _gemm_operands(m, x, ins, kind, True)
         m.write(ins.src[2], _addend(m, ins, x.matmul(a, b)))
     return op
 
@@ -1623,6 +1672,8 @@ def cmd_diff(args):
         backend = make_backend(args.backend)
     except ImportError as e:
         raise PlanError(f"backend '{args.backend}' is unavailable: {e}")
+    if getattr(args, "relaxed", False):
+        backend.relaxed_gemms = True
     corpus = (Corpus(np, args.corpus) if args.corpus
               else SyntheticCorpus(np, plan, args.seed))
     corpus.check(plan)
@@ -1707,6 +1758,8 @@ def cmd_run(args):
         backend = make_backend(args.backend)
     except ImportError as e:
         raise PlanError(f"backend '{args.backend}' is unavailable: {e}")
+    if getattr(args, "relaxed", False):
+        backend.relaxed_gemms = True
     corpus = Corpus(np, args.corpus)
     corpus.check(plan)
     val = None
@@ -1879,7 +1932,9 @@ def cmd_info(args):
              else "")
           + (f", {plan.seq_len}-token records" if plan.input_kind else ""))
     print("sections: " + ", ".join(
-        f"{name} {len(plan.sections[name])}" for name in SECTIONS))
+        f"{name} {len(plan.sections[name])}" for name in SECTIONS)
+          + (f"; {plan.relaxed_gemms} relaxed GEMM(s) (v18: a certified "
+             "kernel may run them)" if plan.relaxed_gemms else ""))
     print(f"GEMM FLOPs per optimizer step: "
           f"{plan.gemm_flops() * plan.grad_accum:,}")
     for name, where in sorted(plan.histogram().items()):
@@ -1924,6 +1979,11 @@ def build_parser():
                         help="the model the plan was compiled from — a v17 "
                              "plan's eval program reads its f32 weights")
 
+        sp.add_argument("--relaxed", action="store_true",
+                        help="model the relaxed GEMM family (v18): round each "
+                             "kFlagRelaxed GEMM's activation input to bf16, "
+                             "as the certified Metal kernels do; default: the "
+                             "exact reference")
     diff = sub.add_parser("diff", help="compare every write against the "
                                        "C++ runtime")
     common(diff)

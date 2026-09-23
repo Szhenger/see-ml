@@ -73,6 +73,15 @@ CERT_FILE = "numerics_certificate.json"
 PLAN_FILE = "update_plan.seeu"
 FAMILY = "relaxed-reductions-f32"
 UNIT_ROUNDOFF = 2.0 ** -24  # float32, round to nearest
+# The relaxed GEMM family (plan v18, kFlagRelaxed): the activation input of
+# a frozen-weight GEMM rounded to bfloat16 once (8 significant bits) before
+# an f32-accumulating multiply against the exact stored weight — what the
+# Metal tensor-op kernels compute. One site name for every such
+# instruction, whatever its opcode; its own tolerance, since one bf16
+# rounding is 2^-9 relative per element where the reductions above are
+# 2^-24 per term.
+RELAXED_GEMM_SITE = "gemm.relaxed"
+BF16_UNIT_ROUNDOFF = 2.0 ** -9  # bfloat16, round to nearest
 
 # The opcodes whose C++ kernels reduce in float64 today — the only places a
 # relaxed family would change arithmetic (runtime/executor: attention.cc,
@@ -95,8 +104,15 @@ assert all(fx.OPCODES[k] == v for k, v in SITES.items())
 
 
 def is_site(ins):
+    if ins.flags & fx.FLAG_RELAXED:
+        return True
     return ins.opcode in SITES and (ins.opcode not in FUSED_CLIP_SITES or
                                     ins.out[1] != 0)
+
+
+def site_name(ins):
+    return RELAXED_GEMM_SITE if ins.flags & fx.FLAG_RELAXED else \
+        SITES[ins.opcode]
 
 
 def gamma(n):
@@ -116,6 +132,13 @@ class LaneBackend(fx.NumpyBackend):
             raise fx.PlanError("--lanes must be a power of two")
         self.lanes, self.name = lanes, f"relaxed-f32x{lanes}"
         self.bound_rel = 0.0
+        self._input_roundoff = 0.0  # set by relax_input for the next matmul
+
+    relaxed_gemms = True  # the relaxed arm models the v18 GEMM family
+
+    def relax_input(self, a):
+        self._input_roundoff = BF16_UNIT_ROUNDOFF
+        return fx.round_bf16(self.np, a)
 
     def _note(self, bound, result):
         scale = float(self.np.abs(result).max()) if result.size else 0.0
@@ -154,16 +177,32 @@ class LaneBackend(fx.NumpyBackend):
 
     def matmul(self, a, b):
         """a @ b as float32 dot products, each lane-accumulated: the
-        products are rounded once (hence gamma_{K+1}), then summed."""
+        products are rounded once (hence gamma_{K+1}), then summed. The
+        lanes are walked one k at a time — the same f32 additions in the
+        same order as `_lane_sum` over the materialized products, without
+        the [M, N, K] tensor that order would need (58 GB at a 49,152-wide
+        LM head)."""
         np = self.np
         a32 = np.asarray(a).astype(np.float32)
-        b32 = np.swapaxes(np.asarray(b), -1, -2).astype(np.float32)
-        products = a32[..., :, None, :] * b32[..., None, :, :]
-        out = self._lane_sum(products, -1)
+        b32 = np.asarray(b).astype(np.float32)
         k = a32.shape[-1]
-        self._note(gamma(k + 1) * (np.abs(a32.astype(np.float64)) @
-                                   np.abs(np.swapaxes(b32, -1, -2).astype(
-                                       np.float64))), out)
+        acc = np.zeros(a32.shape[:-1] + (b32.shape[-1], self.lanes),
+                       np.float32)
+        for i in range(k):
+            acc[..., i % self.lanes] += a32[..., :, i, None] * b32[..., i, None, :]
+        out = acc
+        while out.shape[-1] > 1:
+            out = out[..., 0::2] + out[..., 1::2]
+        out = out[..., 0]
+        b32 = np.swapaxes(b32, -1, -2)
+        # A bf16-rounded input (v18) adds its unit roundoff to every term,
+        # on top of the summation's gamma; the term is over the rounded
+        # operand, which is within (1 + u) of the exact one.
+        u_in, self._input_roundoff = self._input_roundoff, 0.0
+        factor = gamma(k + 1) + u_in * (1.0 + gamma(k + 1))
+        self._note(factor * (np.abs(a32.astype(np.float64)) @
+                             np.abs(np.swapaxes(b32, -1, -2).astype(
+                                 np.float64))), out)
         return out.astype(np.float64)
 
 
@@ -177,8 +216,8 @@ class DryMemory:
     def read(self, ref, shape, kind="<f4"):
         return self.mem.read(ref, shape, kind)
 
-    def frozen(self, *args):
-        return self.mem.frozen(*args)
+    def frozen(self, *args, **kwargs):
+        return self.mem.frozen(*args, **kwargs)
 
     def write(self, ref, tensor):
         np = self.mem.np
@@ -189,8 +228,8 @@ class DryMemory:
 class RelaxedExecutor(fx.Executor):
     """The relaxed arm: site opcodes through the lane backend."""
 
-    def __init__(self, plan, lanes):
-        super().__init__(plan, fx.NumpyBackend("float64"))
+    def __init__(self, plan, lanes, source=None):
+        super().__init__(plan, fx.NumpyBackend("float64"), source)
         self.lane = LaneBackend(lanes)
 
     def execute(self, section, scalars=None, on_instruction=None):
@@ -206,8 +245,8 @@ class LockstepExecutor(fx.Executor):
     """The reference arm, measuring each site instruction's relaxed result
     against its exact one on the same inputs."""
 
-    def __init__(self, plan, lanes):
-        super().__init__(plan, fx.NumpyBackend("float64"))
+    def __init__(self, plan, lanes, source=None):
+        super().__init__(plan, fx.NumpyBackend("float64"), source)
         self.lane, self.sites = LaneBackend(lanes), {}
 
     def execute(self, section, scalars=None, on_instruction=None):
@@ -225,7 +264,7 @@ class LockstepExecutor(fx.Executor):
             self.mem.recorder = lambda off, values: exact.append((off, values))
             op(self.mem, self.x, ins, scalars)
             self.mem.recorder = None
-            stat = self.sites.setdefault(SITES[ins.opcode], {
+            stat = self.sites.setdefault(site_name(ins), {
                 "instances": 0, "observed_rel": 0.0, "bound_rel": 0.0})
             stat["instances"] += 1
             stat["bound_rel"] = max(stat["bound_rel"], self.lane.bound_rel)
@@ -279,8 +318,8 @@ def cmd_certify(args):
 
     # Lockstep evidence rides the reference arm of the free run: the
     # operands every site sees are the ones real training produces.
-    arms = {"reference": LockstepExecutor(plan, args.lanes),
-            "relaxed": RelaxedExecutor(plan, args.lanes)}
+    arms = {"reference": LockstepExecutor(plan, args.lanes, args.source),
+            "relaxed": RelaxedExecutor(plan, args.lanes, args.source)}
     runs = {}
     for name, ex in arms.items():
         corpus, val = feed()
@@ -319,10 +358,12 @@ def cmd_certify(args):
     if not sites:
         reasons.append("the plan has no reduction site to relax")
     for name, stat in sorted(sites.items()):
-        if not stat["observed_rel"] <= args.max_site_error:
+        tolerance = (args.max_relaxed_gemm_error
+                     if name == RELAXED_GEMM_SITE else args.max_site_error)
+        if not stat["observed_rel"] <= tolerance:
             reasons.append(f"{name}: observed relative error "
                            f"{stat['observed_rel']:.3e} exceeds "
-                           f"{args.max_site_error:.1e}")
+                           f"{tolerance:.1e}")
     for key in ("loss_max_rel_dev", "val_rel_dev"):
         if key in free_run and not free_run[key] <= args.max_loss_deviation:
             reasons.append(f"{key} {free_run[key]:.3e} exceeds "
@@ -337,17 +378,20 @@ def cmd_certify(args):
         "plan": {"file": os.path.basename(plan_path),
                  "sha256": sha256_file(plan_path),
                  "plan_hash": f"{plan.plan_hash:016x}",
-                 "version": plan.version},
+                 "version": plan.version,
+                 "relaxed_gemms": plan.relaxed_gemms},
         "corpus": {"file": os.path.basename(args.corpus),
                    "sha256": sha256_file(args.corpus)},
         "contract": {"family": FAMILY, "model_lanes": args.lanes,
                      "unit_roundoff": UNIT_ROUNDOFF,
+                     "bf16_unit_roundoff": BF16_UNIT_ROUNDOFF,
                      "sites": sorted(sites)},
         "evidence": {"steps": args.steps, "seed": args.seed,
                      "val_fraction": args.val_fraction,
                      "sites": {k: sites[k] for k in sorted(sites)},
                      "free_run": free_run},
         "tolerances": {"site_rel": args.max_site_error,
+                       "relaxed_gemm_rel": args.max_relaxed_gemm_error,
                        "loss_rel": args.max_loss_deviation},
         "verdict": "refused" if reasons else "granted",
         "reasons": reasons,
@@ -401,6 +445,14 @@ def check_certificate(cert, plan_path, corpus_path=None):
         if cert["contract"]["family"] != FAMILY:
             problems.append(f"unknown contract family "
                             f"{cert['contract']['family']!r}")
+        # v18: a plan whose train / step programs carry relaxed GEMMs is
+        # vouched for only by a certificate that priced that site.
+        with open(plan_path, "rb") as f:
+            relaxed = fx.formats.relaxed_gemm_count(f)
+        if relaxed and RELAXED_GEMM_SITE not in cert["contract"]["sites"]:
+            problems.append(f"the plan carries {relaxed} relaxed GEMM(s) "
+                            f"({RELAXED_GEMM_SITE}) the certificate does "
+                            "not cover")
     except (KeyError, TypeError) as e:
         problems.append(f"malformed certificate ({e!r})")
     return problems
@@ -464,6 +516,13 @@ def build_parser():
     c.add_argument("--seed", type=int, default=0)
     c.add_argument("--val-fraction", type=float, default=0.1)
     c.add_argument("--max-site-error", type=float, default=1e-5)
+    c.add_argument("--max-relaxed-gemm-error", type=float,
+                   default=2.0 ** -7,
+                   help="tolerance for the v18 relaxed GEMM site (bf16 "
+                        "input rounding): default 2^-7")
+    c.add_argument("--source", metavar="SMF", default=None,
+                   help="the source model (v17 plans whose eval program "
+                        "reads it)")
     c.add_argument("--max-loss-deviation", type=float, default=1e-4)
     c.add_argument("--out", default=None)
     c.set_defaults(fn=cmd_certify)

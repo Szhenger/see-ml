@@ -254,6 +254,65 @@ class CertifyPlansTest(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertIn("does not vouch for this plan", log)
 
+    def test_a_relaxed_plan_is_packaged_only_beside_its_certificate(self):
+        # --precision certified-bf16 (v18): the packer refuses the plan bare,
+        # the certifier prices the gemm.relaxed site (bf16 input rounding,
+        # observed inside 2^-7 and its own bound), and the packer then
+        # accepts it — but not an older certificate that never saw the site.
+        corpus = os.path.join(self.dir, "class.sds")
+        pkg = self.compile("mlp_relaxed", "mlp.smf", 8,
+                           "--precision", "certified-bf16")
+        plan = fx.Plan.load(os.path.join(pkg, cn.PLAN_FILE))
+        self.assertGreater(plan.relaxed_gemms, 0)
+        status, log = run(pack_update, [pkg])
+        self.assertEqual(status, 1)
+        self.assertIn("relaxed GEMM", log)
+        self.assertIn("no numerics certificate", log)
+        # bf16 input rounding moves a short run's loss by ~1e-3 relative;
+        # the 1e-4 default is the reduction family's, so a relaxed plan
+        # states its loss tolerance explicitly (F2's acceptance is 1e-3 on
+        # the 300-step validation loss, measured by the frontier harness).
+        status, log = run(cn, ["certify", pkg, "--corpus", corpus,
+                               "--steps", "4"])
+        self.assertEqual(status, 3)
+        self.assertIn("loss_max_rel_dev", log)
+        status, log = run(cn, ["certify", pkg, "--corpus", corpus,
+                               "--steps", "4", "--max-loss-deviation", "1e-2"])
+        self.assertEqual(status, 0, log)
+        with open(os.path.join(pkg, cn.CERT_FILE)) as f:
+            cert = json.load(f)
+        self.assertEqual(cert["verdict"], "granted")
+        self.assertIn(cn.RELAXED_GEMM_SITE, cert["contract"]["sites"])
+        self.assertEqual(cert["plan"]["relaxed_gemms"], plan.relaxed_gemms)
+        site = cert["evidence"]["sites"][cn.RELAXED_GEMM_SITE]
+        self.assertEqual(site["instances"], plan.relaxed_gemms * 4)
+        self.assertGreater(site["observed_rel"], 1e-5)   # a real rounding
+        self.assertLessEqual(site["observed_rel"], site["bound_rel"])
+        self.assertLess(site["observed_rel"], 2.0 ** -7)
+        self.assertEqual(cert["tolerances"]["relaxed_gemm_rel"], 2.0 ** -7)
+        report = os.path.join(self.dir, "pack_relaxed.json")
+        self.assertEqual(run(pack_update, [pkg, "--report", report])[0], 0)
+        with open(report) as f:
+            self.assertEqual(json.load(f)["relaxed_gemms"],
+                             plan.relaxed_gemms)
+        # A certificate over the exact plan does not cover the relaxed one.
+        exact = self.compile("mlp_exact", "mlp.smf", 8)
+        self.assertEqual(run(cn, ["certify", exact, "--corpus", corpus,
+                                  "--steps", "4"])[0], 0)
+        with open(os.path.join(exact, cn.CERT_FILE)) as f:
+            other = json.load(f)
+        other["plan"]["sha256"] = cert["plan"]["sha256"]
+        other["digest"] = cn.self_digest(other)
+        problems = cn.check_certificate(other, os.path.join(pkg, cn.PLAN_FILE))
+        self.assertTrue(any("does not cover" in p for p in problems), problems)
+        # And the exact plan's train program is the relaxed one's, minus
+        # the bit: the format change is inert on the reference backend.
+        a = fx.Plan.load(os.path.join(exact, cn.PLAN_FILE))
+        for x, y in zip(a.sections["train"], plan.sections["train"]):
+            self.assertEqual(x.opcode, y.opcode)
+            self.assertEqual(x.flags, y.flags & ~fx.FLAG_RELAXED)
+            self.assertEqual(x.src, y.src)
+
     def test_a_tolerance_the_plan_cannot_meet_is_a_refusal(self):
         pkg = self.compile("mlp", "mlp.smf", 8, "--clip-norm", "0.5")
         status, log = run(cn, ["certify", pkg, "--corpus",

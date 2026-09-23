@@ -46,6 +46,14 @@ std::vector<UpdateInstruction> TrainProgramOf(const CompiledUpdate& compiled) {
   return instrs;
 }
 
+std::vector<UpdateInstruction> EvalProgramOf(const CompiledUpdate& compiled) {
+  const PlanHeader h = HeaderOf(compiled);
+  std::vector<UpdateInstruction> instrs(h.eval_instr_count);
+  std::memcpy(instrs.data(), compiled.plan.data() + h.eval_instr_offset,
+              h.eval_instr_count * sizeof(UpdateInstruction));
+  return instrs;
+}
+
 size_t CountOpcode(const std::vector<UpdateInstruction>& instrs, OpCode oc) {
   size_t n = 0;
   for (const UpdateInstruction& ins : instrs)
@@ -332,6 +340,46 @@ TEST(UpdateCompiler, GradientAccumulationSplitsAnSgdStream) {
     EXPECT_EQ(CountOpcode(grad, OpCode::kAccumulate), trainables);
     EXPECT_EQ(CountOpcode(grad, OpCode::kSgdStep), 0u);
     EXPECT_EQ(CountOpcode(grad, OpCode::kClipNorm), 0u);
+  }
+}
+
+TEST(UpdateCompiler, CertifiedBf16MarksOnlyTheFrozenGemmsOfTraining) {
+  // --precision certified-bf16 (plan v18): kFlagRelaxed on every train /
+  // step GEMM whose B is rodata (NN forward, NT dX), on nothing else, and
+  // on no eval instruction; the f32 default emits no bit at all, so the
+  // two plans differ only in those flags.
+  SmfModel model = MakeMlp(kInDim, kHidden, kOutDim, 53);
+  for (int storage = 0; storage < 3; ++storage) {
+    UpdateConfig exact = BaseConfig(kBatch);
+    exact.quantize_base = storage == 1;
+    exact.bf16_base = storage == 2;
+    UpdateConfig relaxed = exact;
+    relaxed.precision = Precision::kCertifiedBf16;
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate a, UpdateCompiler(exact).Compile(model));
+    ASSERT_OK_AND_ASSIGN(CompiledUpdate b, UpdateCompiler(relaxed).Compile(model));
+    EXPECT_EQ(a.relaxed_gemms, 0u);
+    const auto ta = TrainProgramOf(a), tb = TrainProgramOf(b);
+    ASSERT_EQ(ta.size(), tb.size());
+    uint64_t flagged = 0;
+    for (size_t i = 0; i < ta.size(); ++i) {
+      const auto op = static_cast<OpCode>(tb[i].opcode);
+      const bool frozen =
+          (op == OpCode::kGemmNN || op == OpCode::kGemmNT ||
+           op == OpCode::kGemmNNQ8 || op == OpCode::kGemmNTQ8 ||
+           op == OpCode::kGemmNNBF16 || op == OpCode::kGemmNTBF16) &&
+          IsRodataRef(tb[i].in[1]);
+      EXPECT_EQ((tb[i].flags & kFlagRelaxed) != 0, frozen);
+      EXPECT_EQ(tb[i].flags & ~kFlagRelaxed, ta[i].flags);
+      EXPECT_EQ(ta[i].flags & kFlagRelaxed, 0u);
+      flagged += frozen;
+    }
+    // Every adapted weight: one forward, and one dX for all but the first.
+    EXPECT_EQ(flagged, 2 * b.adapters.size() - 1);
+    EXPECT_EQ(b.relaxed_gemms, flagged);
+    for (const auto& ins : EvalProgramOf(b))
+      EXPECT_EQ(ins.flags & kFlagRelaxed, 0u);
+    EXPECT_EQ(HeaderOf(b).version, kSeeuVersion);
+    EXPECT_GE(kSeeuVersion, kSeeuRelaxedVersion);
   }
 }
 

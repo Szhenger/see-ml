@@ -97,7 +97,7 @@ SDS_HEADER_BYTES = SDS_HEADER.size
 # --- SEEU: the update plan (source/plan/schema.h, instruction.h) -------------
 
 SEEU_MAGIC = 0x55454553  # "SEEU"
-SEEU_VERSION = 17
+SEEU_VERSION = 18
 SEEU_OLDEST_READABLE = 4
 RODATA_BIT = 1 << 63
 SOURCE_BIT = 1 << 62  # v17: the source model file (E12), eval program only
@@ -166,6 +166,56 @@ FLAG_EPILOGUE_ACT_MASK = 6
 FLAG_GEMM_ADDEND = 8
 # The int8 GEMMs (v17): in[3] is a rodata ref to per-output-column scales.
 FLAG_Q8_COL_SCALE = 16
+# The frozen-weight GEMMs (v18): the backend may run a certified relaxed
+# kernel (bf16-rounded activations against the exact stored weight).
+FLAG_RELAXED = 32
+
+
+
+def relaxed_gemm_count(source: Any) -> int:
+    """Instructions of the train and step programs carrying FLAG_RELAXED
+    (v18) — a plan with any needs a numerics certificate to be packaged.
+    `source` is the plan's bytes or an open binary file; standard library
+    only, for tool/pack_update.py on the build host's tier-0 interpreter.
+    Anything that is not a well-formed plan counts zero: the runtime's
+    validator, not this reader, is the judge of a malformed file."""
+    if hasattr(source, "read"):
+        source.seek(0, 2)
+        total = source.tell()
+        source.seek(0)
+        head = source.read(PLAN_HEADER.size)
+
+        def section(off: int, n: int) -> bytes:
+            source.seek(off)
+            return bytes(source.read(n * INSTRUCTION.size))
+    else:
+        total = len(source)
+        head = bytes(source[:PLAN_HEADER.size])
+
+        def section(off: int, n: int) -> bytes:
+            return bytes(source[off:off + n * INSTRUCTION.size])
+    if len(head) < PLAN_HEADER.size:
+        return 0
+    header = dict(zip(PLAN_HEADER.names, PLAN_HEADER.unpack_from(head, 0)))
+    if (header["magic"] != SEEU_MAGIC or header["version"] < 18
+            or header["version"] > SEEU_VERSION):
+        return 0
+    flags_at = INSTRUCTION.offsets["flags"]
+    count = 0
+    for name in ("train", "step"):
+        off, n = header[f"{name}_instr_offset"], header[f"{name}_instr_count"]
+        if n == 0:
+            continue
+        if off > total or n > total // INSTRUCTION.size or \
+                off + n * INSTRUCTION.size > total:
+            return 0
+        body = section(off, n)
+        for i in range(n):
+            at = i * INSTRUCTION.size + flags_at
+            if int.from_bytes(body[at:at + 2], "little") & FLAG_RELAXED:
+                count += 1
+    return count
+
 
 # kFusedMap micro-program: one byte per stage, packed into an operand word.
 FUSED_STAGES = {"end": 0, "add": 1, "mul": 2, "scale": 3, "relu": 4,
@@ -245,7 +295,8 @@ def check_against(abi: Dict[str, Any]) -> List[str]:
                         "epilogue_act_shift": FLAG_EPILOGUE_ACT_SHIFT,
                         "epilogue_act_mask": FLAG_EPILOGUE_ACT_MASK,
                         "gemm_addend": FLAG_GEMM_ADDEND,
-                        "q8_col_scale": FLAG_Q8_COL_SCALE},
+                        "q8_col_scale": FLAG_Q8_COL_SCALE,
+                        "relaxed": FLAG_RELAXED},
          seeu["flags"])
     same("seeu.fused_stages", FUSED_STAGES, seeu["fused_stages"])
     same("seeu.fused_stage", {"kind_mask": FUSED_KIND_MASK,

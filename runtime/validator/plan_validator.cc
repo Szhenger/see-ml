@@ -81,13 +81,25 @@ std::expected<void, std::string> ValidateInstructionImpl(
     const bool colscale_ok =
         plan_version >= up::kSeeuShippedEvalVersion &&
         (opcode == up::OpCode::kGemmNNQ8 || opcode == up::OpCode::kGemmNTQ8);
+    // kFlagRelaxed (v18): the six frozen-weight GEMM opcodes. Which
+    // PROGRAM may carry it is the executor contract's rule (the eval
+    // program, which scores what ships in exact arithmetic, may not); a
+    // backend re-validating a single instruction at dispatch sees the bit
+    // as the opcode-level permission it is.
+    const bool relaxed_ok =
+        plan_version >= up::kSeeuRelaxedVersion &&
+        (opcode == up::OpCode::kGemmNN || opcode == up::OpCode::kGemmNT ||
+         opcode == up::OpCode::kGemmNNQ8 || opcode == up::OpCode::kGemmNTQ8 ||
+         opcode == up::OpCode::kGemmNNBF16 ||
+         opcode == up::OpCode::kGemmNTBF16);
     const uint16_t allowed = static_cast<uint16_t>(
         ((opcode == up::OpCode::kGemmNN || opcode == up::OpCode::kGemmNNBF16)
              ? up::kEpilogueFlagsMask
          : opcode == up::OpCode::kGemmNNQ8 ? up::kFlagEpilogueActMask
                                            : uint16_t{0}) |
         (addend_ok ? up::kFlagGemmAddend : uint16_t{0}) |
-        (colscale_ok ? up::kFlagQ8ColScale : uint16_t{0}));
+        (colscale_ok ? up::kFlagQ8ColScale : uint16_t{0}) |
+        (relaxed_ok ? up::kFlagRelaxed : uint16_t{0}));
     if (ins.flags & static_cast<uint16_t>(~allowed))
       return diag::validating::Error(
           "unknown or misplaced instruction flags " +

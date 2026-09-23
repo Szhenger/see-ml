@@ -271,8 +271,28 @@ inline constexpr uint16_t kFlagGemmAddend = 1u << 3;  // in[3] = addend ref [M,N
 // as [N = K, M]) it is the REDUCTION index's, applied as each int8 element
 // widens — C[m, n] = sum_k A[m, k] * (q[n, k] * s[k]).
 inline constexpr uint16_t kFlagQ8ColScale = 1u << 4;  // in[3] = scales ref
+// --- Relaxed arithmetic (plan v18, F2 #130 / F4 #132). ------------------------
+// The six frozen-weight GEMMs (kGemmNN / kGemmNT and their int8 and bf16
+// forms) may carry this bit: the backend MAY compute the product with a
+// certified relaxed kernel. On Metal that is the tensor-op family, which
+// rounds the f32 activations to bf16 once at the GEMM input and multiplies
+// them against the exact stored weight (bf16 or int8; an f32 weight runs in
+// the GPU's reduced-precision mode) into f32 accumulators; on the CPU it is
+// a vendor BLAS (Accelerate) for f32 weights. The exact portable kernel is
+// always a valid execution of a relaxed instruction — the bit is a
+// permission, not a demand. The old path never emits it: a compiler sets it
+// only under --precision certified-bf16, only in the train and step
+// programs (the eval program scores what ships in exact arithmetic), and
+// tool/pack_update.py refuses to package such a plan unless a numerics
+// certificate (tool/certify_numerics.py) vouches for it — the certificate
+// binds to the plan's hash, so it cannot live inside the plan it certifies,
+// and the on-device validator gates the bit on the version alone. Relaxed
+// kernels stay run-to-run bitwise on a device (fixed reduction order, no
+// atomics); their bits differ from the reference's, so a relaxed plan
+// compares to the exact one at the certificate's tolerance.
+inline constexpr uint16_t kFlagRelaxed = 1u << 5;
 inline constexpr uint16_t kKnownFlagsMask =
-    kEpilogueFlagsMask | kFlagGemmAddend | kFlagQ8ColScale;
+    kEpilogueFlagsMask | kFlagGemmAddend | kFlagQ8ColScale | kFlagRelaxed;
 
 enum class EpilogueAct : uint16_t { kNone = 0, kRelu = 1, kGelu = 2, kSilu = 3 };
 

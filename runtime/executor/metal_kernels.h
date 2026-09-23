@@ -26,11 +26,19 @@
 
 namespace seeml::update_rt {
 
-inline constexpr char kMetalKernelSource[] = R"msl(
+// The kernel library is three strings: the includes, a prelude every
+// library shares (the KArgs block, the operand macros, the activation
+// expressions — one statement of the ABI), and the kernels themselves. The
+// relaxed family below compiles as a second library under Metal 4 from the
+// same prelude.
+inline constexpr char kMetalKernelHead[] = R"msl(
 #include <metal_stdlib>
 #include <metal_simdgroup_matrix>
 using namespace metal;
 
+)msl";
+
+inline constexpr char kMetalKernelPrelude[] = R"msl(
 struct KArgs {
   ulong off[6];
   uint space;
@@ -76,6 +84,9 @@ static inline float apply_act(float v, uint act) {
   }
 }
 
+)msl";
+
+inline constexpr char kMetalKernelSource[] = R"msl(
 // --- GEMM family --------------------------------------------------------
 // Four kernels per variant, chosen by shape on the host. The TILED kernel
 // computes 64x64 output tiles with K in panels of 16 and 128 threads = 4
@@ -853,6 +864,109 @@ kernel void k_softmax_rows_bwd(KSIG, uint g [[thread_position_in_grid]],
   dot += simd_shuffle_xor(dot, 1u);
   for (uint c = lane; c < cols; c += 32u) dsr[c] = pr[c] * (dpr[c] - dot);
 }
+)msl";
+
+// =============================================================================
+// The relaxed GEMM family (plan v18, kFlagRelaxed; F2 #130). A second
+// library, compiled under Metal 4 when the device and OS admit it (macOS
+// 26, Apple GPUs): MetalPerformancePrimitives' matmul2d tensor op — on the
+// M5 the per-core neural accelerators — over bf16-rounded activations and
+// the EXACT stored weight (int8 levels, bf16, or f32) into f32
+// accumulators. The op fixes its own reduction order, so a dispatch is
+// bitwise run-to-run like every other kernel here; its bits differ from
+// the simdgroup kernels' and from the CPU's, which is what the numerics
+// certificate the plan must carry prices. Where the library cannot be
+// built the backend runs relaxed instructions on the exact kernels, which
+// every certificate admits.
+//
+// Two dispatches per GEMM. k_to_bf16 rounds A [M, K] (f32, leading
+// dimension lda, at off[0]) to bfloat16 — round to nearest, ties to even,
+// the rounding tool/frontier_exec.py models — packed into the backend's
+// scratch (buffer 6); flag 512 first multiplies column k by the k-th scale
+// in slot 3 (an NT int8 GEMM's reduction-index scales, folded before the
+// rounding). The GEMM kernel then multiplies the 64 x 32 tile its
+// threadgroup owns (four simdgroups) and applies the epilogue on the
+// cooperative destination tensor: f[0] (the per-tensor int8 scale, else
+// 1), flag 128 the per-column scale of an NN int8 GEMM (slot 3, N floats),
+// flag 8 the bias (slot 3), the activation in the low two bits, and flag
+// 1024 the addend (slot 3, M x N). The op bounds M, N and K from the
+// tensor extents, so ragged shapes need no edge path.
+// =============================================================================
+inline constexpr char kMetalRelaxedKernelHead[] = R"msl(
+#include <metal_stdlib>
+#include <metal_tensor>
+#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
+using namespace metal;
+using namespace mpp::tensor_ops;
+
+)msl";
+
+inline constexpr char kMetalRelaxedKernelSource[] = R"msl(
+static inline bfloat to_bf16_rne(float v) {
+  uint u = as_type<uint>(v);
+  if ((u & 0x7F800000u) != 0x7F800000u)  // finite: round to nearest even
+    u = u + 0x7FFFu + ((u >> 16) & 1u);
+  return as_type<bfloat>((ushort)(u >> 16));
+}
+
+kernel void k_to_bf16(KSIG, device bfloat* bf [[buffer(6)]],
+                      uint g [[thread_position_in_grid]]) {
+  if (g >= p.m * p.k) return;
+  const uint r = g / p.k, c = g - r * p.k;
+  float v = RF(0)[r * p.lda + c];
+  if (p.flags & 512u) v *= RF(3)[c];
+  bf[g] = to_bf16_rne(v);
+}
+
+template <typename TB, bool NT>
+static inline void gemm_relaxed(device uchar* ar, device const uchar* ro,
+                                device const uchar* src, constant KArgs& p,
+                                device bfloat* abf, uint2 tg) {
+  constexpr auto desc = matmul2d_descriptor(
+      64, 32, static_cast<int>(dynamic_extent), false, NT, false);
+  matmul2d<desc, execution_simdgroups<4>> op;
+  tensor<device bfloat, dextents<int, 2>, tensor_inline> ta(
+      abf, dextents<int, 2>((int)p.k, (int)p.m));
+  device TB* b = (device TB*)(RBASE(1) + p.off[1]);
+  // NN: B is [K, N] with leading dimension ldb (extents N, K); NT: [N, K]
+  // (extents K, N). The contiguous axis strides 1, the other ldb.
+  const array<int, 2> bstride = {1, (int)p.ldb};
+  tensor<device TB, dextents<int, 2>, tensor_inline> tb(
+      b, NT ? dextents<int, 2>((int)p.k, (int)p.n)
+            : dextents<int, 2>((int)p.n, (int)p.k), bstride);
+  const uint m0 = tg.y * 64u, n0 = tg.x * 32u;
+  auto ma = ta.slice(0, (int)m0);
+  auto mb = NT ? tb.slice(0, (int)n0) : tb.slice((int)n0, 0);
+  auto ct = op.template get_destination_cooperative_tensor<
+      decltype(ma), decltype(mb), float>();
+  op.run(ma, mb, ct);
+  device float* c = WF(2);
+  const uint act = p.flags & 3u;
+#pragma clang loop unroll(full)
+  for (uint16_t i = 0; i < ct.get_capacity(); ++i) {
+    if (!ct.is_valid_element(i)) continue;
+    auto idx = ct.get_multidimensional_index(i);
+    const uint gn = n0 + (uint)idx[0], gm = m0 + (uint)idx[1];
+    if (gm >= p.m || gn >= p.n) continue;
+    float v = ct[i] * p.f[0];
+    if (p.flags & 128u) v *= RF(3)[gn];
+    if (p.flags & 8u) v += RF(3)[gn];
+    v = apply_act(v, act);
+    if (p.flags & 1024u) v += RF(3)[gm * p.n + gn];
+    c[gm * p.ldc + gn] = v;
+  }
+}
+#define RX_KERNEL(NAME, TB, NT)                                              \
+  kernel void NAME(KSIG, device bfloat* abf [[buffer(6)]],                   \
+                   uint2 tg [[threadgroup_position_in_grid]]) {              \
+    gemm_relaxed<TB, NT>(ar, ro, src, p, abf, tg);                           \
+  }
+RX_KERNEL(k_gemm_rx_nn_q8, int8_t, false)
+RX_KERNEL(k_gemm_rx_nt_q8, int8_t, true)
+RX_KERNEL(k_gemm_rx_nn_bf16, bfloat, false)
+RX_KERNEL(k_gemm_rx_nt_bf16, bfloat, true)
+RX_KERNEL(k_gemm_rx_nn_f32, float, false)
+RX_KERNEL(k_gemm_rx_nt_f32, float, true)
 )msl";
 
 }  // namespace seeml::update_rt
