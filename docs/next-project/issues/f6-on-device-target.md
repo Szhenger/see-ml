@@ -21,9 +21,11 @@ and it is unmeasured.
 2. **Energy per token** (J/token) as a Tier A metric: powermetrics on
    macOS, MetricKit / Xcode energy gauges on iOS; recorded next to tok/s in
    `seeml-bench` and in F1's frontier rows where the frontier can run.
-3. **Adapter-only update packages** (roadmap pillar D2): ship the LoRA
+3. **Adapter-only update packages** (Frontier Bridge pillar D2, the
+   "plan size / delta size" row of `docs/benchmarks.md`): ship the LoRA
    delta and the plan, not the model; the device commits onto its own
-   copy, hash-checked (`BindSourceModel` already verifies the source).
+   copy, hash-checked (`UpdateEngine::VerifySourceModel` already
+   verifies the source against the plan's recorded hash).
    Headline: package bytes from model-scale to adapter-scale.
 
 ## Acceptance

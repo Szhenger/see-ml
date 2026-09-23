@@ -7,7 +7,10 @@ priority: P1
 ## Why
 
 SeeML's own SIMD GEMMs peak at 332 GFLOP/s (8 threads, E1 #80) and the
-SmolLM-135M CPU row is 233 tok/s (#105). PyTorch reaches the AMX/SME
+SmolLM-135M CPU row is 332 tok/s on the real package (the 2026-09-22
+frontier row in `docs/benchmarks.md`, 10 threads; the `tok_smollm135m_q8`
+fixture under-reads it at 233–269, #105 / E1), 0.39× of `torch.compile`'s
+847 on the same host. PyTorch reaches the AMX/SME
 matrix units through Accelerate: even interpreted op by op it runs the
 dec_wide plan 2.5× faster than SeeML's CPU backend (5,142 vs 2,060 tok/s,
 `frontier_exec.py price`, 2026-09-17). The speculated gap to

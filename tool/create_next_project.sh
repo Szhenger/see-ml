@@ -45,7 +45,9 @@ gh label create core-plane -R "$REPO" --force \
   -c 0E4D64 -d "Deterministic C++ core (device plane)" >/dev/null
 gh label create doctrine -R "$REPO" --force \
   -c B34A2E -d "Touches a doctrinal guarantee; product decision required" >/dev/null
-echo "   ok: python-plane, core-plane, doctrine"
+gh label create frontier-parity -R "$REPO" --force \
+  -c 5319E7 -d "Parity with the training frontier (torch.compile, MLX-LM): SeeRL F1-F6" >/dev/null
+echo "   ok: python-plane, core-plane, doctrine, frontier-parity"
 
 # --- front-matter helpers -------------------------------------------------
 fm() {  # fm <file> <key>
@@ -60,7 +62,7 @@ body() { awk '/^---$/ { c++; next } c >= 2 { print }' "$1"; }
 # --- create the issues ----------------------------------------------------
 echo "== issues"
 ITEMS=""  # url|Plane|Origin|Priority
-for f in "$ISSUE_DIR"/p*.md "$ISSUE_DIR"/e*.md; do
+for f in "$ISSUE_DIR"/p*.md "$ISSUE_DIR"/e*.md "$ISSUE_DIR"/f*.md; do
   title=$(fm "$f" title)
   labels=$(fm "$f" labels)
   plane=$(fm "$f" plane)
@@ -136,7 +138,7 @@ while IFS='|' read -r url plane origin priority; do
   item_id=$(gh project item-add "$proj_num" --owner "$OWNER" --url "$url" \
     --format json | jq -r '.id')
   set_field "$item_id" "Plane" "$plane"
-  set_field "$item_id" "Origin" "$origin"
+  [ -n "$origin" ] && set_field "$item_id" "Origin" "$origin"  # the F bodies name no origin
   set_field "$item_id" "Priority" "$priority"
   echo "   $url  [$plane | $origin | $priority]"
 done <<< "$ITEMS"
