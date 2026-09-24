@@ -1,4 +1,4 @@
-# frontend/tokenizer — the training-data ingress
+# frontend/tokenization — the training-data ingress
 
 The frontend's second input path (`docs/next-project/seeai.md` §3). The
 model path is `ingressor → accountant → topology → computation`; the data

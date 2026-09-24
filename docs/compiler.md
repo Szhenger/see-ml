@@ -32,7 +32,7 @@ source/                     the source language (shared with the runtime; not a 
 compiler/
   driver/                   orchestrates the process, verifies every boundary
   frontend/                 SMF bytes -> forward SIR
-    ingressor/  accountant/  topology/  computation/  egressor/  tokenizer/  operator/  representation/
+    ingressor/  accountant/  topology/  computation/  egressor/  tokenization/  operator/  representation/
   analysis/                 forward SIR -> complete training program
     pass_manager  algebra/  calculus/  statistics/  topology/  optimization/
   backend/                  training program -> .seeu plan + native package
