@@ -1,5 +1,6 @@
 ---
 title: "SeeAI F9: measurement and lifecycle — a train-only Metal profile, the gate's share of the update wall, the real-package CPU baseline, and the per-column int8 validation row"
+number: 140
 labels: enhancement,testing,docs,frontier-parity
 plane: Gates & docs
 milestone: SeeAI v1.0.0.A
@@ -47,6 +48,18 @@ priority: P1
 4. Rerun the frontier validation-loss row on the per-column package and
    record the step-0 and step-300 deltas against f32 beside the
    per-tensor numbers.
+
+## Integrated from the 2026-09-24 code review
+
+The measurement code is not built where it would be tested: `seeml-bench`
+and `SEEML_STEP_TIMING` compile only in the nightly job (N44); the NumPy-
+and tier-2-gated Python tests run in no CI job (N45); the
+`SEEML_ACCELERATE` CPU path is never compiled or tested in CI (N43); the
+HF-import compile check hard-codes a build directory, skips silently and
+runs before any build (F36). Acceptance gains: the default CI job builds the
+bench and step-timing code and runs the tier-2 tests on a runner that has
+the dependencies, the Accelerate path builds on the macOS job, and the
+HF-import check runs after the build and skips visibly.
 
 ## Acceptance
 

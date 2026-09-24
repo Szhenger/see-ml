@@ -1,5 +1,6 @@
 ---
 title: "Core plane E14: GemmNTQ8 has run scalar since #66 — the int8 cast inside the lane loop defeats vectorization (7× below the f32 form); widen each block first, bit-identical"
+number: 104
 labels: bug,efficiency,core-plane,sev:medium
 plane: Core plane
 origin: Field report

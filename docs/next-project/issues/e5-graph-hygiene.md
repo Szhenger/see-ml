@@ -1,5 +1,6 @@
 ---
 title: "Core plane E5: graph/infra hygiene batch — DCE mark-and-compact, per-pass timing, gated SIR dump, cached label validation, single-wakeup pool notify"
+number: 84
 labels: enhancement,efficiency,core-plane,good first issue
 plane: Core plane
 origin: Performance audit

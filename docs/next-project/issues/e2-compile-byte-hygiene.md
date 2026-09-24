@@ -1,5 +1,6 @@
 ---
 title: "Core plane E2: compile-side byte hygiene — single weight residency, streaming emission, drop the zero-fills"
+number: 81
 labels: enhancement,efficiency,core-plane
 plane: Core plane
 origin: Performance audit

@@ -1,5 +1,6 @@
 ---
 title: "Python plane P6: seam contracts and gates — one source of truth per Python/C++ format, a tool/ package with dependency tiers, and CI parity for the build-host plane"
+number: 86
 labels: enhancement,testing,correctness,python-plane,core-plane
 plane: Python plane
 origin: Seam review

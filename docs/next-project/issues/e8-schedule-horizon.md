@@ -1,5 +1,6 @@
 ---
 title: "Core plane E8: the cosine horizon is the compiled step budget, not the run — zero-LR tails, un-annealed short runs, resume overshoot (residual of #18 / #24)"
+number: 91
 labels: correctness,core-plane,sev:medium
 plane: Core plane
 origin: Algorithm review

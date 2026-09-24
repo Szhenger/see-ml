@@ -1,5 +1,6 @@
 ---
 title: "SeeAI F8: backend coverage and the dispatch model — softmax cross-entropy on the GPU (opcodes 11/12), no mid-step drains, and the dispatch overhead measured on Metal before the fusion verdict"
+number: 139
 labels: enhancement,efficiency,core-plane,frontier-parity
 plane: GPU backend
 milestone: SeeAI v1.0.0.A
@@ -57,6 +58,10 @@ question the roadmap does not ask.
    (the serial encoder is what keeps two runs byte-identical without
    barriers); the hazard tracker exists so CPU-resident ops flush late,
    and step 1 removes the only mid-step flush of a SmolLM-shaped step.
+
+Step 2's number decides whether the backend gains a **scheduling** phase
+(SeeAI S6): a directory that orders instructions before allocation if the
+time outside kernels is real, a function inside selection if it is not.
 
 ## Acceptance
 

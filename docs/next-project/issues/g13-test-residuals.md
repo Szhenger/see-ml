@@ -1,5 +1,6 @@
 ---
 title: "Gates G13: test residuals of closed #17 / #24 — eval tail weighting, GemmNTQ8, the LR floor default, tile-boundary GEMM shapes, program-level FD for KL / MSE / composite"
+number: 97
 labels: testing,core-plane
 plane: Gates & docs
 origin: Algorithm review

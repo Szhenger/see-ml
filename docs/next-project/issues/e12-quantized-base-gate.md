@@ -1,5 +1,6 @@
 ---
 title: "Core plane E12: under --quantize-base the gate scores W_q + Δ but commit ships W_f32 + Δ — score what ships; per-column int8 scales"
+number: 95
 labels: correctness,core-plane,sev:medium
 plane: Core plane
 origin: Algorithm review

@@ -1,5 +1,6 @@
 ---
 title: "Core plane E7: the emitted GEMM tiling is 1.3–3.3× slower than the kernel defaults — stop emitting it, bench what ships, re-premise E1 stage 2"
+number: 90
 labels: correctness,efficiency,core-plane,sev:high
 plane: Core plane
 origin: Algorithm review

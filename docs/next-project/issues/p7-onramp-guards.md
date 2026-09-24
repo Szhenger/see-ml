@@ -1,5 +1,6 @@
 ---
 title: "Python plane P7: on-ramp fidelity guards — refuse erf-GELU, carry normalization epsilon in SMF, warn on silently frozen tied heads (ahead of #69)"
+number: 96
 labels: correctness,python-plane,core-plane
 plane: Python plane
 origin: Algorithm review
