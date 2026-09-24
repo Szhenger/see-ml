@@ -1,5 +1,6 @@
 ---
 title: "Docs E6: four claims the code contradicts, plus the Two-Plane doctrine update"
+number: 85
 labels: documentation,core-plane
 plane: Gates & docs
 origin: Performance audit

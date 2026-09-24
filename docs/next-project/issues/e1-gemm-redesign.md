@@ -1,5 +1,6 @@
 ---
 title: "Core plane E1: GEMM redesign — m-hoist (bitwise), MR×NR microkernel with arena-planned pack buffers, 2D partition for small-M"
+number: 80
 labels: enhancement,efficiency,core-plane
 plane: Core plane
 origin: Both audits

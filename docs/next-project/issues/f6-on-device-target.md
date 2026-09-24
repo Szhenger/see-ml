@@ -1,5 +1,6 @@
 ---
 title: "SeeAI F6: on-device target — iPhone/iPad package runs, energy per token as a Tier A metric, adapter-only update packages"
+number: 134
 labels: enhancement,frontier-parity
 plane: Gates & docs
 origin: Frontier Outlook

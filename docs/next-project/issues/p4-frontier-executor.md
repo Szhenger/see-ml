@@ -1,5 +1,6 @@
 ---
 title: "Python plane P4: frontier reference executor — run .seeu plans through PyTorch/MLX for differential testing and AMX/GPU ceiling pricing"
+number: 78
 labels: enhancement,testing,design,python-plane,doctrine
 plane: Python plane
 origin: Frontier bridge

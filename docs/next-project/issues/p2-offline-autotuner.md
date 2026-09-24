@@ -1,5 +1,6 @@
 ---
 title: "Python plane P2: offline autotuner with host-keyed kernel-policy persistence (retire the dead in-tree UCB1)"
+number: 76
 labels: enhancement,efficiency,python-plane
 plane: Python plane
 origin: Both audits

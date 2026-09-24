@@ -1,5 +1,6 @@
 ---
 title: "Gates E9: commit the best evaluated state, not the last — periodic eval, patience, and a checkpoint that binds val_initial, seed and split (extends #67)"
+number: 92
 labels: enhancement,correctness,core-plane
 plane: Gates & docs
 origin: Algorithm review

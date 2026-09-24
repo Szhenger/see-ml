@@ -1,5 +1,6 @@
 ---
 title: "SeeAI F4: CPU matrix units — SME kernels (M4+) or a certified Accelerate exception for the frozen-weight GEMMs"
+number: 132
 labels: enhancement,efficiency,core-plane,doctrine,frontier-parity
 plane: Core plane
 origin: Frontier Outlook

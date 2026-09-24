@@ -9,6 +9,12 @@
 #
 # What the file owns, and what it does not (docs/next-project/README.md,
 # "Materializing the board"):
+#   * its IDENTITY: `number:` in the front matter names the live issue and
+#     is the match key (a retitled issue still matches, and the file's title
+#     is then pushed as an edit); a body without one is matched by exact
+#     title, and the number the create returns is written back into the
+#     file, so the second run matches by number. Two live issues with one
+#     title never abort a run: the open, lowest-numbered one wins;
 #   * the issue's body, compared after the same normalization GitHub applies;
 #   * its labels as a FLOOR: every label the file names is present, labels
 #     added live for triage (sev:*, good first issue, ...) are kept;
@@ -89,7 +95,7 @@ gh_pages() { gh api --paginate "$1" | jq -s 'add // []'; }
 # A body reaches gh through a file, never through a pipe into mutate: a
 # pipe into a command that does not read it (a dry run, a labels-only
 # edit) is a SIGPIPE race that aborts the script under pipefail.
-TMPD=$(mktemp -d -t next-project)
+TMPD=$(mktemp -d "${TMPDIR:-/tmp}/next-project.XXXXXX")
 trap 'rm -rf "$TMPD"' EXIT
 
 # --- front-matter helpers -------------------------------------------------
@@ -124,7 +130,7 @@ have_labels=$(gh label list -R "$REPO" --limit 500 --json name,color,description
   jq -c 'map({name: (.name | ascii_downcase), color: (.color | ascii_downcase), description: (.description // "")})')
 wanted_labels=$(for f in "${BODIES[@]}"; do fm "$f" labels; done | paste -sd, - | list_json)
 jq -r '.[]' <<< "$wanted_labels" | while IFS= read -r l; do
-  live=$(jq -r --arg l "$l" '.[] | select(.name == ($l | ascii_downcase)) | "\(.color)|\(.description)"' <<< "$have_labels" | head -1)
+  live=$(jq -r --arg l "$l" 'first(.[] | select(.name == ($l | ascii_downcase)) | "\(.color)|\(.description)") // empty' <<< "$have_labels")
   row=$(awk -F'|' -v l="$l" '$1 == l' <<< "$LABEL_TABLE")
   if [ -n "$row" ]; then
     color=$(cut -d'|' -f2 <<< "$row"); desc=$(cut -d'|' -f3 <<< "$row")
@@ -160,16 +166,32 @@ for f in "${BODIES[@]}"; do
   origin=$(fm "$f" origin)
   priority=$(fm "$f" priority)
   milestone=$(fm "$f" milestone)
+  number=$(fm "$f" number)
   body "$f" > "$TMPD/body"
   want_body=$(norm < "$TMPD/body")
 
-  live=$(jq -c --arg t "$title" 'select(.title == $t)' <<< "$LIVE" | head -1)
+  # Identity: `number:` when the file names one, else the exact title. A
+  # title held by several live issues (the retitling hazard the 2026-09-24
+  # review named) resolves to the open, lowest-numbered one; nothing is
+  # piped into head, so no SIGPIPE under pipefail.
+  if [ -n "$number" ]; then
+    live=$(jq -c -s --argjson n "$number" 'first(.[] | select(.number == $n)) // empty' <<< "$LIVE")
+    [ -n "$live" ] || { echo "error: $(basename "$f") names number: $number, which is not an issue of $REPO" >&2; exit 1; }
+  else
+    live=$(jq -c -s --arg t "$title" '[.[] | select(.title == $t)] | sort_by((.state != "open"), .number) | first // empty' <<< "$LIVE")
+  fi
   if [ -z "$live" ]; then
     url=$(mutate "create issue '$title' [labels: ${labels_csv:-none}; milestone: ${milestone:-none}]" \
       issue create -R "$REPO" -t "$title" -F "$TMPD/body" \
       ${labels_csv:+-l "$labels_csv"} ${milestone:+-m "$milestone"})
     [ -n "$url" ] || url="https://github.com/$REPO/issues/new?title=$(basename "$f")"
-    [ "$DRY_RUN" = 1 ] || echo "   created: $url  ($(basename "$f"))"
+    if [ "$DRY_RUN" != 1 ]; then
+      num="${url##*/}"
+      # The file now owns its identity: insert `number:` after `title:` so
+      # the next run matches by number even if the issue is retitled.
+      awk -v n="$num" 'p == 0 && /^title: / { print; print "number: " n; p = 1; next } { print }' "$f" > "$TMPD/fm" && cat "$TMPD/fm" > "$f"
+      echo "   created: $url  ($(basename "$f"); wrote number: $num into the file)"
+    fi
   else
     num=$(jq -r .number <<< "$live")
     url="https://github.com/$REPO/issues/$num"
@@ -182,8 +204,9 @@ for f in "${BODIES[@]}"; do
       live_ms=$(jq -r .milestone <<< "$live")
       # Each change sets its own flag here; nothing is re-parsed from the
       # printed list (a label named "milestone-blocker" is just a label).
-      what=""; body_flag=""; ms_flag=""
+      what=""; body_flag=""; ms_flag=""; title_flag=""
       [ "$live_body" = "$want_body" ] || { what="$what body"; body_flag=1; }
+      [ "$(jq -r .title <<< "$live")" = "$title" ] || { what="$what title"; title_flag=1; }
       [ -z "$add_labels" ] || what="$what labels(+$add_labels)"
       if [ -n "$milestone" ] && [ "$live_ms" != "$milestone" ]; then what="$what milestone"; ms_flag=1; fi
       what="${what# }"
@@ -194,6 +217,7 @@ for f in "${BODIES[@]}"; do
         # through a guarded expansion instead of an array.
         mutate "edit #$num [$what]" issue edit "$num" -R "$REPO" \
           ${body_flag:+-F "$TMPD/body"} \
+          ${title_flag:+-t "$title"} \
           ${add_labels:+--add-label "$add_labels"} \
           ${ms_flag:+-m "$milestone"} >/dev/null
         [ "$DRY_RUN" = 1 ] || echo "   edited #$num [$what]: $title"
@@ -231,7 +255,7 @@ PENDING_FIELDS=""  # dry run only: fields it would have created, whose values it
 
 ensure_field() {  # ensure_field <name> <comma-separated options>
   local have missing
-  have=$(jq -r --arg n "$1" '.fields[] | select(.name == $n) | .id' <<< "$fields_json" | head -1)
+  have=$(jq -r --arg n "$1" 'first(.fields[] | select(.name == $n) | .id) // empty' <<< "$fields_json")
   if [ -z "$have" ]; then
     mutate "create field '$1' with options [$2]" project field-create "$proj_num" --owner "$OWNER" \
       --name "$1" --data-type SINGLE_SELECT --single-select-options "$2" >/dev/null
@@ -275,7 +299,7 @@ set_field() {  # set_field <item-id> <item-url> <field-name> <option-name>
   # item-list keys a field's value by its lower-cased name.
   key=$(tr '[:upper:]' '[:lower:]' <<< "$3")
   current=$(jq -r --arg u "$2" --arg k "$key" --arg n "$3" \
-    '.items[] | select(.content.url == $u) | (.[$k] // .[$n] // "")' <<< "$items_json" | head -1)
+    'first(.items[] | select(.content.url == $u) | (.[$k] // .[$n] // "")) // ""' <<< "$items_json")
   [ "$current" = "$4" ] && return 0
   mutate "set $3 = '$4' on $2 (was '${current:-unset}')" project item-edit --id "$1" \
     --project-id "$proj_id" --field-id "$fid" --single-select-option-id "$oid" >/dev/null
@@ -284,7 +308,7 @@ set_field() {  # set_field <item-id> <item-url> <field-name> <option-name>
 echo "== items"
 while IFS='|' read -r url plane origin priority; do
   [ -n "$url" ] || continue
-  item_id=$(jq -r --arg u "$url" '.items[] | select(.content.url == $u) | .id' <<< "$items_json" | head -1)
+  item_id=$(jq -r --arg u "$url" 'first(.items[] | select(.content.url == $u) | .id) // empty' <<< "$items_json")
   if [ -z "$item_id" ]; then
     item_id=$(mutate "add $url to the board" project item-add "$proj_num" --owner "$OWNER" \
       --url "$url" --format json | jq -r '.id // empty')

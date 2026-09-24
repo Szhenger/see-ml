@@ -1,5 +1,6 @@
 ---
 title: "SeeAI F3: tiled attention on Metal — port opcodes 47-50 to the GPU, then fuse forward and backward flash-style"
+number: 131
 labels: enhancement,efficiency,core-plane,frontier-parity
 plane: GPU backend
 origin: Frontier Outlook

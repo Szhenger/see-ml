@@ -1,5 +1,6 @@
 ---
 title: "SeeAI F7: LoRA lowering — fold the rank-r scale into the GEMM alpha, batch the A-projections, lift the small-N Metal kernels off the occupancy floor, then fold B(Ax) into the base GEMM"
+number: 138
 labels: enhancement,efficiency,core-plane,frontier-parity
 plane: Core plane
 milestone: SeeAI v1.0.0.A

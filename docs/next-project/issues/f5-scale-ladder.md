@@ -1,5 +1,6 @@
 ---
 title: "SeeAI F5: scale ladder — SmolLM-360M, Qwen2.5-0.5B, then 1.5B on a 16 GB device with rematerialization and 8-bit optimizer states"
+number: 133
 labels: enhancement,core-plane,frontier-parity
 plane: Core plane
 origin: Frontier Outlook
@@ -53,6 +54,10 @@ Executable order: first the compile report's persistent / IO / transient
 split at each rung and adjoint liveness in the arena binder (bit-identical,
 no new opcode), then rematerialization (2b) for what liveness cannot
 recover, then the 8-bit states.
+
+The review's N29 — the early memory gate's "lower bound" over-estimates and
+rejects compiles that fit — is the accountant's to fix (S1); this ladder
+reads the estimate-vs-exact ratio at each rung from that fix.
 
 ## Acceptance
 

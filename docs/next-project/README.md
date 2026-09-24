@@ -13,7 +13,10 @@ materializes them as GitHub Issues and a GitHub Project board. The nine
 Outlook) and three on 2026-09-24 (F7–F9, from the systems review of the
 2026-09-22 frontier data, which also folded its findings into F2–F5) —
 are the **SeeAI v1.0.0.A** milestone, the first under the SeeAI name,
-reconciled by the same script.*
+reconciled by the same script. The **SeeAI v1.0.0.B** milestone — the
+no-leaky-abstractions restructure (`s*.md`) and the 2026-09-24 code review's
+root causes (`cr*.md`) — is designed in one place, [`seeai.md`](seeai.md);
+its bodies cite that document and do not repeat it.*
 
 ## The paradigm change
 
@@ -139,7 +142,8 @@ Each body is a Markdown file with a front matter the script reads:
 
 | key | required | meaning |
 |---|---|---|
-| `title` | yes | the issue title; the match key for an existing issue |
+| `title` | yes | the issue title; the match key only when `number:` is absent |
+| `number` | no | the live issue's number: the identity the script matches on (a retitled issue still matches and the file's title is pushed as an edit); written into the file by the script when it creates the issue |
 | `labels` | yes | comma-separated; a plane label is kept at the script's colour table, any other label is created grey when missing |
 | `plane`, `priority` | yes | the board's `Plane` / `Priority` single-select values |
 | `origin` | no | the board's `Origin` value (`Frontier Outlook` for F1–F6); blank leaves the field unset |

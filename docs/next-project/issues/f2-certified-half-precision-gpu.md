@@ -1,5 +1,6 @@
 ---
 title: "SeeAI F2: certified half-precision GPU GEMMs — bf16/f16 simdgroup-MMA and M5 neural-accelerator kernels as a relaxed opcode family behind a P3 certificate"
+number: 130
 labels: enhancement,efficiency,core-plane,doctrine,frontier-parity
 plane: GPU backend
 origin: Frontier Outlook
@@ -71,6 +72,22 @@ row is the only real F2 number so far (F4 carries it). The first
 executable step is therefore the measurement itself, on a host with Metal
 access, with validation off so the profile weights forward and backward
 as a training step does (F9).
+
+## Integrated from the 2026-09-24 code review
+
+The certified family has gate holes the review reached, and they are this
+issue's to close: a relaxed (`--precision certified-bf16`) plan is built into
+a runnable binary by the C++ `--build` path with **no numerics certificate**
+(N17) — only `pack_update.py` refuses; the certifier's `worst_ratio * rtol`
+is a lower bound on relative error, not an upper bound, and with `rtol = 0`
+every site measures 0 and NaN passes (F41); `--observed` is not bound to the
+plan being verified and its own failures are ignored (F42); `check_observed`
+looks for `gemm.relaxed` while reports use opcodes (F72); `run`/`certify`
+accept a `--source` whose hash differs from the plan's (N35). Acceptance
+gains: every build path refuses an uncertified relaxed plan; the certificate
+carries the per-opcode max relative error and refuses `rtol <= 0` and
+non-finite values; the certificate binds to the plan hash and the source
+hash.
 
 ## Acceptance
 

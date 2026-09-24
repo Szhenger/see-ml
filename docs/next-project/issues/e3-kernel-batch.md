@@ -1,5 +1,6 @@
 ---
 title: "Core plane E3: bitwise-safe kernel batch — RoPE sin/cos table, ReduceRows false sharing, clip-fused optimizer step, parallel eval argmax"
+number: 82
 labels: enhancement,efficiency,core-plane
 plane: Core plane
 origin: Performance audit

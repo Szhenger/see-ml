@@ -1,5 +1,6 @@
 ---
 title: "SeeAI F1: measured frontier harness — real mlx_lm.lora and torch.compile runs on the same host, model, corpus and tokens/step, plus a nightly frontier row"
+number: 129
 labels: enhancement,python-plane,frontier-parity
 plane: Python plane
 origin: Frontier Outlook

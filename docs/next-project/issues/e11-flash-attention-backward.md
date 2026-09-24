@@ -1,5 +1,6 @@
 ---
 title: "Core plane E11: attention materializes three S² matrices per layer in double-accumulated f32 — decide and land the tiled (flash-style) backward before G1b-4 freezes the cached-P design"
+number: 94
 labels: enhancement,efficiency,design,core-plane
 plane: Core plane
 origin: Algorithm review

@@ -1,5 +1,6 @@
 ---
 title: "Core plane E10: two avoidable full-activation passes per adapted layer in the backward — fold α into the rank-r GEMMs, merge dX through gemm_acc"
+number: 93
 labels: enhancement,efficiency,core-plane
 plane: Core plane
 origin: Algorithm review

@@ -1,5 +1,6 @@
 ---
 title: "Python plane P5: calibration-ratio gate in bench_compare.py — Nightly #20–#23 were runner-variance false positives"
+number: 79
 labels: testing,correctness,python-plane
 plane: Python plane
 origin: Nightly eval

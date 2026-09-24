@@ -1,5 +1,6 @@
 ---
 title: "Core plane E4: elementwise chain fusion — kFusedMap (roadmap Phase 1b), closing the fusion-depth gap"
+number: 83
 labels: enhancement,efficiency,core-plane,design
 plane: Core plane
 origin: Both audits
