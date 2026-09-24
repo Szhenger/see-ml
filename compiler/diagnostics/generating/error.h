@@ -9,7 +9,8 @@
 
 // =============================================================================
 // generating/ — errors formed while generating code (compiler/backend/
-// trainer/ and the AOT driver that sequences it): arena binding, instruction
+// allocation, selection and packaging, and the AOT driver that sequences
+// them): arena binding, instruction
 // lowering, plan assembly, and native package emission. By this stage the
 // program is analytically correct; what can fail is materialization — an
 // unbound value, an op with no encoding, a package directory that cannot be

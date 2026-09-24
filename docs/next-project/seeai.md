@@ -37,6 +37,8 @@ prints the measured step beside it, and the ratio is the utilization.
 
 ## §3 Frontend — six sub-subsystems on two paths
 
+*The directory moves of §3–§5 landed on 2026-09-24 (the "today" columns describe the tree before them); the behavioral work of S1, S5 and S6 is unchanged.*
+
 | stage | role | today | artifact |
 |---|---|---|---|
 | **ingressor** | bounded SMF reader, weight copy, content hash | `frontend/ingressor/model_reader.cc` | decoded model + hash |

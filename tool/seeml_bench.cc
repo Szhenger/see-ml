@@ -73,7 +73,7 @@
 #include <sys/utsname.h>
 
 #include "compiler/backend/architecture/host_arch.h"
-#include "compiler/backend/tuner/kernel_policy_table.h"
+#include "compiler/backend/architecture/kernel_policy_table.h"
 #include "compiler/diagnostics/logger.h"
 #include "compiler/driver/update_compiler.h"
 #include "runtime/engine/update_engine.h"

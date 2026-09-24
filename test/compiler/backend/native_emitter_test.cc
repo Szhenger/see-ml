@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "compiler/backend/trainer/native_emitter.h"
+#include "compiler/backend/packaging/native_emitter.h"
 #include "compiler/driver/update_compiler.h"
 #include "runtime/engine/update_engine.h"
 #include "source/language/model_format.h"

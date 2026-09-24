@@ -16,7 +16,7 @@
 
 #if defined(__APPLE__)
 
-#include "compiler/backend/trainer/kernel_emitter.h"
+#include "compiler/backend/architecture/kernel_emitter.h"
 #include "runtime/executor/metal_gemm.h"
 #include "runtime/executor/update_kernels.h"
 

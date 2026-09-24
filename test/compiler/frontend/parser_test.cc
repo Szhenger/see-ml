@@ -10,7 +10,7 @@
 #include <thread>
 #include <vector>
 
-#include "compiler/frontend/parser/parser.h"
+#include "compiler/frontend/computation/parser.h"
 #include "compiler/frontend/representation/sir.h"
 #include "source/language/model_format.h"
 #include "test/framework/seetest.h"

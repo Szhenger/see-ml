@@ -20,7 +20,7 @@
 #include "source/identity/hash.h"
 #include "source/parallel/parallel_for.h"
 #include "compiler/frontend/ingressor/model_reader.h"
-#include "compiler/frontend/ingressor/model_writer.h"
+#include "compiler/frontend/egress/model_writer.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
 #include "test/support/scoped_temp_dir.h"

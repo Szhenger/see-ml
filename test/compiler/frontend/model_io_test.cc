@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "compiler/frontend/ingressor/model_reader.h"
-#include "compiler/frontend/ingressor/model_writer.h"
+#include "compiler/frontend/egress/model_writer.h"
 #include "source/parallel/parallel_for.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"

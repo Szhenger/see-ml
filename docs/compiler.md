@@ -32,11 +32,11 @@ source/                     the source language (shared with the runtime; not a 
 compiler/
   driver/                   orchestrates the process, verifies every boundary
   frontend/                 SMF bytes -> forward SIR
-    ingressor/  parser/  operator/  representation/
+    ingressor/  accountant/  topology/  computation/  egress/  operator/  representation/
   analysis/                 forward SIR -> complete training program
-    updater/  algebra/  calculus/  reviewer/
+    pass_manager  algebra/  calculus/  statistics/  topology/  optimization/
   backend/                  training program -> .seeu plan + native package
-    trainer/  architecture/  tuner/
+    architecture/  allocation/  selection/  packaging/
   diagnostics/              error handling, partitioned by process
 ```
 

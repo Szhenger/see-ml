@@ -11,7 +11,7 @@
 #include "compiler/analysis/algebra/lora_grafter.h"
 #include "compiler/analysis/algebra/merge_builder.h"
 #include "compiler/driver/update_compiler.h"
-#include "compiler/frontend/parser/graph_build.h"
+#include "compiler/frontend/computation/graph_build.h"
 #include "compiler/frontend/representation/sir.h"
 
 // =============================================================================

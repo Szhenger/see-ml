@@ -9,7 +9,7 @@
 
 // =============================================================================
 // parsing/ — errors formed while turning a decoded SMF graph into forward
-// SIR (compiler/frontend/parser/: value resolution, per-op semantic checks,
+// SIR (compiler/frontend/topology/ and computation/: per-op semantic checks, value resolution,
 // graph construction). By this stage the bytes are trusted; what can fail is
 // meaning — an undefined tensor name, an operand-shape mismatch, a dangling
 // model output. Failure discipline: name the op (and its SMF kind) so the

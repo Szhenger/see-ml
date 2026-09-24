@@ -19,23 +19,34 @@ header is the only include consumers need.
 ```
 compiler/
   frontend/               SMF bytes -> verified forward SIR
-    ingressor/            bounds-checked file load, footprint gate
-    parser/               op list -> SIR, with semantic analysis
-    operator/             typed constructors for compound ops
-    representation/       SIR itself (façade: sir.h)
+    ingressor/            bounds-checked file load, content hash
+    accountant/           the footprint lower bound and the memory gate
+    topology/             whole-graph and per-op semantic checks
+    computation/          op list -> the SIR computation graph
+    egress/               the SMF writer (the ingressor's inverse; tools and tests)
+    operator/             typed constructors for compound ops (shared)
+    representation/       SIR itself (façade: sir.h; shared)
   analysis/               forward SIR -> complete training program
-    updater/              pass manager, conv lowering, dead-code elimination
-    algebra/              LoRA grafting, merge program, GEMM-epilogue fusion
-    calculus/             autodiff and optimizer synthesis
-    reviewer/             int8 quantization selection
+    pass_manager.{h,cc}   runs the passes, re-verifies after each
+    algebra/              LoRA grafting, merge program, the fusers, RoPE table, conv lowering
+    calculus/             autodiff
+    statistics/           int8 quantization selection, attention-family decision
+    topology/             dead-code elimination
+    optimization/         optimizer synthesis
   backend/                training program -> .seeu plan + native package
-    trainer/              arena binding, instruction lowering, package emit
-    architecture/         host cache/ISA detection, GEMM tiling
-    tuner/                kernel-policy table reader (the offline tuner's decisions)
-  driver/                 orchestrates the process, verifies every boundary
+    architecture/         host cache/ISA detection, GEMM tiling, kernel-policy table, Metal kernel source
+    allocation/           arena binding
+    selection/            instruction lowering
+    packaging/            the self-contained native package
+  driver/                 orchestrates the process, verifies every boundary (plan assembly still lives here — S6 moves it)
   diagnostics/            errors, partitioned by process
     tokenizing/ parsing/ passing/ updating/ architecting/ generating/
 ```
+
+The sub-folder names follow one convention per subsystem: the frontend's
+are roles, the analysis phase's are the fields of mathematics that study
+what each does, the backend's are the classic compiler phases
+(`docs/next-project/seeai.md`).
 
 ## The Shape of the Pipeline
 

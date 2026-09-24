@@ -13,7 +13,7 @@
 // =============================================================================
 // passing/ — errors formed while orchestrating and lowering SIR in the
 // analysis subsystem, outside the analytic methods themselves
-// (compiler/analysis/updater/): the pass manager's invariant gate and the
+// (compiler/analysis/): the pass manager's invariant gate and the
 // legality checks of structural lowerings such as im2col conv rewriting.
 // Failure discipline: a pass's own error is propagated verbatim (tests match
 // it exactly); corruption found *after* a pass is attributed to that pass by

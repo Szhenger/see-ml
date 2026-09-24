@@ -17,15 +17,15 @@
 // where the *unit* names the component that spoke and the *process module*
 // that formed the message names the compilation stage it belongs to:
 //
-//   tokenizing/    decoding and encoding the SMF byte stream (ingressor/)
-//   parsing/       SMF graph -> forward SIR construction (parser/)
-//   passing/       pass orchestration and lowering legality (analysis/updater/)
+//   tokenizing/    decoding and encoding the SMF byte stream (frontend/ingressor/)
+//   parsing/       SMF graph -> forward SIR construction (frontend/topology/ + computation/)
+//   passing/       pass orchestration and lowering legality (analysis/pass_manager, analysis/topology/)
 //   updating/      the analytic methods — autodiff, LoRA grafting, merge
 //                  synthesis (analysis/calculus/ + analysis/algebra/)
 //   architecting/  local device analysis — ISA/cache detection and the
 //                  tiling contract (backend/architecture/)
 //   generating/    code generation — arena binding, instruction lowering,
-//                  native packaging, and the AOT driver (backend/trainer/)
+//                  native packaging, and the AOT driver (backend/allocation, selection, packaging)
 //
 // Each process module is header-only: it holds the registry of unit names
 // active in that process plus builders for the message shapes the process

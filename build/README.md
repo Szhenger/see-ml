@@ -102,7 +102,7 @@ Every compile in `build.sh` uses the same flags. They're worth knowing:
 Every test suite is its own executable; run one directly:
 
 ```bash
-./build/seeml_updater_test
+./build/seeml_pass_manager_test
 ```
 
 The two tools are here too — `./build/seeml-update-compile` and

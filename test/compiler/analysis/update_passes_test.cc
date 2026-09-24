@@ -9,7 +9,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "compiler/frontend/parser/parser.h"
+#include "compiler/frontend/computation/parser.h"
 #include "compiler/frontend/representation/sir.h"
 #include "compiler/analysis/update_passes.h"
 #include "source/language/model_format.h"

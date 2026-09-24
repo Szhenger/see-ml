@@ -60,7 +60,7 @@ Worth knowing the flavors, because they answer different questions:
 Every suite is one executable (`seeml_<basename>`), built by both `build/build.sh` and CMake/CTest; run one directly with e.g.
 
 ```bash
-./build/seeml_updater_test --filter=ConvLowering
+./build/seeml_pass_manager_test --filter=ConvLowering
 ```
 
 Suites include only the façades (`test/framework/seetest.h`, `test/support/builders.h`); the split units behind them can be reorganized without touching any suite — the same façade discipline as the code under test.
