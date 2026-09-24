@@ -9,7 +9,7 @@ Usage:
 Compares the Tier A throughput metric — rows_per_s, per fixture per thread
 width — and exits 1 if any pair regressed by more than --max-regression
 (rows_per_s is MLX-LM's "Tokens/sec" under its own definition — every row
-of a SeeML batch is a loss target — and schema-2 reports also carry it as
+of a SeeAI batch is a loss target — and schema-2 reports also carry it as
 tokens_per_s / samples_per_s; the gate keeps the schema-1 key so a baseline
 stored before the rename still compares)
 (default 0.10, the >10% gate of docs/benchmarks.md). A missing baseline
@@ -43,7 +43,7 @@ Calibration. A schema-4 report carries `calibration`: the rate of a frozen
 single-threaded reference kernel that shares no code with the runtime,
 timed before and after the fixtures. Each Tier A delta is taken after
 dividing the current rows/s by (current calibration / reference
-calibration), so a uniformly slow or fast runner cancels and a slow SeeML
+calibration), so a uniformly slow or fast runner cancels and a slow SeeAI
 kernel does not. A reference that predates schema 4 compares un-normalized,
 with a note (the migration pattern of the rows_per_s key above); a schema-4
 report WITHOUT a usable calibration block, two different calibration

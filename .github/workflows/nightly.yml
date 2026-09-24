@@ -34,7 +34,7 @@ on:
       frontier:
         description: >-
           Also run the frontier row (tool/frontier_run.py, F1 #129) on a
-          self-hosted Apple-silicon runner: SeeML cpu / metal, torch.compile
+          self-hosted Apple-silicon runner: SeeAI cpu / metal, torch.compile
           and MLX-LM on SmolLM-135M with the parity checks. Trend only.
         type: boolean
         default: false

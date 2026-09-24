@@ -2,7 +2,7 @@
 #define SEEML_TEST_FRAMEWORK_SEETEST_H_
 
 // =============================================================================
-// SeeTest — the SeeML testing framework.
+// SeeTest — the SeeAI testing framework.
 //
 // A dependency-free harness in the spirit of GoogleTest, matching the
 // codebase's C++23 / std::expected idiom:

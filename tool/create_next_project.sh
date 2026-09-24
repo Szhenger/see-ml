@@ -41,7 +41,7 @@ esac
 
 REPO="Szhenger/see-ml"
 OWNER="Szhenger"
-PROJECT_TITLE="SeeML Two-Plane Overhaul"
+PROJECT_TITLE="SeeAI Two-Plane Overhaul"
 ISSUE_DIR="$(cd "$(dirname "$0")/../docs/next-project/issues" && pwd)"
 
 # Existing roadmap issues to pull onto the board: number|Plane|Origin|Priority
@@ -66,7 +66,7 @@ LABEL_TABLE="
 python-plane|3572A5|Build-host Python subsystem (the frontier plane)
 core-plane|0E4D64|Deterministic C++ core (device plane)
 doctrine|B34A2E|Touches a doctrinal guarantee; product decision required
-frontier-parity|5319E7|Parity with the training frontier (torch.compile, MLX-LM): SeeRL F1-F6
+frontier-parity|5319E7|Parity with the training frontier (torch.compile, MLX-LM): SeeAI F1-F9
 "
 
 for bin in gh jq; do

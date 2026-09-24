@@ -41,7 +41,7 @@ of an `mlx_lm.lora` log or a `llama-bench` table needs no unit translation.
 
 | field | external standard | definition here | note |
 |---|---|---|---|
-| `tokens_per_s` (token/decoder fixtures), `samples_per_s` (feature fixtures) | MLX-LM `lora` **Tokens/sec** | loss-target rows per wall second of training | MLX counts loss-masked target tokens only; every row of a SeeML batch is a target (next-token label per position), so this is exactly `rows_per_s` — the gate key is unchanged, the unit is now named |
+| `tokens_per_s` (token/decoder fixtures), `samples_per_s` (feature fixtures) | MLX-LM `lora` **Tokens/sec** | loss-target rows per wall second of training | MLX counts loss-masked target tokens only; every row of a SeeAI batch is a target (next-token label per position), so this is exactly `rows_per_s` — the gate key is unchanged, the unit is now named |
 | `it_per_s` | MLX-LM **It/sec** | optimizer steps per second = `1000 / step_ms` | per-step, from the steps-regression slope, so lifecycle cost is excluded as MLX's warm iterations exclude it |
 | `step_ms_min` / `step_ms_max` | `llama-bench` **t/s ± σ** | spread of the per-step slope across `--repeats` | medians stay the headline; the spread says whether a delta is signal |
 | `train_loss_first` / `train_loss_last`, `trained_tokens` | MLX-LM **Train loss**, **Trained Tokens** | first/last windowed mean training loss over the whole sweep; rows trained | a sanity anchor that the timed work was real training, not a stalled loop |
@@ -57,12 +57,12 @@ number dressed as lm-eval output. Quality metrics against a real model
 validation field reports, where the corpus is real text.
 
 Reference frontier numbers, measured on this host class (Apple M5, 16 GB,
-2026-09-22, same model, corpus, split and 512 tokens per step as SeeML —
+2026-09-22, same model, corpus, split and 512 tokens per step as SeeAI —
 "The frontier row, measured" below): on SmolLM-135M, `mlx_lm`'s LoRA
 trainer reaches 4,605 tok/s in bf16 (9.0 it/s; 1.34 GB Metal-allocator
 peak, 1.01 GB resident) and 2,240 in
 true f32; `torch.compile` reaches 3,761 tok/s on MPS in bf16, 2,099 in f32,
-and 847 on the CPU in f32 (Accelerate/AMX). SeeML's Metal backend trains
+and 847 on the CPU in f32 (Accelerate/AMX). SeeAI's Metal backend trains
 the same model at 1,802 tok/s (f32 math, int8 base) — 0.80–0.86× the f32
 frontier and 0.39–0.48× the bf16 one (MLX-LM's bf16 is all bf16;
 `torch.compile`'s is a bf16 base under f32 adapters) — and its CPU
@@ -203,7 +203,7 @@ records, the tail 10 % held out, identical ids in every stack), LoRA r8 /
 per step, 300 steps, 10 threads. Apple M5 (10-core GPU, 16 GB), main at
 1d6b8ed (the code that ran), driven by the F1 harness `tool/frontier_run.py`
 (#129; on branch `claude/f1-frontier-harness` until it merges), torch 2.14.0, mlx 0.32.2 / mlx-lm 0.31.3, warm chip, strictly
-serial. SeeML's step is the steps-regression slope on the package binary
+serial. SeeAI's step is the steps-regression slope on the package binary
 (the 15→300-step slope where a 300-step run exists); PyTorch's is the
 median step after warm-up; MLX's is the trainer's own `It/sec` × 512.
 The two cells marked † are a single 5→15-step slope with `--repeats 1`
@@ -211,30 +211,30 @@ and no 300-step run; on the same models the Metal 15→300 slope came out
 23–38 % slower than the 5→15 one, so read those two cells as optimistic.
 Tokens per second, higher is better:
 
-| model | SeeML `metal` (int8 base) | SeeML `cpu` (int8 base) | torch.compile MPS f32 / bf16 base with f32 adapters | torch.compile CPU f32 | MLX-LM true f32 / all-bf16 |
+| model | SeeAI `metal` (int8 base) | SeeAI `cpu` (int8 base) | torch.compile MPS f32 / bf16 base with f32 adapters | torch.compile CPU f32 | MLX-LM true f32 / all-bf16 |
 |---|---:|---:|---:|---:|---:|
 | SmolLM-135M | 1,802 | 332 | 2,099 / 3,761 | 847 | 2,240 / 4,605 |
 | SmolLM2-135M | 1,754 | 335 | 2,184 / 3,833 | 842 | 2,234 / 4,690 |
 | SmolLM2-360M | 830 | 133 † | 1,041 / 2,121 | 445 | 1,009 / 2,324 |
 | Qwen2.5-0.5B | 636 | 102 † | 767 / 1,668 | 345 | 734 / 1,768 |
 
-Read across a row: SeeML's f32-math Metal package runs at 0.79–0.87× the
+Read across a row: SeeAI's f32-math Metal package runs at 0.79–0.87× the
 f32 frontier and 0.36–0.48× the bf16 one (0.36–0.39× of MLX-LM's all-bf16
 trainer, 0.38–0.48× of `torch.compile`'s bf16 base); its CPU package at
 0.39–0.40× of `torch.compile` on the two 135M models and 0.30× on the two
-† cells (PyTorch eager is 2.2–3.2× SeeML there, so the matrix units are
+† cells (PyTorch eager is 2.2–3.2× SeeAI there, so the matrix units are
 the whole CPU gap; `torch.compile` adds 1.06–1.16× over eager). Half
 precision is worth 1.75–2.17× to `torch.compile` end to end on this GPU
 (bf16 base, f32 adapters) and 2.06–2.41× to MLX-LM (all bf16) — the F2
-budget, two experiments, not one. SeeML's base storage barely moves its Metal step
+budget, two experiments, not one. SeeAI's base storage barely moves its Metal step
 (int8 1,802, bf16 1,756, f32 1,776 on SmolLM-135M) but the per-tensor int8
 base costs +0.10–0.14 nats of validation loss at step 0 on every model and
 +0.05 at step 300 on SmolLM-135M (E12, #128, is the fix). Where the
-arithmetic matches, the answers match: SeeML f32 and PyTorch start from the
+arithmetic matches, the answers match: SeeAI f32 and PyTorch start from the
 same validation loss (4.5743 vs 4.5744) and end within 0.005; two Metal
 runs of each 135M model are bitwise identical; the CPU and Metal backends
 agree to 1e-5. Memory on SmolLM-135M, like against like: peak resident
-set (`peak_rss_bytes`, the definition above) SeeML 1.89 GB — its arena,
+set (`peak_rss_bytes`, the definition above) SeeAI 1.89 GB — its arena,
 plan and Metal buffers are all shared host memory and all resident —
 against MLX-LM 1.01 GB (bf16) / 1.06 GB (f32) and PyTorch MPS 0.6–1.4 GB;
 the frameworks keep their weights and activations in the Metal
@@ -242,7 +242,7 @@ allocator, which the resident set does not see: MLX-LM's allocator peak
 is 1.34 GB (bf16) / 2.11 GB (f32) and PyTorch's device peak 2.4–2.6 GB.
 Neither number alone ranks the three. `torch.compile`
 pays 40–54 s of warm-up whenever a graph is new to Inductor's cache (6–9 s
-when it is not); SeeML's package has none.
+when it is not); SeeAI's package has none.
 
 Parity rules a frontier row must pin, learned the hard way: cast the base
 dtype explicitly (SmolLM-135M's safetensors are stored F32 although its
@@ -251,10 +251,10 @@ config says bfloat16, so `mlx_lm` runs it in f32 unasked); pass
 roughly triples the first update and changes the loss trajectory);
 `MLX_ENABLE_TF32=0` for a true-f32 MLX row (the default matmul is 1.3–1.5×
 faster and not f32); adapt the head in the frameworks too (the importer
-writes the tied head as its own weight and SeeML adapts it); and note that
+writes the tied head as its own weight and SeeAI adapts it); and note that
 `mlx_lm`'s `evaluate` drops the ragged validation tail (48 of 50 records).
 The harness, raw JSON and loss curves are in `out/frontier-2026-09-22/`
-(not committed); the full report is the SeeML Frontier Harness page of
+(not committed); the full report is the SeeAI Frontier Harness page of
 2026-09-22.
 
 ## Tier C — Memory (the gate that refuses compiles)
@@ -332,15 +332,15 @@ LoRA r16, 512 tokens/step, f32 base, 2026-09-17):
 
 | executor | ms/step | tok/s | GEMM GFLOP/s | vs C++ CPU |
 |---|---:|---:|---:|---:|
-| SeeML C++ `cpu` | 248.6 | 2,060 | 108 | 1.00× |
+| SeeAI C++ `cpu` | 248.6 | 2,060 | 108 | 1.00× |
 | PyTorch CPU (Accelerate/AMX), interpreted | 99.6 | 5,142 | 270 | 2.50× |
 | PyTorch MPS, interpreted | 82.1 | 6,239 | 328 | 3.03× |
 | MLX f32, interpreted | 58.6 | 8,734 | 459 | 4.24× |
 | MLX TF32 default, interpreted | 52.2 | 9,802 | 515 | 4.76× |
-| SeeML C++ `metal` | 29.7 | 17,237 | 905 | 8.37× |
+| SeeAI C++ `metal` | 29.7 | 17,237 | 905 | 8.37× |
 
 So on this plan the Accelerate exception is worth **at least 2.5×** on the
-CPU (on the real models above `torch.compile` is 2.5–3.4× SeeML's CPU
+CPU (on the real models above `torch.compile` is 2.5–3.4× SeeAI's CPU
 package and PyTorch eager 2.2–3.2×), and the C++ Metal backend runs
 above what op-by-op MLX reaches — the real `mlx_lm` trainer, which
 compiles its step, is the 0.80× (f32) / 0.39× (bf16) of the frontier row.
@@ -460,7 +460,7 @@ All three pieces of this program exist:
    - **Calibration.** `seeml-bench` (report schema 4) times a frozen,
      single-threaded reference kernel — a naive f32 i-k-j product over
      64 KiB matrices that shares no code with `runtime/executor`, so a
-     SeeML kernel regression cannot slow its own yardstick — before and
+     SeeAI kernel regression cannot slow its own yardstick — before and
      after the fixtures, and records `calibration.calib_rows_per_s` (the
      median of both brackets), the two sides, and their `spread`.
      `bench_compare.py` divides the current run's rows/s by the ratio of

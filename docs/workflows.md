@@ -1,6 +1,6 @@
 # Workflows — An Introduction from First Principles
 
-*This is SeeML's continuous integration. Let's take it from the top.*
+*This is SeeAI's continuous integration. Let's take it from the top.*
 
 You've just changed some code. It compiles on your machine. The tests pass
 on your machine. You open a pull request, someone merges it, and three days
@@ -22,7 +22,7 @@ let's build them up from nothing.
 
 ## Part 0 — What problem are we actually solving?
 
-SeeML makes three promises, stated all over its documentation:
+SeeAI makes three promises, stated all over its documentation:
 
 1. **Correctness** — a compiled update plan does what the math says: the
    gradients match calculus, the bounds checks hold against hostile
@@ -54,7 +54,7 @@ called **workflows**.
 A workflow is a YAML file in the magic directory `.github/workflows/`.
 When certain **events** happen in the repository — someone opens a pull
 request, pushes to `main`, or a scheduled time arrives — GitHub reads
-these files and executes them. SeeML has three:
+these files and executes them. SeeAI has three:
 
 ```
 .github/workflows/
@@ -91,7 +91,7 @@ Five concepts, and you know them all already in other forms:
   Think of an interrupt handler, or a database trigger.
 - A **job** is an independent unit of work that gets its own **runner** —
   a disposable virtual machine, born clean, destroyed after. Jobs run *in
-  parallel* with each other by default. That's why SeeML's CI is split
+  parallel* with each other by default. That's why SeeAI's CI is split
   into six jobs instead of one long script: six machines working at once,
   and when one fails you know *which promise* broke from the job's name
   alone.
@@ -127,7 +127,7 @@ to check?*
 
 ## Part 2 — Mapping promises to jobs
 
-Recall the three promises. Here is the entire CI surface of SeeML, one
+Recall the three promises. Here is the entire CI surface of SeeAI, one
 row per job, and — this is the design — **every row exists to guard a
 named promise**:
 
@@ -192,7 +192,7 @@ lies to you.
 Here is the job in one breath: build once, then run **every suite three
 times** — under `SEEML_THREADS=1`, `=3`, and `=8`.
 
-To see why, you need one fact about SeeML's design (the full story is in
+To see why, you need one fact about SeeAI's design (the full story is in
 [runtime.md](runtime.md)): parallel work is chunked by *problem shape*,
 never by thread count. The thread count decides who computes each chunk,
 never what the chunks are — so every result is supposed to be bitwise
@@ -250,7 +250,7 @@ outside, where nobody thinks the way you do.
 A **fuzzer** generates inputs by mutation, guided by coverage: it
 watches which branches each input reaches and mutates the inputs that
 reached new ones. Over time it discovers, mechanically, the malformed
-files that your hand-written rejection tests missed. SeeML's harness
+files that your hand-written rejection tests missed. SeeAI's harness
 (`test/fuzz/binary_formats.cc`) exposes four attack surfaces — the SMF
 model reader, the SEEU plan loader, the SDS dataset reader, and the
 compiler running on loader-accepted models — and the contract under
@@ -266,7 +266,7 @@ so the counterexample lands in your hands, reproducible.
 
 ### 3.5 `e2e-package` — the product contract, literally
 
-Everything so far tests the *repository*. But SeeML's actual product is
+Everything so far tests the *repository*. But SeeAI's actual product is
 a thing the repository emits: a self-contained package that must build
 and run **with no access to this repository at all** (that's the
 vendoring contract in [runtime.md](runtime.md)). Until this job, that
@@ -355,7 +355,7 @@ the ordering of every memory access across threads and reports *data
 races* — two threads touching the same location, at least one writing,
 with no synchronization between them. Races are the ultimate
 "works on my machine" bug: their outcome depends on scheduling luck.
-SeeML's test tree already contains genuine race *scenarios* run in
+SeeAI's test tree already contains genuine race *scenarios* run in
 anger — two engines training concurrently on the shared worker pool,
 two writers racing one durable file, a batch pipeline torn down
 mid-stream — and TSan runs *underneath* those tests, converting "the

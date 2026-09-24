@@ -8,7 +8,7 @@
 #include <vector>
 
 // =============================================================================
-// SDS — SeeML Dataset format: fixed-shape samples for the AOT training loop.
+// SDS — SeeAI Dataset format: fixed-shape samples for the AOT training loop.
 //
 // Layout (little-endian):
 //   u32 magic "SDS1"; u32 version (1 or 2)

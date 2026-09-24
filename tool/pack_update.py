@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""pack_update.py — the SeeML package assembler (Two-Plane Overhaul, P1).
+"""pack_update.py — the SeeAI package assembler (Two-Plane Overhaul, P1).
 
 Embeds a compiled update plan into an emitted package as an `.incbin`
 assembly stub — `update_plan_embedded.S` — in place of the compiler's decimal
@@ -22,7 +22,7 @@ the preprocessor and assembler every GCC- or Clang-compatible driver
 carries (`c++ -c update_plan_embedded.S`), on ELF, Mach-O and MinGW alike.
 Python runs on the build host only; nothing here ships to the device.
 
-Dependency tier 0: standard library only. Strict CLI, like every SeeML tool:
+Dependency tier 0: standard library only. Strict CLI, like every SeeAI tool:
 an unknown flag or an unusable value is exit 2, never a default.
 
 Exit codes: 0 packaged (and, with --build, built); 1 packaging or build

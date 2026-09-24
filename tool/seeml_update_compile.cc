@@ -1,5 +1,5 @@
 // =============================================================================
-// seeml-update-compile — the SeeML Model Update Compiler CLI.
+// seeml-update-compile — the SeeAI Model Update Compiler CLI.
 //
 //   seeml-update-compile
 //       --source  model.smf            the on-device model to update

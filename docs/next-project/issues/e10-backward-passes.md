@@ -50,4 +50,4 @@ materialize either copy (the scale folds into the small GEMM; the residual
 add is an accumulate). Distinct from E4 (#83) chain fusion, which would
 not remove the second GEMM's output pass.
 
-Refs: SeeML Algorithm Review (2026-09-14) §02-A; #83, #66.
+Refs: SeeAI Algorithm Review (2026-09-14) §02-A; #83, #66.

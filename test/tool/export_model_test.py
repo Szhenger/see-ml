@@ -481,7 +481,7 @@ class HfImportTest(unittest.TestCase):
         cfg = hf_tiny_config()
         t = hf_tiny_tensors(cfg)
         # A Qwen2-class epsilon is carried now (P7, #96), not refused, and
-        # the SeeML forward at that epsilon is the checkpoint's forward.
+        # the SeeAI forward at that epsilon is the checkpoint's forward.
         conv = self._check_mapping(hf_tiny_config(eps=1e-6), 4)
         self.assertEqual(conv["norm_eps"], 1e-6)
         self.assertTrue(any("carried" in n for n in conv["notes"]))

@@ -1,9 +1,9 @@
-# The SeeML Tools
+# The SeeAI Tools
 
 ## The human-facing edge of the pipeline
 
 Everything else in the repository is a library. `tool/` is where a person
-actually stands: it's how a model *gets into* SeeML, how the update plan is
+actually stands: it's how a model *gets into* SeeAI, how the update plan is
 *produced*, and how you *look inside* one when something seems wrong. Three
 programs, each a thin, strict shell around the libraries the rest of the
 tree provides.
@@ -105,10 +105,10 @@ The priced number is a floor on the frontier, not the frontier: the
 interpreter dispatches op by op, with no graph compile or fusion. Never
 shipped, never imported by the compiler or the runtime.
 
-**`frontier_run.py`** is the frontier harness (SeeRL F1, #129): real
+**`frontier_run.py`** is the frontier harness (SeeAI F1, #129): real
 `torch.compile` (eager or compiled, CPU or MPS, f32 or bf16) and MLX-LM
 LoRA (mlx_lm's own trainer, bf16 or true f32) runs on the same host, model,
-records, split, adapted set and tokens per step as an emitted SeeML package,
+records, split, adapted set and tokens per step as an emitted SeeAI package,
 each row a JSON in `seeml-bench`'s units (`step_ms`, `tokens_per_s`,
 `it_per_s`, validation loss and accuracy before and after, peak memory,
 warm-up), and `matrix` runs a plan of rows strictly serially and then
@@ -116,7 +116,7 @@ applies the parity checks — the same records by hash, the same tokens per
 step, the adapter parameter count every row must show (a wrong rank is
 refused by name), and the step-0 validation loss the f32 / bf16 rows must
 share. Its module docstring is the list of parity rules, each one a
-comparison that was silently wrong until 2026-09-22 (the tied head SeeML
+comparison that was silently wrong until 2026-09-22 (the tied head SeeAI
 adapts, mlx's uncorrected AdamW, an F32-stored checkpoint loaded as
 "bf16", MLX's TF32-class default matmul, `evaluate`'s dropped tail).
 Tier 2 for the framework rows; `seeml` and `check` are standard library.

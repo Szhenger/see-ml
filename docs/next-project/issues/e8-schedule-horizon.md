@@ -60,9 +60,9 @@ the `steps` passed to `Train()` (`:675`). `min_lr_factor` defaults to
 Outcome parity with the reference recipes: `torch` schedulers and
 `mlx_lm.lora` anneal over the iterations actually run. The frontier
 comparison in `docs/benchmarks.md` compares loss trajectories at equal
-step counts; a SeeML run that silently trains at LR 0 or never anneals
+step counts; a SeeAI run that silently trains at LR 0 or never anneals
 loses that comparison for reasons unrelated to kernels. No throughput
 effect except the wasted steps themselves.
 
-Refs: SeeML Algorithm Review (2026-09-14) §02-A/D, §04; closed #18, #24;
+Refs: SeeAI Algorithm Review (2026-09-14) §02-A/D, §04; closed #18, #24;
 `update_engine_test.cc:811-843` (pins current behaviour).

@@ -80,6 +80,6 @@ mis-baselined until the bench and the package run the same kernel
 configuration. Objective 5 (trustworthy measurement): the gate must
 measure what ships.
 
-Refs: SeeML Algorithm Review (2026-09-14) §02-E, §04; Performance Audit
+Refs: SeeAI Algorithm Review (2026-09-14) §02-E, §04; Performance Audit
 §04 (GEMM table row "default tiles give a 64 KiB B panel" — now known to
 be the fast case); #80, #76, #66, #79.

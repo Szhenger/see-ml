@@ -1,7 +1,7 @@
-# SeeML Technical Documentation
+# SeeAI Technical Documentation
 
 This document enumerates every programming language, framework, library, system
-interface, and piece of tooling used to build SeeML, and describes the compiler
+interface, and piece of tooling used to build SeeAI, and describes the compiler
 and runtime architectures at the level a contributing (or forking) software
 engineer needs. It is a technology specification, not a machine-learning
 tutorial — for the concepts the system implements, see `docs/compiler.md` and

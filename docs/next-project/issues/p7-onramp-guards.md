@@ -63,10 +63,10 @@ hits several at once, and "step 0 equals the source model"
 ## Goal alignment
 
 The torch.compile and MLX comparisons in `docs/benchmarks.md` are run on
-the same pretrained checkpoint; if SeeML's step-0 function is not that
+the same pretrained checkpoint; if SeeAI's step-0 function is not that
 checkpoint, its loss trajectory starts from a handicap the kernels cannot
 recover, and #69's HF import will reproduce all three drifts at scale.
 Prerequisite for an honest frontier comparison, not a throughput item.
 
-Refs: SeeML Algorithm Review (2026-09-14) §02-B/C/E, §04; #69, #86; closed
+Refs: SeeAI Algorithm Review (2026-09-14) §02-B/C/E, §04; #69, #86; closed
 #68 (the SMF v5 RoPE-θ precedent).

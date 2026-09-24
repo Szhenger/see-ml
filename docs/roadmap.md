@@ -269,7 +269,7 @@ review exists to prevent exactly that.
 > by a q/k feature permutation (exact: scores are a dot product over d),
 > `rope_theta` → per-op base, Qwen2 q/k/v biases as `AddBias`, tied /
 > untied head; `--text-corpus` via the checkpoint's tokenizer, `--hf-parity`
-> against `transformers` through a SeeML-semantics NumPy forward.
+> against `transformers` through a SeeAI-semantics NumPy forward.
 > SmolLM-135M: max |Δ logits| 6.4e-05 at S=128. The `RMSNorm eps` line of
 > this phase is refused-unless-accepted until P7 (#96) adds the attribute.
 
@@ -350,7 +350,7 @@ backend-neutral f32).
 > **Status: G1b/G1c PLANNED for v1.3.0 (2026-08-22)** — tracked as
 > milestone *v1.3.0 — GPU fine-tuning* on GitHub: epic #59, phases
 > #60–#64, release gate #65, with #66/#67 on the CPU side. The plan below
-> is priced by the v1.2.4 field report (SeeML CPU 80 tok/s vs MLX GPU
+> is priced by the v1.2.4 field report (SeeAI CPU 80 tok/s vs MLX GPU
 > 1,605 tok/s on SmolLM-135M) and a Metal-vs-CPU GEMM crossover probe run
 > through the G1a harness at the e2e shapes (table in #59).
 

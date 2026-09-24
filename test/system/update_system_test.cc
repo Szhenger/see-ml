@@ -1,5 +1,5 @@
 // =============================================================================
-// SeeML Update Compiler — system verification suite.
+// SeeAI Update Compiler — system verification suite.
 //
 //   1. Step-0 identity: B = 0 ⇒ the compiled update starts as the exact
 //      source model (loss equals the ungrafted model's loss).

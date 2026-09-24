@@ -1,14 +1,14 @@
 ---
-title: "SeeRL F2: certified half-precision GPU GEMMs — bf16/f16 simdgroup-MMA and M5 neural-accelerator kernels as a relaxed opcode family behind a P3 certificate"
+title: "SeeAI F2: certified half-precision GPU GEMMs — bf16/f16 simdgroup-MMA and M5 neural-accelerator kernels as a relaxed opcode family behind a P3 certificate"
 labels: enhancement,efficiency,core-plane,doctrine,frontier-parity
 plane: GPU backend
 origin: Frontier Outlook
-milestone: SeeRL v1.0.0.A
+milestone: SeeAI v1.0.0.A
 priority: P0
 ---
 ## Why
 
-SeeML's Metal backend computes every GEMM in f32 (bf16/int8 are
+SeeAI's Metal backend computes every GEMM in f32 (bf16/int8 are
 *storage* formats widened into f32 panels, #71/#102). MLX runs bf16 or
 TF32 by default and, on M5-class GPUs, can reach the per-core neural
 accelerators. That precision gap — not compiler design — is the largest
@@ -45,6 +45,32 @@ atomics), so two runs of the same relaxed plan stay byte-identical.
    relaxed plan (it already checks certificates).
 5. CPU backend: executes relaxed opcodes by widening to f32 (reference
    semantics), so every plan still runs everywhere.
+
+## Integrated from the 2026-09-24 systems review
+
+Root cause 1, *arithmetic doctrine*: every GEMM is f32 math. The Metal
+per-opcode profile of the SmolLM-135M q8 package
+(`out/frontier-2026-09-22/prof_q8.txt`, `SEEML_METAL_PROFILE`) shows the
+exact kernels are already at the M5's f32 ceiling — the head
+512×49152×576 in 8.46 ms (≈3.4 TFLOP/s), the block GEMMs 512×1536×576 in
+299 µs and 512×576×576 in 122 µs (2.8–3.0 TFLOP/s) — so no further f32
+kernel work can close the 0.36–0.48× bf16 gap; only this issue can. Base
+storage does not move the step (int8 1,802 / bf16 1,756 / f32 1,776
+tok/s), so dequantization is not the bottleneck either. Per training step
+the frozen GEMMs are ≈50 % of kernel time for ≈97 % of the FLOPs: this
+issue's ceiling on the step is ≈2× on that half, after which the LoRA
+family (F7) and the dispatch model (F8) are the majority of what remains.
+
+Status 2026-09-24: plan v18 `kFlagRelaxed`, the Metal 4 tensor-op GEMMs,
+the Accelerate CPU path and the certificate gate at packaging landed in
+#136; the SmolLM-135M certificates priced 419 relaxed GEMMs (gemm.relaxed
+6.2e-3 / 5.5e-3 against 2^-7, validation within 3e-6). **The Metal rows
+are unmeasured**: every row of `out/frontier-2026-09-22/f2_measure/metal.json`
+is exit 1 and marked suspect (the session had no Metal access). The CPU
+row is the only real F2 number so far (F4 carries it). The first
+executable step is therefore the measurement itself, on a host with Metal
+access, with validation off so the profile weights forward and backward
+as a training step does (F9).
 
 ## Acceptance
 

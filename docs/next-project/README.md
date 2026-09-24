@@ -1,16 +1,19 @@
 # The Two-Plane Overhaul — the next development project
 
-*Compiled 2026-09-01 from the two audits of 2026-08-31 — the **SeeML
-Performance Audit** (subsystem-by-subsystem, code-derived) and the **SeeML
+*Compiled 2026-09-01 from the two audits of 2026-08-31 — the **SeeAI
+Performance Audit** (subsystem-by-subsystem, code-derived) and the **SeeAI
 Frontier Bridge** (architecture audit against `torch.compile` CPU fine-tuning
 and MLX-LM LoRA on Apple-Silicon GPU) — plus the Nightly #20–#23 bench-gate
 incident analysis. This document merges the deliverables of both reports into
 the objectives of one project, and partitions every finding by its root
 cause. The issue bodies live in [`issues/`](issues/);
 [`tool/create_next_project.sh`](../../tool/create_next_project.sh)
-materializes them as GitHub Issues and a GitHub Project board. The six
-`f*.md` bodies added on 2026-09-18 are the **SeeRL v1.0.0.A** milestone
-(F1–F6, from the Frontier Outlook), reconciled by the same script.*
+materializes them as GitHub Issues and a GitHub Project board. The nine
+`f*.md` bodies — six added on 2026-09-18 (F1–F6, from the Frontier
+Outlook) and three on 2026-09-24 (F7–F9, from the systems review of the
+2026-09-22 frontier data, which also folded its findings into F2–F5) —
+are the **SeeAI v1.0.0.A** milestone, the first under the SeeAI name,
+reconciled by the same script.*
 
 ## The paradigm change
 
@@ -140,7 +143,7 @@ Each body is a Markdown file with a front matter the script reads:
 | `labels` | yes | comma-separated; a plane label is kept at the script's colour table, any other label is created grey when missing |
 | `plane`, `priority` | yes | the board's `Plane` / `Priority` single-select values |
 | `origin` | no | the board's `Origin` value (`Frontier Outlook` for F1–F6); blank leaves the field unset |
-| `milestone` | no | the issue's milestone, upserted by title (`SeeRL v1.0.0.A` for F1–F6) |
+| `milestone` | no | the issue's milestone, upserted by title (`SeeAI v1.0.0.A` for F1–F9) |
 
 What the file owns, and what it does not:
 
@@ -153,7 +156,7 @@ What the file owns, and what it does not:
 - **closed issues are history** — their body, labels and milestone are
   left alone and only their board fields are reconciled.
 
-Then it creates or reuses the **“SeeML Two-Plane Overhaul”** GitHub
+Then it creates or reuses the **“SeeAI Two-Plane Overhaul”** GitHub
 Project with `Plane` / `Origin` / `Priority` fields — their option sets
 are the union of what the bodies and the roadmap rows name, and an option
 an existing field lacks is printed as an `ACTION:` line for the web UI,

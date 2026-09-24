@@ -1,12 +1,12 @@
-# SeeML Binary Formats
+# SeeAI Binary Formats
 
 ## Why bytes, and how to read this document
 
-Every artifact SeeML produces or consumes — models, corpora, plans, checkpoints — is a binary file with a fixed, documented layout. Why binary, when JSON exists? Because these files are mostly *tensors* — n-dimensional arrays of floats, millions of them — and because the device-side loader must be tiny, allocation-conscious, and paranoid. A format you can parse with bounds-checked `memcpy` is a format you can *prove* things about.
+Every artifact SeeAI produces or consumes — models, corpora, plans, checkpoints — is a binary file with a fixed, documented layout. Why binary, when JSON exists? Because these files are mostly *tensors* — n-dimensional arrays of floats, millions of them — and because the device-side loader must be tiny, allocation-conscious, and paranoid. A format you can parse with bounds-checked `memcpy` is a format you can *prove* things about.
 
 Before the individual formats, three conventions that apply everywhere, each worth understanding once:
 
-- **Little-endian, always.** A multi-byte integer like `0x31464D53` is stored least-significant byte first. Rather than swap bytes on big-endian machines, the loaders simply refuse to compile there (`static_assert`) — a deliberate simplification: every target SeeML cares about is little-endian, so byte-swapping code would be untested dead weight.
+- **Little-endian, always.** A multi-byte integer like `0x31464D53` is stored least-significant byte first. Rather than swap bytes on big-endian machines, the loaders simply refuse to compile there (`static_assert`) — a deliberate simplification: every target SeeAI cares about is little-endian, so byte-swapping code would be untested dead weight.
 - **Packed layouts.** Every multi-byte integer is packed without padding; where a C struct is shown, it is `#pragma pack(1)` and part of the ABI. Normally compilers insert invisible padding between struct fields for alignment; packing turns the struct into an exact byte-for-byte contract, so `sizeof` is the wire size and a `static_assert` can pin it forever.
 - **Magic numbers.** Each format opens with a four-byte signature — read the little-endian `u32` as ASCII and you get the name back (`"SMF1"`, `"SDS1"`, `"SEEU"`, `"SEKP"`). It's the file introducing itself, and it means a mix-up (feeding a corpus where a model belongs) dies on byte 0 with a clear message, not on byte 40,000 with a weird one.
 
@@ -30,13 +30,13 @@ Two constants, one XOR, one multiply per byte. Any single flipped bit avalanches
 For whole-model identity there's a faster sibling, **`ContentHash64`** (`source/identity/hash.h`), which fixes FNV's one weakness — it's inherently serial, one byte after another — with two layers of parallelism:
 
 1. **Striping (instruction-level):** run 8 independent FNV lanes, byte i feeding lane i mod 8, each lane seeded differently (the offset basis XOR a golden-ratio multiple, so lanes never collide). Eight independent multiply chains keep a modern core's pipeline full — roughly 8× the throughput of the serial loop.
-2. **Chunking (thread-level):** split the input into 1 MiB chunks, hash each chunk (with the striped kernel) in parallel, then fold the per-chunk digests together *in chunk order*, finishing with the total length. Because chunk boundaries depend only on the input *size* — never the thread count — the digest is bitwise-identical on one core or eight, in keeping with SeeML's determinism rule ([runtime.md](runtime.md)).
+2. **Chunking (thread-level):** split the input into 1 MiB chunks, hash each chunk (with the striped kernel) in parallel, then fold the per-chunk digests together *in chunk order*, finishing with the total length. Because chunk boundaries depend only on the input *size* — never the thread count — the digest is bitwise-identical on one core or eight, in keeping with SeeAI's determinism rule ([runtime.md](runtime.md)).
 
 Note that `ContentHash64` of some bytes deliberately does **not** equal plain `Fnv1a64` of the same bytes — they are distinct identity contracts, and the format version bumps below track which one a field uses.
 
-Now, the caveat, stated as bluntly as possible: **these hashes detect accidents, not adversaries.** FNV is trivially forgeable by anyone who wants to; there are no keys and no signatures here. SeeML's hashes answer "is this the same file, uncorrupted?" — never "do I trust whoever sent this?" Authenticate plans in your update transport (TLS, signed manifests — whatever your deployment already uses for software updates).
+Now, the caveat, stated as bluntly as possible: **these hashes detect accidents, not adversaries.** FNV is trivially forgeable by anyone who wants to; there are no keys and no signatures here. SeeAI's hashes answer "is this the same file, uncorrupted?" — never "do I trust whoever sent this?" Authenticate plans in your update transport (TLS, signed manifests — whatever your deployment already uses for software updates).
 
-## SMF — SeeML Model Format (`.smf`, v6)
+## SMF — SeeAI Model Format (`.smf`, v6)
 
 The dependency-free model container consumed by `seeml-update-compile` (source and teacher models), produced by `tool/export_model.py`. It answers exactly two questions: *what are the tensors?* and *what is the computation graph over them?*
 
@@ -81,7 +81,7 @@ A few design choices worth noticing:
 
 `LoadSmf` records the whole file's `ContentHash64` as the model's identity; the compiled plan carries it, and commit refuses any file that doesn't match.
 
-## SDS — SeeML Dataset (`.sds`, v2)
+## SDS — SeeAI Dataset (`.sds`, v2)
 
 The corpus container — deliberately the simplest format in the family, because a dataset is just samples:
 

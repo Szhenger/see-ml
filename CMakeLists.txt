@@ -59,7 +59,7 @@ add_library(seeml_parallel STATIC
 target_link_libraries(seeml_parallel PUBLIC Threads::Threads)
 
 # ==============================================================================
-# Target 1: SIR — the SeeML Intermediate Representation (+ shared utilities)
+# Target 1: SIR — the SeeAI Intermediate Representation (+ shared utilities)
 # ==============================================================================
 
 add_library(seeml_sir STATIC

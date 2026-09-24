@@ -2,7 +2,7 @@
 #define SEEML_COMPILER_FRONTEND_REPRESENTATION_SIR_H_
 
 // =============================================================================
-// SIR — the SeeML intermediate representation. This is the façade header:
+// SIR — the SeeAI intermediate representation. This is the façade header:
 // consumers include it and get the whole representation; each core
 // definition lives in its own header/impl pair so a debugger, a diff, or a
 // stack trace points at exactly one group:

@@ -2,7 +2,7 @@
 
 What is held here without a framework or a checkpoint (tier 0 / 1):
   * the adapted-set rule: the adapter parameter count every row must show,
-    for the frameworks and for SeeML (whose k/v repeat differs), and that a
+    for the frameworks and for SeeAI (whose k/v repeat differs), and that a
     wrong rank is refused loudly;
   * the parity checks: different records, different tokens per step, a
     step-0 validation loss that disagrees among the f32 / bf16 rows — each a
@@ -46,7 +46,7 @@ def a_row(system, precision, **over):
 
 class AdaptedSetTest(unittest.TestCase):
     def test_the_counts_the_2026_09_22_harness_measured(self):
-        # SmolLM-135M at r8: torch / MLX 2,840,064; SeeML 3,024,384 (k/v
+        # SmolLM-135M at r8: torch / MLX 2,840,064; SeeAI 3,024,384 (k/v
         # repeated 3 -> 9 heads). Qwen2.5-0.5B: 5,621,760 / 5,916,672.
         self.assertEqual(fr.expected_adapter_params(SMOLLM, 8), 2840064)
         self.assertEqual(fr.expected_adapter_params(SMOLLM, 8, seeml=True), 3024384)

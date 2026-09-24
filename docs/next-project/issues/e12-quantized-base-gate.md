@@ -48,10 +48,10 @@ distillation target.
 ## Goal alignment
 
 MLX-LM's QLoRA path fuses dequant into the matmul with group-wise scales
-and merges onto the quantized weights it trained against; SeeML's frontier
-config is a q8 base (#63 item 3). The comparison is only fair if SeeML's
+and merges onto the quantized weights it trained against; SeeAI's frontier
+config is a q8 base (#63 item 3). The comparison is only fair if SeeAI's
 gate proves the function it ships and its quantization error is in the
 same class as MLX's group-wise scheme.
 
-Refs: SeeML Algorithm Review (2026-09-14) §02-B; #63; `docs/compiler.md`
+Refs: SeeAI Algorithm Review (2026-09-14) §02-B; #63; `docs/compiler.md`
 "Quantization review".

@@ -1,9 +1,9 @@
-# The SeeML Runtime
+# The SeeAI Runtime
 
 ## A virtual machine whose instruction set is *training*
 
 A CPU fetches an instruction, decodes it, executes it, repeats — and nothing
-says the machine doing that must be hardware. SeeML's runtime is a virtual
+says the machine doing that must be hardware. SeeAI's runtime is a virtual
 machine whose opcodes happen to be forward passes, gradients, and optimizer
 steps. It is the **zero-dependency** half of the product: the code vendored
 into every emitted package and run on the device. No framework, no allocator

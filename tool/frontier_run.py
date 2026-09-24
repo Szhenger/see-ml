@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""The frontier harness (SeeRL F1, #129): real `torch.compile` and MLX-LM LoRA
+"""The frontier harness (SeeAI F1, #129): real `torch.compile` and MLX-LM LoRA
 runs on the same host, model, corpus, split, adapted set and tokens per step
-as SeeML's emitted package — the measurement the Frontier Outlook's
+as SeeAI's emitted package — the measurement the Frontier Outlook's
 asterisks became on 2026-09-22 — as one tool with the parity rules pinned.
 
 Subcommands (each writes one JSON report in seeml-bench's units):
@@ -27,13 +27,13 @@ was written down (the 2026-09-22 Frontier Harness report, §6):
      `export_model.py --text-corpus`; the tail floor(0.1 n) records held out
      — exactly `dataset.cc`. Same ids in every stack, checked by hash.
   2. Adapted set: the seven projections of every layer AND the LM head —
-     SeeML's `--hf` importer writes the tied head as its own weight and
+     SeeAI's `--hf` importer writes the tied head as its own weight and
      adapts it. Rank and alpha/r are the plan's. The adapter parameter
-     count of every row must equal the SeeML report's up to the k/v
-     expansion SeeML's GQA-to-MHA repeat implies (`expected_adapter_params`).
+     count of every row must equal the SeeAI report's up to the k/v
+     expansion SeeAI's GQA-to-MHA repeat implies (`expected_adapter_params`).
   3. Optimizer: AdamW with BIAS CORRECTION (mlx.optimizers.AdamW defaults to
      none, which triples the first update), weight decay 0.01, constant LR,
-     no clipping (SeeML clips per tensor, so any clip breaks parity).
+     no clipping (SeeAI clips per tensor, so any clip breaks parity).
   4. Precision named on every row and cast EXPLICITLY: SmolLM-135M's
      safetensors are stored F32 under a bfloat16 config, and mlx_lm loads
      what is stored; an MLX "f32" row is true f32 only under
@@ -45,7 +45,7 @@ was written down (the 2026-09-22 Frontier Harness report, §6):
      mlx_lm's own `evaluate` drops the ragged tail of the validation set, so
      the harness scores the validation set itself, over every record.
   6. Timing: torch's median step after a stated warm-up (the compile is
-     reported, not hidden); MLX's `It/sec` from its own trainer; SeeML's
+     reported, not hidden); MLX's `It/sec` from its own trainer; SeeAI's
      steps-regression slope (hi - lo and hi - quality) on the package binary;
      `torch.set_num_threads` pinned to SEEML_THREADS's value.
 
@@ -100,7 +100,7 @@ def records_digest(records):
 
 def sds_records_digest(path):
     """The same digest over a token corpus (SDS v2, i32 records) — how a
-    SeeML row proves it trained on the frameworks' records. Standard
+    SeeAI row proves it trained on the frameworks' records. Standard
     library only."""
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from seeml import formats
@@ -126,7 +126,7 @@ def hf_geometry(model_dir):
 
 def expected_adapter_params(geom, rank, seeml=False):
     """LoRA parameters r*(K + M) over the seven projections and the head.
-    SeeML repeats grouped k/v heads to one per query head, so its k and v
+    SeeAI repeats grouped k/v heads to one per query head, so its k and v
     projections are D -> D where the frameworks' are D -> D_kv."""
     d, h, kvh, ffn, v, layers = (geom["dim"], geom["heads"], geom["kv_heads"],
                                  geom["ffn"], geom["vocab"], geom["layers"])

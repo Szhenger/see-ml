@@ -1,4 +1,4 @@
-# The SeeML Source Language & Substrate
+# The SeeAI Source Language & Substrate
 
 ## Why isn't this under `compiler/`?
 
@@ -12,7 +12,7 @@ without depending on each other.
 
 ```
 source/
-  language/               the SMF model container (SeeML Model Format)
+  language/               the SMF model container (SeeAI Model Format)
     model_format          the parsed structs + on-disk layout constants
   plan/                   the compiler <-> runtime ABI (façade: update_types.h)
     config                the compilation request (UpdateConfig)

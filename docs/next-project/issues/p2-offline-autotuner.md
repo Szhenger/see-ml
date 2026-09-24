@@ -8,7 +8,7 @@ priority: P2
 ## Root cause
 
 `torch.compile` closes schedule-selection by **benchmarking at compile
-time** (`max-autotune`). SeeML derives tilings analytically
+time** (`max-autotune`). SeeAI derives tilings analytically
 (`SuggestGemmTiling`, pure arithmetic against detected cache sizes,
 `native_emitter.cc:462-463`) — and the in-tree UCB1 bandit
 (`AutotuneGemmTiling`) is **dead code**: no production path calls it, it

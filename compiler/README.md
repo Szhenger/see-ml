@@ -1,10 +1,10 @@
-# The SeeML Compiler
+# The SeeAI Compiler
 
 ## What Does it Mean to *Compile* Training?
 
 Ordinarily, training a model is something you *run* — a framework interprets
 your graph, allocates memory as it goes, and dispatches kernels on the fly.
-SeeML's compiler moves all of that to the build host and decides it *once*:
+SeeAI's compiler moves all of that to the build host and decides it *once*:
 it takes a frozen model plus a configuration ("adapt this with rank-8 LoRA,
 cross-entropy, AdamW, 1,000 steps") and emits a `.seeu` **update plan** —
 three flat instruction streams and every byte of memory layout the device
@@ -40,7 +40,7 @@ compiler/
 ## The Shape of the Pipeline
 
 Read the folders top to bottom and you have the pipeline. **`frontend/`**
-turns untrusted SMF (SeeML Model Format) bytes into SIR — the SSA
+turns untrusted SMF (SeeAI Model Format) bytes into SIR — the SSA
 intermediate representation every later stage agrees on — refusing
 malformed files and models that provably can't fit in memory.
 **`analysis/`** is where the training program is *built*: LoRA adapters are
