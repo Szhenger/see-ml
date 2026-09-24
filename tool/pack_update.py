@@ -65,7 +65,7 @@ PLAN_MAGIC = formats.SEEU_MAGIC.to_bytes(4, "little")
 DEFAULT_PAGE_ALIGN = 16384
 
 # The two compile lines the compiler's build.sh template can carry for the
-# embedded TU (BuildScript in compiler/backend/trainer/native_emitter.cc;
+# embedded TU (BuildScript in compiler/backend/packaging/native_emitter.cc;
 # test/tool/pack_update_test.py asserts both appear there verbatim). A
 # script that lacks the stub line — one a pre-P1 compiler emitted, whose
 # only line is the decimal one — gets that one line rewritten, so the packer

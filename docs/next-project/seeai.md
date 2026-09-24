@@ -37,6 +37,8 @@ prints the measured step beside it, and the ratio is the utilization.
 
 ## §3 Frontend — six sub-subsystems on two paths
 
+*The directory moves of §3–§5 landed on 2026-09-24 (the "today" columns describe the tree before them); the behavioral work of S1, S5 and S6 is unchanged.*
+
 | stage | role | today | artifact |
 |---|---|---|---|
 | **ingressor** | bounded SMF reader, weight copy, content hash | `frontend/ingressor/model_reader.cc` | decoded model + hash |
@@ -47,8 +49,7 @@ prints the measured step beside it, and the ratio is the utilization.
 | **validation** | "what counts": the held-out split (seeded partition after dedup, or `--val-data` through the same tokenizer; seed, indices and hashes into the plan) and the loss mask (chat template from the SMF tokenizer section; response positions are targets) | new; today a runtime `--val-frac` | two canonical corpora with masks |
 
 Shared infrastructure beside the six, not stages: `representation/` (SIR),
-`operator/` (OpBuilder, also used by analysis). `model_writer` is egress and
-moves out of `ingressor/`.
+`operator/` (OpBuilder, also used by analysis). `model_writer` is egress and moves to `egressor/` (the ingressor's inverse).
 
 Frontend doctrine lines:
 - The accountant's footprint is a **lower bound**; the backend's arena is

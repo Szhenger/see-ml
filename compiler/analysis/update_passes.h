@@ -7,23 +7,25 @@
 // lives in its own directory so a stack trace or a diff lands in exactly
 // one concern:
 //
-//   updater/   pass management + structural lowering:
-//              PassManager (runs SIR passes under the Block::verify
-//              invariant gate), ConvLowering (conv2d -> im2col-GEMM form),
-//              DeadCodeElimination (the optimization phase's sweep: proves
-//              the emitted programs carry no unreferenced compute)
-//   algebra/   the adapter linear algebra and kernel fusion:
-//              LoraGrafter (C = X@W  ->  C' = X@W + (α/r)·(X@A)@B),
-//              MergeBuilder (fused Δ = (α/r)·A@B via sc_low.gemm_acc),
-//              GemmEpilogueFuser (GEMM -> AddBias -> activation chains
-//              folded into fused write-back epilogues where the use-lists
-//              prove no other reader — plan v5 instruction flags)
-//   calculus/  the SGD machinery:
-//              TrainableAutodiff (reverse-mode AD pruned to the trainable
-//              set), OptimizerSynthesizer (SGD / AdamW step synthesis)
-//   reviewer/  model preprocessing that configures the backend:
-//              SelectQuantizedWeights (which frozen weights pack as int8
-//              rodata, and at what per-tensor scale)
+// Each directory is named for the field of mathematics that studies what it
+// does (docs/next-project/seeai.md §4):
+//
+//   pass_manager   runs SIR passes under the Block::verify invariant gate
+//   algebra/       value-preserving rewrites: LoraGrafter (C = X@W  ->
+//                  C' = X@W + (α/r)·(X@A)@B), MergeBuilder (fused
+//                  Δ = (α/r)·A@B via sc_low.gemm_acc), GemmEpilogueFuser /
+//                  GemmAddendFuser / ElementwiseChainFuser (chains folded
+//                  where the use-lists prove no other reader), RopeTable,
+//                  ConvLowering (conv2d -> im2col-GEMM form)
+//   calculus/      TrainableAutodiff (reverse-mode AD pruned to the
+//                  trainable set)
+//   statistics/    decisions from measured numbers: SelectQuantizedWeights
+//                  (which frozen weights pack as int8 rodata, at what
+//                  scale), AttentionTiling (the attention family from the
+//                  step-0 footprint)
+//   topology/      DeadCodeElimination (reachability: proves the emitted
+//                  programs carry no unreferenced compute)
+//   optimization/  OptimizerSynthesizer (SGD / AdamW step synthesis)
 //
 // Op dialect used (matching sir.h's mnemonic prefixes):
 //   sc_mem.weight  frozen base/teacher weight (rodata); attrs: smf_offset
@@ -35,16 +37,16 @@
 
 #include "compiler/analysis/algebra/epilogue_fuser.h" // IWYU pragma: export
 #include "compiler/analysis/algebra/addend_fuser.h"   // IWYU pragma: export
-#include "compiler/analysis/algebra/attention_tiling.h"  // IWYU pragma: export
+#include "compiler/analysis/statistics/attention_tiling.h"  // IWYU pragma: export
 #include "compiler/analysis/algebra/chain_fuser.h"    // IWYU pragma: export
 #include "compiler/analysis/algebra/rope_table.h"     // IWYU pragma: export
 #include "compiler/analysis/algebra/lora_grafter.h"   // IWYU pragma: export
 #include "compiler/analysis/algebra/merge_builder.h"  // IWYU pragma: export
 #include "compiler/analysis/calculus/autodiff.h"      // IWYU pragma: export
-#include "compiler/analysis/calculus/optimizer.h"     // IWYU pragma: export
-#include "compiler/analysis/reviewer/quantization.h"  // IWYU pragma: export
-#include "compiler/analysis/updater/conv_lowering.h"  // IWYU pragma: export
-#include "compiler/analysis/updater/dce.h"            // IWYU pragma: export
-#include "compiler/analysis/updater/pass_manager.h"   // IWYU pragma: export
+#include "compiler/analysis/optimization/optimizer.h"     // IWYU pragma: export
+#include "compiler/analysis/statistics/quantization.h"  // IWYU pragma: export
+#include "compiler/analysis/algebra/conv_lowering.h"  // IWYU pragma: export
+#include "compiler/analysis/topology/dce.h"            // IWYU pragma: export
+#include "compiler/analysis/pass_manager.h"   // IWYU pragma: export
 
 #endif  // SEEML_COMPILER_ANALYSIS_UPDATE_PASSES_H_

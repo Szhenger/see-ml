@@ -59,7 +59,7 @@ non-Apple translation unit references a Metal symbol). MSL kernels are
 **not** checked in as `.metal` files: the backend's kernel library is a C++
 string literal owned by the runtime (`runtime/executor/metal_kernels.h`, so
 CPU and GPU kernel semantics are versioned together), the harness's four
-GEMMs are emitted by `compiler/backend/trainer/kernel_emitter.cc`, and both
+GEMMs are emitted by `compiler/backend/architecture/kernel_emitter.cc`, and both
 are JIT-compiled at runtime via `newLibraryWithSource:options:error:` — no
 Metal toolchain is needed to build anything.
 
@@ -67,7 +67,7 @@ Metal toolchain is needed to build anything.
 
 Both build scripts are `#!/bin/sh` with `set -e` — POSIX, not bash: the
 in-tree driver `build/build.sh` and the *generated* per-package `build.sh`
-(emitted from a template in `compiler/backend/trainer/native_emitter.cc`,
+(emitted from a template in `compiler/backend/packaging/native_emitter.cc`,
 which uses POSIX `${VAR-default}` expansion for the tile-flag override).
 
 ### Python 3
@@ -128,7 +128,7 @@ digests (`test/tool/demo_digests.json`).
 |---|---|---|
 | `std::thread` + `<mutex>`/`<condition_variable>`/`<atomic>` | `source/parallel/parallel_for.cc`, `runtime/feeder/batch_pipeline.cc` | Worker pool and feeder thread. No direct `pthread_*` calls; `-pthread` at compile and link. |
 | POSIX file I/O: `open`/`write`/`fsync`/`close`, `rename`, directory fsync, `flock(LOCK_EX\|LOCK_NB)`, `fseeko`, `getpid` | `runtime/custodian/durable_io.cc` | Durable sidecar-then-atomic-rename writes, commit lock, random-access durable edits. Win32 mirror (`CreateFileA`, `MoveFileExA(MOVEFILE_REPLACE_EXISTING\|MOVEFILE_WRITE_THROUGH)`, …) exists but is not CI-tested. |
-| `sysctlbyname("hw.l1dcachesize"/"hw.l2cachesize"/"hw.physicalcpu"/"hw.cachelinesize"/"hw.memsize")` | `compiler/backend/architecture/host_arch.cc`, `compiler/frontend/ingressor/resource_analyzer.cc` | Apple host cache/memory detection for GEMM tiling and memory gating. |
+| `sysctlbyname("hw.l1dcachesize"/"hw.l2cachesize"/"hw.physicalcpu"/"hw.cachelinesize"/"hw.memsize")` | `compiler/backend/architecture/host_arch.cc`, `compiler/frontend/accountant/resource_analyzer.cc` | Apple host cache/memory detection for GEMM tiling and memory gating. |
 | `sysconf(_SC_LEVEL*_CACHE*, _SC_NPROCESSORS_ONLN, _SC_PHYS_PAGES)` + sysfs `/sys/devices/system/cpu/*/topology/` scan | same | Linux equivalents (topology scan is Linux-only). Fallback: `std::thread::hardware_concurrency()`. |
 | `std::aligned_alloc(64, …)` | `runtime/engine/update_engine.cc` | The single arena allocation. (Unavailable on MSVC — one reason Windows is untested.) |
 | `isatty(1)`, `localtime_r`/`localtime_s` | test runner, logger | Color gating, timestamps. |
@@ -192,33 +192,40 @@ stub elsewhere, so a Linux package is byte-for-byte what it was.
 Layout is subsystems-by-role: `frontend/` → `analysis/` → `backend/` →
 `driver/`, plus `diagnostics/`.
 
-- **Frontend.** `ingressor/` reads and writes the SMF model container with a
+- **Frontend.** `ingressor/` reads the SMF model container with a
   never-trust-a-file discipline (bounds and arithmetic-overflow checks before
-  any allocation) and a `resource_analyzer` that gates infeasible memory
-  footprints against host RAM. `representation/` is **SIR**, the in-memory
-  IR: typed values, operations with string mnemonics (e.g. `sc_high.conv2d`),
-  attribute maps, and blocks; operator builders live in `operator/`.
-  `parser/` performs semantic analysis and shape inference, turning an
-  ingested container into a verified SIR graph.
-- **Analysis.** A `pass_manager` that re-verifies invariants between passes.
-  Passes: `conv_lowering` (conv2d → im2col + GEMM rewrite; grouped/dilated
-  forms rejected), `dce`, `epilogue_fuser`, `lora_grafter` (adapter
-  insertion), `merge_builder` (the delta-materialization program),
-  `autodiff` (reverse-mode differentiation over SIR), `optimizer` synthesis
-  (SGD/AdamW as instructions), and a `quantization` reviewer (int8 frozen
-  base).
+  any allocation); `egressor/` is its inverse, the writer tools and tests use; `tokenization/` is the training-data ingress (raw text → canonical SDS; S2 #148);
+  `accountant/` holds the `resource_analyzer` that gates infeasible memory
+  footprints against host RAM as a lower bound. `representation/` is
+  **SIR**, the in-memory IR: typed values, operations with string mnemonics
+  (e.g. `sc_high.conv2d`), attribute maps, and blocks; operator builders
+  live in `operator/`. `topology/` performs the whole-graph and per-op
+  semantic checks (`sema`); `computation/` turns the checked op list into
+  the verified SIR graph (`parser`, `value_resolver`).
+- **Analysis.** A `pass_manager` at the subsystem root that re-verifies
+  invariants between passes; the directories are named for the field of
+  mathematics that studies what they do. `algebra/`: `conv_lowering` (conv2d
+  → im2col + GEMM rewrite; grouped/dilated forms rejected), `epilogue_fuser`
+  / `addend_fuser` / `chain_fuser`, `lora_grafter` (adapter insertion),
+  `merge_builder` (the delta-materialization program), `rope_table`.
+  `calculus/`: `autodiff` (reverse-mode differentiation over SIR).
+  `statistics/`: the `quantization` review (int8 frozen base) and
+  `attention_tiling` (the attention family from the step-0 footprint).
+  `topology/`: `dce`. `optimization/`: `optimizer` synthesis (SGD/AdamW as
+  instructions).
 - **Backend.** `architecture/host_arch` detects cache sizes, core counts
   and the CPU model (§2), forms the host key a kernel-policy table is keyed
   on, and derives the analytic GEMM tiling (a measured arm, not a
-  decision); `tuner/kernel_policy_table` reads the host-keyed table the
-  offline tuner (`tool/autotune.py`) wrote — a strict purpose-built JSON
+  decision); `architecture/kernel_policy_table` reads the host-keyed table
+  the offline tuner (`tool/autotune.py`) wrote — a strict purpose-built JSON
   reader — and resolves the CPU GEMM tiles the driver writes into the plan
   header (v11): `--gemm-tiles`, then the table, then the runtime defaults;
-  `trainer/` binds every tensor to a compile-time
-  arena layout (`arena_binder`), lowers SIR to the fixed ~35-opcode
-  instruction ISA (`instruction_lowering`), emits MSL kernel source
-  (`kernel_emitter`), and emits the self-contained package
-  (`native_emitter`).
+  `architecture/kernel_emitter` emits MSL kernel source for the tuner's
+  tests. `allocation/arena_binder` binds every tensor to a compile-time
+  arena layout; `selection/instruction_lowering` lowers SIR to the fixed
+  ~35-opcode instruction ISA; `packaging/native_emitter` emits the
+  self-contained package. Plan assembly (persistent image, sections, seal)
+  is still sequenced inside the driver.
 - **Driver.** `update_compiler.cc` orchestrates the phases under explicit
   checked contracts (`contract.cc`).
 - **Diagnostics.** Six header-only process modules (`tokenizing`, `parsing`,
@@ -288,7 +295,7 @@ raise the oldest-readable floor; newer-than-reader is always rejected):
 |---|---|---|---|
 | SMF (model container) | `"SMF1"` | v6 (readers accept v1–v6; writers emit the lowest version the model needs) | `source/language/model_format.*`, `compiler/frontend/ingressor/model_{reader,writer}.cc`, Python writer in `tool/export_model.py` |
 | SDS (dataset) | `"SDS1"` | v1 (feature rows) / v2 (token records) | `runtime/feeder/dataset.{h,cc}`, Python writer |
-| SEEU (update plan) | `"SEEU"` | v18, oldest-readable v4 | written by `compiler/backend/trainer/*` + driver; read/validated by `runtime/validator` + `runtime/engine`; disassembled by `seeml-seeu-dump` |
+| SEEU (update plan) | `"SEEU"` | v18, oldest-readable v4 | written by `compiler/backend/*` + driver; read/validated by `runtime/validator` + `runtime/engine`; disassembled by `seeml-seeu-dump` |
 | SEKP (checkpoint) | `"SEKP"` | v5, oldest-readable v3 | `runtime/custodian/checkpoint_format.h`, `runtime/custodian/checkpoint.cc` |
 
 The Python plane restates these layouts exactly once, in

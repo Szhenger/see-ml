@@ -91,14 +91,14 @@ class SeamTest(unittest.TestCase):
     a checkout)."""
 
     def test_build_script_lines_match_the_emitters_template(self):
-        emitter = repo_file("compiler/backend/trainer/native_emitter.cc")
+        emitter = repo_file("compiler/backend/packaging/native_emitter.cc")
         # C++ string literals: the trailing newline is spelled \n.
         for line in (pu.STUB_COMPILE_LINE, pu.DECIMAL_COMPILE_LINE):
             self.assertIn(line[:-1] + "\\n", emitter, line)
         self.assertIn("if [ -f update_plan_embedded.S ]; then", emitter)
 
     def test_stub_symbols_match_the_generated_drivers_externs(self):
-        emitter = repo_file("compiler/backend/trainer/native_emitter.cc")
+        emitter = repo_file("compiler/backend/packaging/native_emitter.cc")
         self.assertIn("extern const unsigned char kSeemlUpdatePlan[];", emitter)
         self.assertIn("extern const size_t kSeemlUpdatePlanSize;", emitter)
         stub = pu.render_stub(16384)

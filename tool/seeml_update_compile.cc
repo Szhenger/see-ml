@@ -67,8 +67,8 @@
 #include <vector>
 
 #include "compiler/backend/architecture/host_arch.h"
-#include "compiler/backend/trainer/native_emitter.h"
-#include "compiler/backend/tuner/kernel_policy_table.h"
+#include "compiler/backend/packaging/native_emitter.h"
+#include "compiler/backend/architecture/kernel_policy_table.h"
 #include "compiler/driver/update_compiler.h"
 #include "compiler/frontend/ingressor/model_reader.h"
 #include "source/identity/version.h"

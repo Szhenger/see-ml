@@ -41,33 +41,33 @@ compile compiler/frontend/operator/activation.cc      op_activation.o
 compile compiler/diagnostics/logger.cc        logger.o
 compile source/language/model_format.cc model_format.o
 compile compiler/frontend/ingressor/model_reader.cc model_reader.o
-compile compiler/frontend/ingressor/model_writer.cc model_writer.o
-compile compiler/frontend/ingressor/resource_analyzer.cc resource_analyzer.o
+compile compiler/frontend/egressor/model_writer.cc model_writer.o
+compile compiler/frontend/accountant/resource_analyzer.cc resource_analyzer.o
 compile source/parallel/parallel_for.cc       parallel_for.o
-compile compiler/frontend/parser/value_resolver.cc value_resolver.o
-compile compiler/frontend/parser/sema.cc      sema.o
-compile compiler/frontend/parser/parser.cc    parser.o
-compile compiler/analysis/updater/pass_manager.cc  pass_manager.o
-compile compiler/analysis/updater/conv_lowering.cc conv_lowering.o
-compile compiler/analysis/updater/dce.cc           dce.o
+compile compiler/frontend/computation/value_resolver.cc value_resolver.o
+compile compiler/frontend/topology/sema.cc      sema.o
+compile compiler/frontend/computation/parser.cc    parser.o
+compile compiler/analysis/pass_manager.cc  pass_manager.o
+compile compiler/analysis/algebra/conv_lowering.cc conv_lowering.o
+compile compiler/analysis/topology/dce.cc           dce.o
 compile compiler/analysis/algebra/epilogue_fuser.cc epilogue_fuser.o
 compile compiler/analysis/algebra/rope_table.cc     rope_table.o
 compile compiler/analysis/algebra/chain_fuser.cc    chain_fuser.o
 compile compiler/analysis/algebra/addend_fuser.cc   addend_fuser.o
-compile compiler/analysis/algebra/attention_tiling.cc attention_tiling.o
+compile compiler/analysis/statistics/attention_tiling.cc attention_tiling.o
 compile compiler/analysis/algebra/lora_grafter.cc  lora_grafter.o
 compile compiler/analysis/algebra/merge_builder.cc merge_builder.o
 compile compiler/analysis/calculus/autodiff.cc     autodiff.o
-compile compiler/analysis/calculus/optimizer.cc    optimizer_synth.o
-compile compiler/analysis/reviewer/quantization.cc quantization.o
+compile compiler/analysis/optimization/optimizer.cc    optimizer_synth.o
+compile compiler/analysis/statistics/quantization.cc quantization.o
 compile compiler/backend/architecture/host_arch.cc host_arch.o
-compile compiler/backend/tuner/kernel_policy_table.cc kernel_policy_table.o
-compile compiler/backend/trainer/arena_binder.cc arena_binder.o
-compile compiler/backend/trainer/instruction_lowering.cc instruction_lowering.o
-compile compiler/backend/trainer/kernel_emitter.cc kernel_emitter.o
+compile compiler/backend/architecture/kernel_policy_table.cc kernel_policy_table.o
+compile compiler/backend/allocation/arena_binder.cc arena_binder.o
+compile compiler/backend/selection/instruction_lowering.cc instruction_lowering.o
+compile compiler/backend/architecture/kernel_emitter.cc kernel_emitter.o
 compile compiler/driver/contract.cc           driver_contract.o
 compile compiler/driver/update_compiler.cc    update_compiler.o
-compile compiler/backend/trainer/native_emitter.cc native_emitter.o
+compile compiler/backend/packaging/native_emitter.cc native_emitter.o
 compile runtime/executor/gemm.cc              rt_gemm.o
 compile runtime/executor/elementwise.cc       rt_elementwise.o
 compile runtime/executor/activation.cc        rt_activation.o
@@ -175,9 +175,9 @@ for suite in \
     compiler/frontend/resource_analyzer_test \
     compiler/frontend/sir_test compiler/frontend/operator_test \
     compiler/frontend/parser_test \
-    compiler/analysis/update_passes_test compiler/analysis/updater_test \
-    compiler/analysis/reviewer_test \
-    compiler/backend/tuner_test compiler/backend/trainer_test \
+    compiler/analysis/update_passes_test compiler/analysis/pass_manager_test \
+    compiler/analysis/statistics_test \
+    compiler/backend/architecture_test compiler/backend/lowering_test \
     compiler/backend/native_emitter_test \
     compiler/driver/update_compiler_test compiler/driver/driver_test \
     compiler/diagnostics/diagnostics_test \

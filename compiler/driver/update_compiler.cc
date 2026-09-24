@@ -10,12 +10,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
-#include "compiler/backend/trainer/arena_binder.h"
-#include "compiler/backend/trainer/instruction_lowering.h"
+#include "compiler/backend/allocation/arena_binder.h"
+#include "compiler/backend/selection/instruction_lowering.h"
 #include "compiler/diagnostics/generating/error.h"
 #include "compiler/driver/contract.h"
-#include "compiler/frontend/ingressor/resource_analyzer.h"
-#include "compiler/frontend/parser/parser.h"
+#include "compiler/frontend/accountant/resource_analyzer.h"
+#include "compiler/frontend/computation/parser.h"
 #include "compiler/frontend/representation/sir.h"
 #include "compiler/analysis/update_passes.h"
 #include "source/identity/hash.h"

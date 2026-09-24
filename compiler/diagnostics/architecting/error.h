@@ -11,7 +11,7 @@
 // =============================================================================
 // architecting/ — handling for local device analysis
 // (compiler/backend/architecture/) and the kernel-policy table the offline
-// tuner measured for it (compiler/backend/tuner/). Detection can never
+// tuner measured for it (compiler/backend/architecture/). Detection can never
 // hard-fail — a machine that hides its cache geometry must still compile —
 // so this process has two disciplines:
 //

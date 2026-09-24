@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "compiler/analysis/updater/pass_manager.h"  // PassTiming
+#include "compiler/analysis/pass_manager.h"  // PassTiming
 #include "source/language/model_format.h"
 #include "source/plan/update_types.h"
 
@@ -29,14 +29,16 @@
 // The driver owns the compilation *process*, nothing else: it sequences the
 // subsystems and verifies at every boundary that each was used correctly
 // (contract.h):
-//   frontend/     ingest feasibility (ingressor) and SMF graph -> forward
-//                 SIR (parser) — gated by VerifyFrontendContract
-//   analysis/     the pass-managed structural and calculus phases (updater/
-//                 algebra/calculus) plus quantization review (reviewer) —
-//                 gated by VerifyAnalysisContract
-//   backend/      arena binding, instruction lowering, plan assembly, and
-//                 native packaging (trainer; the kernel policy the tuner's
-//                 table resolved rides in the config) — gated by
+//   frontend/     ingest (ingressor), feasibility (accountant), semantic
+//                 checks (topology) and SMF graph -> forward SIR
+//                 (computation) — gated by VerifyFrontendContract
+//   analysis/     the pass-managed phases (algebra / calculus / topology /
+//                 optimization) plus the statistics decisions — gated by
+//                 VerifyAnalysisContract
+//   backend/      arena binding (allocation), instruction lowering
+//                 (selection), plan assembly (still here, in this driver),
+//                 and native packaging (packaging; the kernel policy that
+//                 architecture resolved rides in the config) — gated by
 //                 VerifyGeneratedPlan
 //   diagnostics/  every error crossing the driver's boundary must be
 //                 attributable to a registered unit (WellFormedDiagnostic)

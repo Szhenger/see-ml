@@ -43,7 +43,7 @@ noise" line of the benchmarks doc); otherwise the default is recorded,
 with every arm's numbers beside it, so the decision is measured either way.
 
 Table schema (version 1), the contract with
-compiler/backend/tuner/kernel_policy_table.cc, which reads `hosts.<key>.cpu`
+compiler/backend/architecture/kernel_policy_table.cc, which reads `hosts.<key>.cpu`
 and ignores the rest:
 
     {"schema": 1,

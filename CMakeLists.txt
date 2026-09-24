@@ -84,32 +84,32 @@ add_library(seeml_sir STATIC
 add_library(seeml_update STATIC
     source/language/model_format.cc
     compiler/frontend/ingressor/model_reader.cc
-    compiler/frontend/ingressor/model_writer.cc
-    compiler/frontend/ingressor/resource_analyzer.cc
-    compiler/frontend/parser/value_resolver.cc
-    compiler/frontend/parser/sema.cc
-    compiler/frontend/parser/parser.cc
-    compiler/analysis/updater/pass_manager.cc
-    compiler/analysis/updater/conv_lowering.cc
-    compiler/analysis/updater/dce.cc
+    compiler/frontend/egressor/model_writer.cc
+    compiler/frontend/accountant/resource_analyzer.cc
+    compiler/frontend/computation/value_resolver.cc
+    compiler/frontend/topology/sema.cc
+    compiler/frontend/computation/parser.cc
+    compiler/analysis/pass_manager.cc
+    compiler/analysis/algebra/conv_lowering.cc
+    compiler/analysis/topology/dce.cc
     compiler/analysis/algebra/epilogue_fuser.cc
     compiler/analysis/algebra/rope_table.cc
     compiler/analysis/algebra/chain_fuser.cc
     compiler/analysis/algebra/addend_fuser.cc
-    compiler/analysis/algebra/attention_tiling.cc
+    compiler/analysis/statistics/attention_tiling.cc
     compiler/analysis/algebra/lora_grafter.cc
     compiler/analysis/algebra/merge_builder.cc
     compiler/analysis/calculus/autodiff.cc
-    compiler/analysis/calculus/optimizer.cc
-    compiler/analysis/reviewer/quantization.cc
+    compiler/analysis/optimization/optimizer.cc
+    compiler/analysis/statistics/quantization.cc
     compiler/backend/architecture/host_arch.cc
-    compiler/backend/tuner/kernel_policy_table.cc
-    compiler/backend/trainer/arena_binder.cc
-    compiler/backend/trainer/instruction_lowering.cc
-    compiler/backend/trainer/kernel_emitter.cc
+    compiler/backend/architecture/kernel_policy_table.cc
+    compiler/backend/allocation/arena_binder.cc
+    compiler/backend/selection/instruction_lowering.cc
+    compiler/backend/architecture/kernel_emitter.cc
     compiler/driver/contract.cc
     compiler/driver/update_compiler.cc
-    compiler/backend/trainer/native_emitter.cc
+    compiler/backend/packaging/native_emitter.cc
 )
 target_link_libraries(seeml_update PUBLIC seeml_sir seeml_parallel)
 
@@ -238,10 +238,10 @@ seeml_add_test(seeml_sir_test             test/compiler/frontend/sir_test.cc)
 seeml_add_test(seeml_operator_test        test/compiler/frontend/operator_test.cc)
 seeml_add_test(seeml_parser_test          test/compiler/frontend/parser_test.cc)
 seeml_add_test(seeml_update_passes_test   test/compiler/analysis/update_passes_test.cc)
-seeml_add_test(seeml_updater_test         test/compiler/analysis/updater_test.cc)
-seeml_add_test(seeml_reviewer_test        test/compiler/analysis/reviewer_test.cc)
-seeml_add_test(seeml_tuner_test           test/compiler/backend/tuner_test.cc)
-seeml_add_test(seeml_trainer_test         test/compiler/backend/trainer_test.cc)
+seeml_add_test(seeml_pass_manager_test         test/compiler/analysis/pass_manager_test.cc)
+seeml_add_test(seeml_statistics_test        test/compiler/analysis/statistics_test.cc)
+seeml_add_test(seeml_architecture_test           test/compiler/backend/architecture_test.cc)
+seeml_add_test(seeml_lowering_test         test/compiler/backend/lowering_test.cc)
 seeml_add_test(seeml_native_emitter_test  test/compiler/backend/native_emitter_test.cc)
 seeml_add_test(seeml_update_compiler_test test/compiler/driver/update_compiler_test.cc)
 seeml_add_test(seeml_driver_test          test/compiler/driver/driver_test.cc)
