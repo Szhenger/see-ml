@@ -84,7 +84,7 @@ add_library(seeml_sir STATIC
 add_library(seeml_update STATIC
     source/language/model_format.cc
     compiler/frontend/ingressor/model_reader.cc
-    compiler/frontend/egress/model_writer.cc
+    compiler/frontend/egressor/model_writer.cc
     compiler/frontend/accountant/resource_analyzer.cc
     compiler/frontend/computation/value_resolver.cc
     compiler/frontend/topology/sema.cc

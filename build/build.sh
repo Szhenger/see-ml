@@ -41,7 +41,7 @@ compile compiler/frontend/operator/activation.cc      op_activation.o
 compile compiler/diagnostics/logger.cc        logger.o
 compile source/language/model_format.cc model_format.o
 compile compiler/frontend/ingressor/model_reader.cc model_reader.o
-compile compiler/frontend/egress/model_writer.cc model_writer.o
+compile compiler/frontend/egressor/model_writer.cc model_writer.o
 compile compiler/frontend/accountant/resource_analyzer.cc resource_analyzer.o
 compile source/parallel/parallel_for.cc       parallel_for.o
 compile compiler/frontend/computation/value_resolver.cc value_resolver.o

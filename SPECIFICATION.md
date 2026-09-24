@@ -194,7 +194,7 @@ Layout is subsystems-by-role: `frontend/` → `analysis/` → `backend/` →
 
 - **Frontend.** `ingressor/` reads the SMF model container with a
   never-trust-a-file discipline (bounds and arithmetic-overflow checks before
-  any allocation); `egress/` is its inverse, the writer tools and tests use;
+  any allocation); `egressor/` is its inverse, the writer tools and tests use; `tokenizer/` is the training-data ingress (raw text → canonical SDS; S2 #148);
   `accountant/` holds the `resource_analyzer` that gates infeasible memory
   footprints against host RAM as a lower bound. `representation/` is
   **SIR**, the in-memory IR: typed values, operations with string mnemonics

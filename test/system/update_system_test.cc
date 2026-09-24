@@ -37,7 +37,7 @@
 #include "runtime/feeder/dataset.h"
 #include "runtime/engine/update_engine.h"
 #include "compiler/frontend/ingressor/model_reader.h"
-#include "compiler/frontend/egress/model_writer.h"
+#include "compiler/frontend/egressor/model_writer.h"
 #include "source/parallel/parallel_for.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"

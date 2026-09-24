@@ -1,4 +1,4 @@
-#include "compiler/frontend/egress/model_writer.h"
+#include "compiler/frontend/egressor/model_writer.h"
 
 #include <cstdint>
 #include <cstring>
