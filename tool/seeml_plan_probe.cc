@@ -81,7 +81,7 @@
 #include <vector>
 
 #include "runtime/executor/backend.h"
-#include "runtime/validator/plan_validator.h"
+#include "runtime/verifier/plan_validator.h"
 #include "source/identity/hash.h"
 #include "source/identity/version.h"
 #include "source/parallel/parallel_for.h"

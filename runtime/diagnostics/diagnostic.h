@@ -15,10 +15,10 @@
 // where the *unit* names the component that spoke and the *process module*
 // that formed the message names the update stage it belongs to:
 //
-//   feeding/     dataset decode and batch staging (feeder/)
-//   validating/  load-time plan verification (validator/)
-//   executing/   the engine's lifecycle and dispatch (engine/)
-//   persisting/  durable state — checkpoints, atomic commits (custodian/)
+//   feeding/     dataset decode and batch staging (pipeline/)
+//   validating/  load-time plan verification (verifier/)
+//   executing/   the engine's lifecycle and dispatch (dispatcher/)
+//   persisting/  durable state — checkpoints, atomic commits (storage/)
 //
 // Each process module is header-only: the registry of unit names active in
 // that process plus builders for its message shapes. Errors travel as

@@ -25,7 +25,7 @@
 #if defined(__APPLE__)
 
 #include "compiler/driver/update_compiler.h"
-#include "runtime/engine/update_engine.h"
+#include "runtime/dispatcher/update_engine.h"
 #include "runtime/executor/backend.h"
 #include "runtime/executor/metal_backend.h"
 #include "source/plan/update_types.h"

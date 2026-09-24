@@ -129,13 +129,13 @@ add_library(seeml_update_rt STATIC
     runtime/executor/attention.cc
     runtime/executor/backend.cc
     runtime/executor/cpu_backend.cc
-    runtime/feeder/dataset.cc
-    runtime/feeder/batch_pipeline.cc
-    runtime/custodian/durable_io.cc
-    runtime/validator/plan_validator.cc
-    runtime/custodian/checkpoint.cc
-    runtime/engine/contract.cc
-    runtime/engine/update_engine.cc
+    runtime/pipeline/dataset.cc
+    runtime/pipeline/batch_pipeline.cc
+    runtime/storage/durable_io.cc
+    runtime/verifier/plan_validator.cc
+    runtime/storage/checkpoint.cc
+    runtime/dispatcher/contract.cc
+    runtime/dispatcher/update_engine.cc
 )
 target_link_libraries(seeml_update_rt PUBLIC seeml_parallel)
 
@@ -246,15 +246,15 @@ seeml_add_test(seeml_native_emitter_test  test/compiler/backend/native_emitter_t
 seeml_add_test(seeml_update_compiler_test test/compiler/driver/update_compiler_test.cc)
 seeml_add_test(seeml_driver_test          test/compiler/driver/driver_test.cc)
 seeml_add_test(seeml_diagnostics_test     test/compiler/diagnostics/diagnostics_test.cc)
-seeml_add_test(seeml_dataset_test         test/runtime/feeder/dataset_test.cc)
-seeml_add_test(seeml_batch_pipeline_test  test/runtime/feeder/batch_pipeline_test.cc)
+seeml_add_test(seeml_dataset_test         test/runtime/pipeline/dataset_test.cc)
+seeml_add_test(seeml_batch_pipeline_test  test/runtime/pipeline/batch_pipeline_test.cc)
 seeml_add_test(seeml_kernels_test         test/runtime/executor/kernels_test.cc)
 seeml_add_test(seeml_metal_gemm_test      test/runtime/executor/metal_gemm_test.cc)
 seeml_add_test(seeml_metal_backend_test   test/runtime/executor/metal_backend_test.cc)
-seeml_add_test(seeml_validator_test       test/runtime/validator/validator_test.cc)
-seeml_add_test(seeml_custodian_test       test/runtime/custodian/custodian_test.cc)
-seeml_add_test(seeml_engine_test          test/runtime/engine/engine_test.cc)
-seeml_add_test(seeml_update_engine_test   test/runtime/engine/update_engine_test.cc)
+seeml_add_test(seeml_verifier_test       test/runtime/verifier/verifier_test.cc)
+seeml_add_test(seeml_storage_test       test/runtime/storage/storage_test.cc)
+seeml_add_test(seeml_engine_test          test/runtime/dispatcher/engine_test.cc)
+seeml_add_test(seeml_update_engine_test   test/runtime/dispatcher/update_engine_test.cc)
 seeml_add_test(seeml_update_system_test   test/system/update_system_test.cc)
 
 if(SEEML_FUZZ)

@@ -13,7 +13,7 @@
 #include <vector>
 
 #include "compiler/frontend/ingressor/model_reader.h"
-#include "runtime/feeder/dataset.h"
+#include "runtime/pipeline/dataset.h"
 #include "source/language/model_format.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"

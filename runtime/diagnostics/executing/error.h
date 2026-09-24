@@ -9,7 +9,7 @@
 
 // =============================================================================
 // executing/ — errors formed by the engine's lifecycle and dispatch
-// (runtime/engine/): plan identity and integrity at load, training-loop
+// (runtime/dispatcher/): plan identity and integrity at load, training-loop
 // guards (the non-finite-loss abort), gate and merge sequencing, and the
 // engine's boundary contracts. The executor's kernels themselves cannot
 // fail — every input was bounds-proven by the validating process — so every

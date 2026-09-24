@@ -82,7 +82,7 @@ SMF_PREAMBLE = Layout("SmfPreamble", [
     ("magic", "I"), ("version", "I"), ("tensor_count", "I"),
     ("op_count", "I")])
 
-# --- SDS: the corpus container (runtime/feeder/dataset.h) --------------------
+# --- SDS: the corpus container (runtime/pipeline/dataset.h) --------------------
 
 SDS_MAGIC = 0x31534453  # "SDS1"
 SDS_VERSION = 2         # v2: token records (input_kind 1)
@@ -226,7 +226,7 @@ FUSED_ARG_MASK = 3
 FUSED_RUN_IS_RIGHT = 128
 FUSED_MAX_STAGES = 4
 
-# --- SEKP: the checkpoint (runtime/custodian/checkpoint_format.h) ------------
+# --- SEKP: the checkpoint (runtime/storage/checkpoint_format.h) ------------
 
 SEKP_MAGIC = 0x504B4553  # "SEKP"
 SEKP_VERSION = 5         # v5: the run binding, source score and best state

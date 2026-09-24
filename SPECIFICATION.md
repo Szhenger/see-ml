@@ -126,11 +126,11 @@ digests (`test/tool/demo_digests.json`).
 
 | Interface | Where | Purpose |
 |---|---|---|
-| `std::thread` + `<mutex>`/`<condition_variable>`/`<atomic>` | `source/parallel/parallel_for.cc`, `runtime/feeder/batch_pipeline.cc` | Worker pool and feeder thread. No direct `pthread_*` calls; `-pthread` at compile and link. |
-| POSIX file I/O: `open`/`write`/`fsync`/`close`, `rename`, directory fsync, `flock(LOCK_EX\|LOCK_NB)`, `fseeko`, `getpid` | `runtime/custodian/durable_io.cc` | Durable sidecar-then-atomic-rename writes, commit lock, random-access durable edits. Win32 mirror (`CreateFileA`, `MoveFileExA(MOVEFILE_REPLACE_EXISTING\|MOVEFILE_WRITE_THROUGH)`, …) exists but is not CI-tested. |
+| `std::thread` + `<mutex>`/`<condition_variable>`/`<atomic>` | `source/parallel/parallel_for.cc`, `runtime/pipeline/batch_pipeline.cc` | Worker pool and feeder thread. No direct `pthread_*` calls; `-pthread` at compile and link. |
+| POSIX file I/O: `open`/`write`/`fsync`/`close`, `rename`, directory fsync, `flock(LOCK_EX\|LOCK_NB)`, `fseeko`, `getpid` | `runtime/storage/durable_io.cc` | Durable sidecar-then-atomic-rename writes, commit lock, random-access durable edits. Win32 mirror (`CreateFileA`, `MoveFileExA(MOVEFILE_REPLACE_EXISTING\|MOVEFILE_WRITE_THROUGH)`, …) exists but is not CI-tested. |
 | `sysctlbyname("hw.l1dcachesize"/"hw.l2cachesize"/"hw.physicalcpu"/"hw.cachelinesize"/"hw.memsize")` | `compiler/backend/architecture/host_arch.cc`, `compiler/frontend/accountant/resource_analyzer.cc` | Apple host cache/memory detection for GEMM tiling and memory gating. |
 | `sysconf(_SC_LEVEL*_CACHE*, _SC_NPROCESSORS_ONLN, _SC_PHYS_PAGES)` + sysfs `/sys/devices/system/cpu/*/topology/` scan | same | Linux equivalents (topology scan is Linux-only). Fallback: `std::thread::hardware_concurrency()`. |
-| `std::aligned_alloc(64, …)` | `runtime/engine/update_engine.cc` | The single arena allocation. (Unavailable on MSVC — one reason Windows is untested.) |
+| `std::aligned_alloc(64, …)` | `runtime/dispatcher/update_engine.cc` | The single arena allocation. (Unavailable on MSVC — one reason Windows is untested.) |
 | `isatty(1)`, `localtime_r`/`localtime_s` | test runner, logger | Color gating, timestamps. |
 
 `mmap` appears on the build host only: the compiler maps the source model
@@ -237,11 +237,11 @@ Layout is subsystems-by-role: `frontend/` → `analysis/` → `backend/` →
 
 A zero-dependency virtual machine executing the compiled plan. Subsystems:
 
-- **engine/** — loads the plan (hash check first), runs the validator, makes
+- **dispatcher/** (the engine; loader, gating and profiler live inside it until S7) — loads the plan (hash check first), runs the validator, makes
   the single `std::aligned_alloc(64, …)` arena allocation, then executes the
   three straight-line instruction programs (train / eval / merge) and
   orchestrates gate → merge → commit.
-- **validator/** — load-time proof: every instruction operand is
+- **verifier/** — load-time proof: every instruction operand is
   bounds-checked against arena/rodata geometry *before* execution; `Execute()`
   then runs unchecked by contract.
 - **executor/** — the kernel library (`gemm`, `elementwise`, `activation`,
@@ -252,11 +252,11 @@ A zero-dependency virtual machine executing the compiled plan. Subsystems:
   from the header (v11) through `ExecutorBackend::Configure`; zero fields
   select the compiled-in defaults (`-DSEEML_GEMM_TILE_K/N`, 64 and 256).
   Tiles change throughput only, never bits.
-- **feeder/** — `dataset` (SDS validation, seeded per-epoch permutation) and
+- **pipeline/** — `dataset` (SDS validation, seeded per-epoch permutation) and
   `batch_pipeline` (one producer thread staging batch *s+1* during step *s*
   over a mutex + condvar; provably identical batch sequence to serial, no
   thread at width 1).
-- **custodian/** — `durable_io` (fsync'd sidecar + atomic rename, commit
+- **storage/** — `durable_io` (fsync'd sidecar + atomic rename, commit
   lock, durable random-access edit) and `checkpoint` (hash-bound, resumable).
 - **diagnostics/** — a runtime-local mirror of the compiler's process-module
   idiom, kept separate so vendored packages never include compiler headers.
@@ -294,9 +294,9 @@ raise the oldest-readable floor; newer-than-reader is always rejected):
 | Format | Magic | Current version | Implemented in |
 |---|---|---|---|
 | SMF (model container) | `"SMF1"` | v6 (readers accept v1–v6; writers emit the lowest version the model needs) | `source/language/model_format.*`, `compiler/frontend/ingressor/model_{reader,writer}.cc`, Python writer in `tool/export_model.py` |
-| SDS (dataset) | `"SDS1"` | v1 (feature rows) / v2 (token records) | `runtime/feeder/dataset.{h,cc}`, Python writer |
+| SDS (dataset) | `"SDS1"` | v1 (feature rows) / v2 (token records) | `runtime/pipeline/dataset.{h,cc}`, Python writer |
 | SEEU (update plan) | `"SEEU"` | v18, oldest-readable v4 | written by `compiler/backend/*` + driver; read/validated by `runtime/validator` + `runtime/engine`; disassembled by `seeml-seeu-dump` |
-| SEKP (checkpoint) | `"SEKP"` | v5, oldest-readable v3 | `runtime/custodian/checkpoint_format.h`, `runtime/custodian/checkpoint.cc` |
+| SEKP (checkpoint) | `"SEKP"` | v5, oldest-readable v3 | `runtime/storage/checkpoint_format.h`, `runtime/storage/checkpoint.cc` |
 
 The Python plane restates these layouts exactly once, in
 `tool/seeml/formats.py`, and that restatement is held to the headers by

@@ -76,7 +76,7 @@
 #include "compiler/backend/architecture/kernel_policy_table.h"
 #include "compiler/diagnostics/logger.h"
 #include "compiler/driver/update_compiler.h"
-#include "runtime/engine/update_engine.h"
+#include "runtime/dispatcher/update_engine.h"
 #include "runtime/executor/update_kernels.h"
 #include "source/identity/version.h"
 #include "source/parallel/parallel_for.h"

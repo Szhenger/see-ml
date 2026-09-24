@@ -65,7 +65,7 @@ Frontend doctrine lines:
   BPE first; SentencePiece refused loudly until implemented.
 - Sanitizer, contract check and tokenizer are pure deterministic C++
   functions in `source/`, vendored into the package so the feeder re-runs
-  them on device data. The contract function leaves `runtime/engine/`.
+  them on device data. The contract function leaves `runtime/dispatcher/`.
 - Threat model, stated on the screen: the sanitizer covers malformed bytes,
   out-of-contract records, degenerate records and exact duplicates. It does
   **not** cover well-formed poisoned data; the gate and a held-out set the
@@ -126,6 +126,8 @@ permission (the `kFlagRelaxed` model), never a requirement, because the
 build host is not the device.
 
 ## §6 Runtime — nine roles, in lifecycle order
+
+*The directory renames landed on 2026-09-24: verifier, pipeline, dispatcher, storage; host, loader, gating and profiler exist as contract READMEs until S7 extracts their code from the dispatcher.*
 
 **host** (package entry: generated main, flags, exit codes, cooperative
 cancellation; thread and affinity policy) → **loader** (map the plan, seal

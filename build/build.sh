@@ -101,13 +101,13 @@ else
   compile runtime/executor/metal_backend_stub.cc rt_metal_backend.o
 fi
 METAL_OBJS="$METAL_OBJS build/rt_metal_backend.o"
-compile runtime/feeder/dataset.cc             dataset.o
-compile runtime/feeder/batch_pipeline.cc      batch_pipeline.o
-compile runtime/custodian/durable_io.cc       durable_io.o
-compile runtime/validator/plan_validator.cc   plan_validator.o
-compile runtime/custodian/checkpoint.cc       checkpoint.o
-compile runtime/engine/contract.cc            engine_contract.o
-compile runtime/engine/update_engine.cc       update_engine.o
+compile runtime/pipeline/dataset.cc             dataset.o
+compile runtime/pipeline/batch_pipeline.cc      batch_pipeline.o
+compile runtime/storage/durable_io.cc       durable_io.o
+compile runtime/verifier/plan_validator.cc   plan_validator.o
+compile runtime/storage/checkpoint.cc       checkpoint.o
+compile runtime/dispatcher/contract.cc            engine_contract.o
+compile runtime/dispatcher/update_engine.cc       update_engine.o
 compile tool/seeml_update_compile.cc          seeml_update_compile.o
 compile tool/seeml_seeu_dump.cc               seeml_seeu_dump.o
 compile tool/seeml_plan_probe.cc              seeml_plan_probe.o
@@ -181,12 +181,12 @@ for suite in \
     compiler/backend/native_emitter_test \
     compiler/driver/update_compiler_test compiler/driver/driver_test \
     compiler/diagnostics/diagnostics_test \
-    runtime/feeder/dataset_test runtime/feeder/batch_pipeline_test \
+    runtime/pipeline/dataset_test runtime/pipeline/batch_pipeline_test \
     runtime/executor/kernels_test runtime/executor/metal_gemm_test \
     runtime/executor/metal_backend_test \
-    runtime/validator/validator_test \
-    runtime/custodian/custodian_test \
-    runtime/engine/engine_test runtime/engine/update_engine_test \
+    runtime/verifier/verifier_test \
+    runtime/storage/storage_test \
+    runtime/dispatcher/engine_test runtime/dispatcher/update_engine_test \
     system/update_system_test; do
   name="seeml_$(basename "$suite")"
   echo "  CXX+LINK $name"
