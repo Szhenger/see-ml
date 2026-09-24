@@ -19,7 +19,7 @@
 //
 //   tokenizing/    decoding and encoding the SMF byte stream (frontend/ingressor/)
 //   parsing/       SMF graph -> forward SIR construction (frontend/topology/ + computation/)
-//   passing/       pass orchestration and lowering legality (analysis/pass_manager, analysis/topology/)
+//   passing/       pass orchestration and lowering legality (analysis/pass_manager and algebra/conv_lowering)
 //   updating/      the analytic methods — autodiff, LoRA grafting, merge
 //                  synthesis (analysis/calculus/ + analysis/algebra/)
 //   architecting/  local device analysis — ISA/cache detection and the

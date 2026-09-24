@@ -84,7 +84,7 @@ Would you install a software update that made your phone worse? Neither would Se
 
 1. Read the source `.smf` file and recompute its `ContentHash64`; if the plan carries a source hash (nonzero), a mismatch **refuses the commit**. You cannot patch the wrong file, or a modified one.
 2. For each emit-table entry — after bounds-checking it against the actual file size — add the delta onto the file's pristine f32 weights: `W′ᵢ = Wᵢ + Δᵢ`. Note the source: the *file's* weights, not the (possibly int8-quantized) rodata copy. Quantization error never reaches the committed model.
-3. Write the result durably (fsync + atomic rename — see custodian below) to the output path. The source file itself is never modified.
+3. Write the result durably (fsync + atomic rename — see storage below) to the output path. The source file itself is never modified.
 
 ## verifier/ — the load-time proof
 

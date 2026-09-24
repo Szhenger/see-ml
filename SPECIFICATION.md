@@ -194,7 +194,7 @@ Layout is subsystems-by-role: `frontend/` → `analysis/` → `backend/` →
 
 - **Frontend.** `ingressor/` reads the SMF model container with a
   never-trust-a-file discipline (bounds and arithmetic-overflow checks before
-  any allocation); `egressor/` is its inverse, the writer tools and tests use; `tokenization/` is the training-data ingress (raw text → canonical SDS; S2 #148);
+  any allocation); `egressor/` is its inverse, the SMF writer the test suites use (tools write SMF through the Python exporter); `tokenization/` is the training-data ingress (raw text → canonical SDS; S2 #148);
   `accountant/` holds the `resource_analyzer` that gates infeasible memory
   footprints against host RAM as a lower bound. `representation/` is
   **SIR**, the in-memory IR: typed values, operations with string mnemonics
@@ -220,8 +220,8 @@ Layout is subsystems-by-role: `frontend/` → `analysis/` → `backend/` →
   the offline tuner (`tool/autotune.py`) wrote — a strict purpose-built JSON
   reader — and resolves the CPU GEMM tiles the driver writes into the plan
   header (v11): `--gemm-tiles`, then the table, then the runtime defaults;
-  `architecture/kernel_emitter` emits MSL kernel source for the tuner's
-  tests. `allocation/arena_binder` binds every tensor to a compile-time
+  `architecture/kernel_emitter` emits MSL kernel source for the Metal GEMM
+  harness test and the architecture suite (S6 decides its retirement). `allocation/arena_binder` binds every tensor to a compile-time
   arena layout; `selection/instruction_lowering` lowers SIR to the fixed
   ~35-opcode instruction ISA; `packaging/native_emitter` emits the
   self-contained package. Plan assembly (persistent image, sections, seal)

@@ -79,7 +79,7 @@ Threading model, in one sentence: a block is built by one thread (use-lists are 
 
 ### Parsing: semantic analysis and shape inference
 
-`BuildForward` (`compiler/frontend/computation/`) turns the decoded SMF op list into SIR, but first `sema.cc` asks the whole-graph questions:
+`BuildForward` (`compiler/frontend/computation/`) turns the decoded SMF op list into SIR, but first `sema.cc` (`compiler/frontend/topology/`) asks the whole-graph questions:
 
 - **Is the op list topologically ordered?** SMF requires ops to appear in dependency order — like a course catalog where every prerequisite is listed before the course that needs it. The check is elegantly cheap: walk the ops in order, maintaining a set of names *bound so far*; if an op consumes a name that isn't bound yet but *is* produced by some later op, that's a use-before-produce error. O(tensors + ops), two set lookups per edge.
 - **Does any op redefine an existing name?** (Outputs must be unique — this is SSA's "assigned once" rule, enforced at the source level.)
@@ -394,4 +394,4 @@ consumers of the compiler and the formats, not stages of compilation.
 
 ## Testing
 
-One SeeTest suite per module, organized to mirror this partition (`test/compiler/<subsystem>/*_test.cc` — see [test/README.md](../test/README.md)), run via `ctest` or directly from `build/` (see [usage.md](usage.md)). The compiler-side suites: `frontend/` (`model_io`, `resource_analyzer`, `sir`, `operator`, `parser`), `analysis/` (`update_passes`, `updater`, `reviewer`), `backend/` (`tuner`, `trainer`, `native_emitter`), `driver/` (`update_compiler`, `driver`), and `diagnostics/`, plus `source/` suites (`hash`, `parallel_for`) and the end-to-end `system/update_system_test`.
+One SeeTest suite per module, organized to mirror this partition (`test/compiler/<subsystem>/*_test.cc` — see [test/README.md](../test/README.md)), run via `ctest` or directly from `build/` (see [usage.md](usage.md)). The compiler-side suites: `frontend/` (`model_io`, `resource_analyzer`, `sir`, `operator`, `parser`), `analysis/` (`update_passes`, `pass_manager`, `statistics`), `backend/` (`architecture`, `lowering`, `native_emitter`), `driver/` (`update_compiler`, `driver`), and `diagnostics/`, plus `source/` suites (`hash`, `parallel_for`) and the end-to-end `system/update_system_test`.

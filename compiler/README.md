@@ -23,7 +23,7 @@ compiler/
     accountant/           the footprint lower bound and the memory gate
     topology/             whole-graph and per-op semantic checks
     computation/          op list -> the SIR computation graph
-    egressor/             the SMF writer (the ingressor's inverse; tools and tests)
+    egressor/             the SMF writer (the ingressor's inverse; used by the test suites)
     tokenization/         the training-data ingress: raw text -> canonical SDS (S2 #148 lands the code)
     operator/             typed constructors for compound ops (shared)
     representation/       SIR itself (façade: sir.h; shared)

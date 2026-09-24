@@ -23,7 +23,7 @@
 //   IO          batch input + label slots, rewritten every step
 //   TRANSIENT   liveness-scanned workspace, offsets reused across values
 //   RODATA      packed frozen weights (f32, or per-tensor symmetric int8
-//               for weights selected by the reviewer —
+//               for weights the quantization review selected —
 //               compiler/analysis/statistics/quantization.h)
 //
 // Everything here runs at compile time; the runtime just does base + offset.
