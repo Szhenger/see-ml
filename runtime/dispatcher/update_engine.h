@@ -34,14 +34,14 @@
 // The runtime is partitioned by role; the engine only abstracts the update
 // process, verifying at every boundary that each subsystem was used
 // correctly (contract.h):
-//   feeder/       SDS corpus decode and pipelined batch staging — gated by
+//   pipeline/     SDS corpus decode and pipelined batch staging — gated by
 //                 VerifyFeederContract
 //   executor/     the kernel families the dispatcher executes — gated by
-//                 VerifyExecutorContract (via validator/) — behind the
+//                 VerifyExecutorContract (via verifier/) — behind the
 //                 ExecutorBackend seam: the CPU library is the reference,
 //                 a GPU backend (Metal) is opt-in per SelectBackend
-//   validator/    load-time bounds proof of every instruction operand
-//   custodian/    durable state: checkpoints and the atomic commit path
+//   verifier/     load-time bounds proof of every instruction operand
+//   storage/      durable state: checkpoints and the atomic commit path
 //   diagnostics/  every error crossing the engine's Train boundary must be
 //                 attributable to a registered unit (WellFormedDiagnostic)
 // =============================================================================

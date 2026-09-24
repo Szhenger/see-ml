@@ -1,5 +1,5 @@
 // =============================================================================
-// reviewer/ unit tests: int8 quantization selection — eligibility (weights
+// statistics/ unit tests: int8 quantization selection — eligibility (weights
 // consumed exclusively as the weight operand of matmul kernels), the
 // per-tensor symmetric scale, the all-zero guard, and the deterministic
 // chunked max-abs sweep on tensors larger than one sweep grain.

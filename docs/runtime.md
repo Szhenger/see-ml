@@ -22,7 +22,7 @@ runtime/
   diagnostics/  error handling, partitioned by process
 ```
 
-The partition mirrors the compiler's — subsystems named for their role, façade headers where units split — with `engine/` playing the driver's role: it owns the *process* and verifies every boundary it crosses.
+The partition mirrors the compiler's — subsystems named for their role, façade headers where units split — with `dispatcher/` playing the driver's role: it owns the *process* and verifies every boundary it crosses.
 
 ## The update process, end to end
 
@@ -234,4 +234,4 @@ Every unit above (plus the `source/plan/` ABI headers, `source/identity/hash.h`,
 
 ## Testing
 
-Runtime suites, organized to mirror this partition (`test/runtime/<subsystem>/*_test.cc` — see [test/README.md](../test/README.md)): `executor/kernels` (per-family numeric checks against references), `feeder/dataset` and `feeder/batch_pipeline` (the staged sequence is exactly the serial one), `validator/validator` (per-opcode bounds proofs, plus the regression that every compiled instruction validates), `custodian/custodian` (durable writes, checkpoint binding and corruption rejection), `engine/engine` (the boundary contracts and the unit registry), and `engine/update_engine` (the VM lifecycle end to end, gradient checks, checkpoint resume), plus the cross-half `system/update_system_test` and the emitter suite that verifies the vendored package layout.
+Runtime suites, organized to mirror this partition (`test/runtime/<subsystem>/*_test.cc` — see [test/README.md](../test/README.md)): `executor/kernels` (per-family numeric checks against references), `pipeline/dataset` and `pipeline/batch_pipeline` (the staged sequence is exactly the serial one), `verifier/verifier` (per-opcode bounds proofs, plus the regression that every compiled instruction validates), `storage/storage` (durable writes, checkpoint binding and corruption rejection), `dispatcher/engine` (the boundary contracts and the unit registry), and `dispatcher/update_engine` (the VM lifecycle end to end, gradient checks, checkpoint resume), plus the cross-half `system/update_system_test` and the emitter suite that verifies the vendored package layout.

@@ -23,7 +23,7 @@
 //                           relations, and I/O slots are self-consistent
 //                           with the plan blob
 //   VerifyExecutorContract  after decode — every instruction of every
-//                           program is bounds-proven (validator/) and every
+//                           program is bounds-proven (verifier/) and every
 //                           emit entry targets the arena, so Execute() may
 //                           dispatch blindly
 //   VerifyFeederContract    before train — the dataset's geometry matches

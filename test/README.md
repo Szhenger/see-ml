@@ -20,17 +20,17 @@ test/
     parallel/           parallel_for
     identity/           hash
   compiler/             one folder per compiler subsystem
-    frontend/           model_io  resource_analyzer  sir  operator  parser
-    analysis/           update_passes  updater  reviewer
-    backend/            tuner  trainer  native_emitter
+    frontend/           model_io  resource_analyzer  sir  operator  parser  golden_fixture
+    analysis/           update_passes  pass_manager  statistics
+    backend/            architecture  lowering  native_emitter
     driver/             update_compiler  driver
     diagnostics/        diagnostics
   runtime/              one folder per runtime subsystem
-    feeder/             dataset  batch_pipeline
-    executor/           kernels
-    validator/          validator
-    custodian/          custodian
-    engine/             engine  update_engine
+    pipeline/           dataset  batch_pipeline
+    executor/           kernels  metal_gemm  metal_backend
+    verifier/           verifier
+    storage/            storage
+    dispatcher/         engine  update_engine
   system/               the cross-half end-to-end update
     update_system_test
   fuzz/                 libFuzzer harnesses (built with -DSEEML_FUZZ=ON)

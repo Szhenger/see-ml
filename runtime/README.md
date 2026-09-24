@@ -54,15 +54,15 @@ runtime/
 
 ## The update, phase by phase
 
-Read `engine/` as the spine. **Load** checks the plan's identity and
-integrity, then re-proves — through **`validator/`** — that every operand of
+Read `dispatcher/` as the spine (its update_engine still holds the loader, the gate and the profiler until S7 extracts them). **Load** checks the plan's identity and
+integrity, then re-proves — through **`verifier/`** — that every operand of
 every instruction is in bounds, so the hot loop can later dispatch *blindly*.
-**Train** pulls batches from **`feeder/`** (which stages batch *s+1* while
+**Train** pulls batches from **`pipeline/`** (which stages batch *s+1* while
 step *s* runs) and executes the train stream through **`executor/`**. **Gate**
 runs the eval program before and after; no improvement means the device is
 left untouched. **Merge** materializes each adapter's delta, and **Commit**
 adds those deltas onto the source file's pristine weights and writes the
-result through **`custodian/`** — fsync then atomic rename, so a power cut
+result through **`storage/`** — fsync then atomic rename, so a power cut
 leaves the old file or the new one, never a torn one.
 
 Two properties hold across all of it, and both are contracts the tests pin:

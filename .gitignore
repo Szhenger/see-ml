@@ -43,3 +43,5 @@ external/*/build/
 .LSOverride
 Thumbs.db
 ehthumbs.db
+build.log
+build_accel.log

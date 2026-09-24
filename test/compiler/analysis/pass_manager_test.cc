@@ -1,5 +1,5 @@
 // =============================================================================
-// updater/ tests: PassManager (ordering, the per-pass Block::verify gate)
+// analysis/pass_manager tests: PassManager (ordering, the per-pass Block::verify gate)
 // and ConvLowering (conv2d -> im2col-GEMM rewrite, bias handling, geometry
 // restrictions, no-op on convolution-free blocks).
 // =============================================================================

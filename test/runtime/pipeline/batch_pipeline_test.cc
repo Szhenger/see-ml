@@ -1,5 +1,5 @@
 // =============================================================================
-// feeder/batch_pipeline unit tests: the pipelining efficiency mechanism must
+// pipeline/batch_pipeline unit tests: the pipelining efficiency mechanism must
 // be invisible to training — the staged batch sequence is exactly the serial
 // FillBatch sequence (shuffled or not, across epoch wraparound), labels are
 // optional, and the feeder thread joins on early exits.

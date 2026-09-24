@@ -1,5 +1,5 @@
 // =============================================================================
-// custodian/ unit tests: the durable write path (gather writes, atomic
+// storage/ unit tests: the durable write path (gather writes, atomic
 // replacement, whole-file reads) and the SEKP checkpoint container (round
 // trip, plan binding, and the corruption/truncation rejections that must
 // fire before a byte reaches the arena).

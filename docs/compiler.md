@@ -79,7 +79,7 @@ Threading model, in one sentence: a block is built by one thread (use-lists are 
 
 ### Parsing: semantic analysis and shape inference
 
-`BuildForward` (`compiler/frontend/parser/`) turns the decoded SMF op list into SIR, but first `sema.cc` asks the whole-graph questions:
+`BuildForward` (`compiler/frontend/computation/`) turns the decoded SMF op list into SIR, but first `sema.cc` asks the whole-graph questions:
 
 - **Is the op list topologically ordered?** SMF requires ops to appear in dependency order — like a course catalog where every prerequisite is listed before the course that needs it. The check is elegantly cheap: walk the ops in order, maintaining a set of names *bound so far*; if an op consumes a name that isn't bound yet but *is* produced by some later op, that's a use-before-produce error. O(tensors + ops), two set lookups per edge.
 - **Does any op redefine an existing name?** (Outputs must be unique — this is SSA's "assigned once" rule, enforced at the source level.)
@@ -99,7 +99,7 @@ This is the heart of the compiler, and the most mathematical part of SeeAI. Ever
 
 ### The pass manager: trust, but re-verify
 
-A **pass** is a named graph-to-graph transformation. `PassManager` (`analysis/updater/`) runs them in registration order, and after *every single pass* re-runs `Block::verify()`. Why so paranoid? Attribution. If a pass corrupts the graph, the error message names *that pass*, at the moment of the crime — not some innocent later stage that happened to trip over the wreckage. A pass's own error, meanwhile, propagates verbatim. (Cheap insurance: verification is linear in the graph, and graphs here are small.)
+A **pass** is a named graph-to-graph transformation. `PassManager` (`analysis/pass_manager.cc`) runs them in registration order, and after *every single pass* re-runs `Block::verify()`. Why so paranoid? Attribution. If a pass corrupts the graph, the error message names *that pass*, at the moment of the crime — not some innocent later stage that happened to trip over the wreckage. A pass's own error, meanwhile, propagates verbatim. (Cheap insurance: verification is linear in the graph, and graphs here are small.)
 
 The manager also **times every pass** (the pass plus its verify), and the driver times the phases between them — frontend, merge-and-review, arena binding, lowering, the persistent image, assembly, the seal. They travel in `CompiledUpdate::pass_timings` and in the compile report's `"passes"` array, so a compile-side performance claim is a measurement anyone can repeat (E5, #84). On an 800 MB decoder (Apple M5) the whole graph pipeline — 1,417 ops through eight passes — is under 4 ms; the compile is assembly (133 ms) and the seal's hash (32 ms), i.e. bytes, which is why E2 went after copies and not passes. Three companions from the same hygiene batch: **DCE marks, then compacts once** — a backward sweep over private use counts finds whole dead chains, and `Block::removeOps` unlinks them and compacts the op list in one pass, where one `removeOp` per dead op was O(removed × ops), a quadratic cliff the first time a pass dead-codes a real fraction of the graph; the **SIR dump is opt-in** (`UpdateConfig::dump_sir`, `--dump-sir out.txt`) instead of streamed and retained by every compile; and the dump changes no byte of the plan.
 
@@ -187,7 +187,7 @@ Finally, the pass verifies every trainable actually *received* a gradient. A LoR
 
 ### Optimizer synthesis: the update step is just more instructions
 
-A training step isn't finished when gradients exist; the parameters must move. `OptimizerSynthesizer` (`analysis/calculus/optimizer.cc`) appends that movement as ordinary SIR ops, so that *one execution of the program is one complete training step* — forward, backward, clip, update, no interpreter in sight.
+A training step isn't finished when gradients exist; the parameters must move. `OptimizerSynthesizer` (`analysis/optimization/optimizer.cc`) appends that movement as ordinary SIR ops, so that *one execution of the program is one complete training step* — forward, backward, clip, update, no interpreter in sight.
 
 **Gradient accumulation** (`--grad-accum G`, roadmap 2a) keeps that shape and splits it in two. The plan compiles at the *micro-batch* `b`, so activation memory scales with `b`; the effective batch is `b·G`. Autodiff seeds `dL/dL = 1/G` instead of 1 (every micro-batch loss is a mean over its own rows, so `G` folded gradients sum to the mean over `b·G` rows — and a power-of-two `G` makes that scaling exact per element). The synthesizer then declares one persistent accumulator per parameter (`p.grad_acc`, zero-initialized, in the checkpointed segment like the AdamW moments) and appends `sc_low.accumulate(acc, grad)` for each — the tail of the **grad program** — before the clip, the step (now on the accumulator) and `sc_low.zero(acc)` — the **step program**. The driver splits the lowered stream at the first step instruction; the plan carries the grad program in its train section and the step program in a v9 section of its own, and the runtime runs `G` grad executions per optimizer step. With `G = 1` nothing changes: no accumulators, no step section, the very same monolithic program.
 
@@ -214,7 +214,7 @@ Training moves A and B; it never touches W. So how does the update reach the mod
 
 ### Quantization review: shrinking the frozen base to int8
 
-The frozen base weights dominate the plan's size, and during training they are only ever *read* — by matmuls. Can we store them smaller? `SelectQuantizedWeights` (`analysis/reviewer/quantization.cc`) says yes, carefully.
+The frozen base weights dominate the plan's size, and during training they are only ever *read* — by matmuls. Can we store them smaller? `SelectQuantizedWeights` (`analysis/statistics/quantization.cc`) says yes, carefully.
 
 The scheme is **per-column symmetric int8** (since E12, #95; plan v17 — earlier plans used one scale per tensor). For a weight `W [K, M]`, each output column `m` gets its own scale:
 
@@ -241,7 +241,7 @@ One more thing, and it's the punchline of the whole quantization story: the emit
 
 ### Arena binding: memory planning as a compile-time problem
 
-Ask yourself: what does `malloc` cost you on a device? Not just cycles — *unpredictability*. Fragmentation, allocation failure at step 900 of 1,000, nondeterministic addresses. SeeAI's answer is to compile memory away: `arena_binder.cc` (`backend/trainer/`) assigns every tensor a fixed byte offset in a single **arena**, sized at compile time, allocated exactly once on the device.
+Ask yourself: what does `malloc` cost you on a device? Not just cycles — *unpredictability*. Fragmentation, allocation failure at step 900 of 1,000, nondeterministic addresses. SeeAI's answer is to compile memory away: `arena_binder.cc` (`backend/allocation/`) assigns every tensor a fixed byte offset in a single **arena**, sized at compile time, allocated exactly once on the device.
 
 The arena has three segments, in order:
 
@@ -310,7 +310,7 @@ The fact is the CPU GEMM **tile geometry**: the K panel a pass over C folds in a
 
 The tuner's method is the benchmark document's discipline made mechanical. Each *arm* is one geometry `KxN`; each measurement is one `seeml-bench` run at that arm (`--gemm-tiles`), medians of repeats by steps-regression per fixture and thread width; arms are visited round-robin for several rounds so thermal drift lands on every arm alike, and each arm's per-key result is the median over rounds — **medians of medians**. An arm's score is the geometric mean over every (fixture, threads) key of its rows/s relative to the default arm's, so no fixture outvotes another by being larger. Two arms are always in the sweep whatever the grid says: the kernel defaults (the arm to beat) and the analytic hypothesis above. The winner becomes the host's policy only when it beats the defaults by a margin (3 % — the benchmarks document's "signal, not noise" line); otherwise the defaults are recorded, with every arm's numbers beside them. Either way the decision is *measured*, and the table says so.
 
-The table is keyed on the **host's identity** — `HostKey` in `backend/architecture/host_arch.h`: ISA, CPU model, physical cores, L1d and L2 bytes, SIMD width — every quantity that changes which tiling is fastest and nothing that does not. The bench prints the key, the tuner copies it, and the compiler recomputes it on the machine it runs on: one function, so the two planes cannot disagree about who a host is. The compiler's side of the seam is `backend/tuner/kernel_policy_table.cc`: a strict, purpose-built JSON reader (the compiler has no third-party dependencies, and a reader that guesses is a reader that misreads) and a resolution with three sources, in precedence order — `--gemm-tiles K,N` (explicit), `--kernel-policy table.json` (the entry for this host, or for `--target-host KEY` when cross-compiling), else the defaults. A table with no entry for the host is a note and the defaults; a table that does not parse, or names a geometry the kernels reject, is a hard error, because a bad policy silently costs every training step.
+The table is keyed on the **host's identity** — `HostKey` in `backend/architecture/host_arch.h`: ISA, CPU model, physical cores, L1d and L2 bytes, SIMD width — every quantity that changes which tiling is fastest and nothing that does not. The bench prints the key, the tuner copies it, and the compiler recomputes it on the machine it runs on: one function, so the two planes cannot disagree about who a host is. The compiler's side of the seam is `backend/architecture/kernel_policy_table.cc`: a strict, purpose-built JSON reader (the compiler has no third-party dependencies, and a reader that guesses is a reader that misreads) and a resolution with three sources, in precedence order — `--gemm-tiles K,N` (explicit), `--kernel-policy table.json` (the entry for this host, or for `--target-host KEY` when cross-compiling), else the defaults. A table with no entry for the host is a note and the defaults; a table that does not parse, or names a geometry the kernels reject, is a hard error, because a bad policy silently costs every training step.
 
 Where does the decision go? Into the **plan** — two header fields, `gemm_tile_k` and `gemm_tile_n` (v11; zero means the runtime's compiled-in default). This is the "decide early" principle applied to a knob that used to be a build flag: the compiler decides, the plan carries the decision, the runtime's load-time contract proves it (the K tile on the unroll), the CPU backend runs with it, and `seeml-seeu-dump` and the compile report both show it. Compile time is unchanged when no table is given — nothing is read.
 

@@ -1,8 +1,8 @@
 // =============================================================================
 // Backend partition tests: architecture/ (host detection sanity, the host
 // key a kernel-policy table is keyed on, the analytic tiling hypothesis),
-// tuner/ (the kernel-policy table reader and the policy resolution the
-// compiler and the bench share), and the trainer/ GPU kernel emitter.
+// architecture/ (the kernel-policy table reader and the policy resolution the
+// compiler and the bench share), and its GPU kernel emitter.
 // =============================================================================
 
 #include <unistd.h>
@@ -109,7 +109,7 @@ TEST(HostArch, UnknownCachesFallBackToUsableTiling) {
 }
 
 // =============================================================================
-// tuner/ — the kernel-policy table
+// architecture/ — the kernel-policy table
 // =============================================================================
 
 constexpr const char* kTable = R"({
@@ -267,7 +267,7 @@ TEST(KernelPolicyTable, ResolutionPrecedenceIsFlagTableDefault) {
 }
 
 // =============================================================================
-// trainer/ — GPU kernel emitter
+// architecture/ — GPU kernel emitter
 // =============================================================================
 
 TEST(KernelEmitter, GpuTilingClampsHostTiling) {

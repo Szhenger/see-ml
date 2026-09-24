@@ -1,5 +1,5 @@
 // =============================================================================
-// validator/ unit tests: the load-time bounds proof the executor's blind
+// verifier/ unit tests: the load-time bounds proof the executor's blind
 // dispatch rests on — per-opcode operand extents, the write-only-to-arena
 // rule, quantized-B pinning to rodata, overflow-safe bounds math, and the
 // regression that every instruction the compiler emits validates.
