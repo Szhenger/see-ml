@@ -60,4 +60,4 @@ stack reaches. Also the gate's own doctrine ("no improvement, no change")
 is only as good as the state it scores. Eval cost is bounded by
 `eval-every`; Tier D "gate time share" already tracks it.
 
-Refs: SeeML Algorithm Review (2026-09-14) §02-D, §04; #67; closed #18.
+Refs: SeeAI Algorithm Review (2026-09-14) §02-D, §04; #67; closed #18.

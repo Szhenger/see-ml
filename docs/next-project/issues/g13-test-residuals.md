@@ -55,4 +55,4 @@ Objective 5 (trustworthy measurement): every frontier comparison quotes
 project (E1, E7, #66, E11) needs a tile-crossing reference test to land
 safely.
 
-Refs: SeeML Algorithm Review (2026-09-14) §02-C/D, §04; closed #17, #24.
+Refs: SeeAI Algorithm Review (2026-09-14) §02-C/D, §04; closed #17, #24.

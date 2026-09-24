@@ -1,19 +1,19 @@
 ---
-title: "SeeRL F1: measured frontier harness — real mlx_lm.lora and torch.compile runs on the same host, model, corpus and tokens/step, plus a nightly frontier row"
+title: "SeeAI F1: measured frontier harness — real mlx_lm.lora and torch.compile runs on the same host, model, corpus and tokens/step, plus a nightly frontier row"
 labels: enhancement,python-plane,frontier-parity
 plane: Python plane
 origin: Frontier Outlook
-milestone: SeeRL v1.0.0.A
+milestone: SeeAI v1.0.0.A
 priority: P0
 ---
 ## Why
 
-Every frontier comparison SeeML has today is either from another host
+Every frontier comparison SeeAI has today is either from another host
 (`mlx_lm.lora` ~1,600 tok/s on an M4, `torch.compile` ~40% CPU MFU, the
 v1.2.4 field report) or a **floor**: `tool/frontier_exec.py price`
 interprets a plan op by op with no `mx.compile`, no `torch.compile` and no
 fusion. The 2026-09-18 Frontier Outlook therefore had to *speculate* every
-frontier cell (SmolLM-135M GPU: SeeML 1,749 tok/s measured vs MLX-LM
+frontier cell (SmolLM-135M GPU: SeeAI 1,749 tok/s measured vs MLX-LM
 2,200–3,200 guessed). The rest of this milestone (F2–F6) is priced against
 those guesses; it must be priced against measurements instead.
 
@@ -27,7 +27,7 @@ those guesses; it must be priced against measurements instead.
      the default mode (one process each — MLX latches the switch);
    - a hand-matched PyTorch LoRA loop under `torch.compile` on `cpu` and
      `mps` (inductor on MPS where it compiles; eager MPS otherwise, labelled);
-   - SeeML `model_update` on `cpu` and `metal` from the same package.
+   - SeeAI `model_update` on `cpu` and `metal` from the same package.
 2. One report per run in `seeml-bench`'s units and definitions (`tokens_per_s`,
    `it_per_s`, `step_ms` by steps-regression, `peak_rss_bytes`, train loss
    first/last, precision mode named on every row), schema-versioned; the
@@ -42,7 +42,7 @@ those guesses; it must be priced against measurements instead.
 ## Acceptance
 
 - Same-host table for SmolLM-135M (r8, S=128, 512 tok/step) and dec_wide:
-  SeeML cpu/metal, MLX-LM f32/default, torch.compile cpu, torch mps.
+  SeeAI cpu/metal, MLX-LM f32/default, torch.compile cpu, torch mps.
 - Every row names device, precision mode, library versions and host key.
 - Loss-agreement check fails loudly on a mismatched configuration (tested
   with a deliberately wrong rank).

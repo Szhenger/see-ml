@@ -29,11 +29,11 @@
 // merge, checkpoint save).
 //
 // Alongside the internal numbers, every cell carries the fields the external
-// fine-tuning harnesses print, under their definitions, so a SeeML run can
+// fine-tuning harnesses print, under their definitions, so a SeeAI run can
 // be set beside an MLX-LM `lora` log or a llama-bench table without unit
 // translation:
 //   tokens_per_s / samples_per_s  MLX-LM "Tokens/sec": target rows per wall
-//                                 second (every row of a SeeML batch is a
+//                                 second (every row of a SeeAI batch is a
 //                                 loss target, so this equals rows_per_s);
 //   it_per_s                      MLX-LM "It/sec" (optimizer steps per s);
 //   step_ms_min / step_ms_max     llama-bench's "± spread" over the repeats;
@@ -145,9 +145,9 @@ double Median(std::vector<double> v) {
 // --- The calibration workload (P5, #79) --------------------------------------
 // The nightly gate compares runs from DIFFERENT machines of one runner
 // class, and those differ by 15-35% on identical work. This kernel measures
-// the machine, not SeeML: a naive single-threaded f32 i-k-j matrix product
+// the machine, not SeeAI: a naive single-threaded f32 i-k-j matrix product
 // over three 64 KiB matrices, deliberately sharing no code with
-// runtime/executor — a regression in a SeeML kernel must never slow the
+// runtime/executor — a regression in a SeeAI kernel must never slow the
 // yardstick it is measured against. bench_compare.py scales each Tier A
 // delta by the ratio of two runs' calibration rates.
 //
@@ -772,7 +772,7 @@ int main(int argc, char** argv) {
               : 0.0;
       const rt::StepTimings st = engine.step_timings();
       const double denom = st.steps ? static_cast<double>(st.steps) : 1.0;
-      // External-standard fields. Every row of a SeeML batch is a loss
+      // External-standard fields. Every row of a SeeAI batch is a loss
       // target (token plans: next-token label per position; feature plans:
       // one label per row), so MLX-LM's masked "Tokens/sec" is exactly
       // rows_per_s here; the key name says which unit the fixture trains in.

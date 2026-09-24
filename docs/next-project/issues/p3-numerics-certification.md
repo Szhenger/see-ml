@@ -14,7 +14,7 @@ Bridge prices this at **up to ≈2× on reductions**; the largest single
 instance is attention's QK^T dot, an O(B·H·S²·d) loop
 (`attention.cc:110-112`), which the Performance Audit flagged (finding #9)
 as "plausibly ~2× on the hottest transformer loop — measure-first policy
-change, not a fix". torch reassociates freely; SeeML cannot — *by
+change, not a fix". torch reassociates freely; SeeAI cannot — *by
 doctrine, not by accident*. The audits' conclusion: spend this doctrine
 **consciously** or not at all.
 

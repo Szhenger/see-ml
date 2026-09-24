@@ -49,10 +49,10 @@ Metal as-is, which would freeze the O(S²) design into a second backend.
 ## Goal alignment
 
 MLX-LM fine-tunes SmolLM at 2048 tokens with a fused SDPA and 1.28 GB
-peak; SeeML's O(S²) cache makes the same sequence length a memory-gate
+peak; SeeAI's O(S²) cache makes the same sequence length a memory-gate
 refusal on the devices it targets. This is a prerequisite for the
 v1.3.0 gate (#65) to compare at MLX's sequence lengths, and for
 objective 3's Tier B attention row to mean anything at S > 256.
 
-Refs: SeeML Algorithm Review (2026-09-14) §02-C; Performance Audit §04
+Refs: SeeAI Algorithm Review (2026-09-14) §02-C; Performance Audit §04
 finding #9; #63, #65, #77.

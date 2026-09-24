@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export a PyTorch MLP and a dataset into SeeML's SMF / SDS formats.
+"""Export a PyTorch MLP and a dataset into SeeAI's SMF / SDS formats.
 
 SMF is the model container consumed by seeml-update-compile (source and
 teacher models); SDS is the fixed-shape dataset streamed by the compiled
@@ -44,7 +44,7 @@ Usage:
         qwen2, SmolLM2: config.json + safetensors) as a token-native SMF
         decoder — NumPy only. Adds: --text-corpus text.txt out.sds
         (tokenizes with the checkpoint's tokenizer.json; needs the
-        `tokenizers` package), --hf-parity (max |Δ logits| of the SeeML
+        `tokenizers` package), --hf-parity (max |Δ logits| of the SeeAI
         forward vs transformers; needs torch + transformers), and
         --allow-eps-drift (accepted for old scripts and ignored: the
         checkpoint's rms_norm_eps is carried in SMF v6 now).
@@ -516,7 +516,7 @@ def export_token_decoder_smf(embedding, blocks, head, path: str, seq_len: int,
 
 # --- Hugging Face import (roadmap Project 4, Phase T2) ---------------------
 # A Llama-class checkpoint directory (config.json + model.safetensors, or an
-# index over shards) becomes the SeeML token-native decoder without torch,
+# index over shards) becomes the SeeAI token-native decoder without torch,
 # transformers or safetensors: the container is parsed by hand (it is a
 # JSON header plus raw little-endian tensors) and the walk is NumPy. What
 # the walk does, weight by weight:
@@ -524,11 +524,11 @@ def export_token_decoder_smf(embedding, blocks, head, path: str, seq_len: int,
 #   GQA -> MHA                  k/v projections are repeated per query head
 #                               (head h reads kv head h // (H / H_kv)) until
 #                               the format carries KV heads natively
-#   rotate-half -> interleaved  HF rotates pairs (c, c + d/2); SeeML rotates
+#   rotate-half -> interleaved  HF rotates pairs (c, c + d/2); SeeAI rotates
 #                               (2c, 2c+1) at the same frequency base^(-2c/d),
 #                               so q and k output features are permuted
-#                               within each head: SeeML[2c] = HF[c],
-#                               SeeML[2c+1] = HF[c + d/2]. Scores are a dot
+#                               within each head: SeeAI[2c] = HF[c],
+#                               SeeAI[2c+1] = HF[c + d/2]. Scores are a dot
 #                               product over d, invariant to a permutation
 #                               applied to both; v and o are untouched.
 #   rope_theta -> rope_base     per Rope op (SMF v5 attr1)
@@ -536,7 +536,7 @@ def export_token_decoder_smf(embedding, blocks, head, path: str, seq_len: int,
 #   RMSNorm eps                 per RmsNorm op (SMF v6 attr2, P7 #96): a
 #                               Qwen2-class 1e-6 is the model's own forward
 #                               on the device, not an approximation of it.
-# The parity check (--hf-parity) runs the SeeML-semantics NumPy forward
+# The parity check (--hf-parity) runs the SeeAI-semantics NumPy forward
 # below against `transformers` when it is installed — a second, independent
 # implementation of every op the compiled plan will execute.
 
@@ -616,7 +616,7 @@ def load_hf_checkpoint(model_dir: str):
 
 
 def _rope_interleave_order(d: int):
-    """HF feature index for each SeeML feature within a head: SeeML pair
+    """HF feature index for each SeeAI feature within a head: SeeAI pair
     (2c, 2c+1) <- HF (c, c + d/2)."""
     import numpy as np
 
@@ -640,12 +640,12 @@ def hf_llama_to_seeml(config: dict, tensors: dict, seq_len: int,
                          "the importer walks (llama, qwen2)")
     if config.get("hidden_act", "silu") != "silu":
         raise ValueError(f"hidden_act '{config.get('hidden_act')}': the "
-                         "SeeML decoder block is SwiGLU (silu) only")
+                         "SeeAI decoder block is SwiGLU (silu) only")
     if config.get("rope_scaling") not in (None, {}):
         raise ValueError("rope_scaling is set; the runtime's RoPE is the "
                          "plain base^(-2c/d) recurrence")
     if config.get("mlp_bias", False):
-        raise ValueError("mlp_bias=true: the SeeML MLP has no biases")
+        raise ValueError("mlp_bias=true: the SeeAI MLP has no biases")
     D = int(config["hidden_size"])
     H = int(config["num_attention_heads"])
     Hkv = int(config.get("num_key_value_heads") or H)
@@ -662,7 +662,7 @@ def hf_llama_to_seeml(config: dict, tensors: dict, seq_len: int,
     head_dim = int(config.get("head_dim") or d)
     if head_dim != d:
         raise ValueError(f"head_dim {head_dim} != hidden_size / heads {d}: "
-                         "the SeeML attention geometry is H x (D / H)")
+                         "the SeeAI attention geometry is H x (D / H)")
     if d % 2 != 0:
         raise ValueError(f"head width {d} is odd; RoPE needs pairs")
     if H % Hkv != 0:
@@ -731,7 +731,7 @@ def hf_llama_to_seeml(config: dict, tensors: dict, seq_len: int,
             blk["bk"] = kv_bias(take(p + "self_attn.k_proj.bias"), True)
             blk["bv"] = kv_bias(take(p + "self_attn.v_proj.bias"), False)
         if p + "self_attn.o_proj.bias" in tensors:
-            raise ValueError("o_proj has a bias; the SeeML block has none")
+            raise ValueError("o_proj has a bias; the SeeAI block has none")
         blocks.append(blk)
     emb = np.ascontiguousarray(take("model.embed_tokens.weight"))
     if emb.shape != (V, D):
@@ -768,7 +768,7 @@ def export_hf_decoder(model_dir: str, out_path: str, seq_len: int,
 def reference_decoder_logits(embedding, blocks, head, num_heads: int,
                              rope_base: float, tokens,
                              norm_eps: float = DEFAULT_NORM_EPS):
-    """The SeeML decoder's semantics in NumPy: the forward the compiled
+    """The SeeAI decoder's semantics in NumPy: the forward the compiled
     plan executes (RMSNorm at the model's eps, interleaved RoPE with the
     kernel's frequency recurrence, causal softmax, SwiGLU), for parity
     checks. tokens: int array [B, S]; returns float32 logits [B, S, V]."""
@@ -831,7 +831,7 @@ def reference_decoder_logits(embedding, blocks, head, num_heads: int,
 
 
 def hf_parity(model_dir: str, conv: dict, batch: int = 2, seed: int = 0):
-    """max |Δ logits| between the SeeML-semantics NumPy forward of the
+    """max |Δ logits| between the SeeAI-semantics NumPy forward of the
     converted arrays and `transformers`' forward of the checkpoint on
     seeded random tokens. Needs torch + transformers (tier 2)."""
     import numpy as np
@@ -1093,7 +1093,7 @@ if __name__ == "__main__":
                              "ignored — rms_norm_eps is carried (SMF v6)")
     parser.add_argument("--hf-parity", action="store_true",
                         help="--hf only: after the export, compare the "
-                             "SeeML-semantics NumPy forward against "
+                             "SeeAI-semantics NumPy forward against "
                              "transformers (needs torch + transformers)")
     parser.add_argument("--text-corpus", nargs=2,
                         metavar=("TEXT", "OUT_SDS"),

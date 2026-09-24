@@ -8,7 +8,7 @@ priority: P2
 ## Algorithmic root cause
 
 Inductor fuses arbitrary pointwise/reduction chains into single loops;
-SeeML ships exactly **one** fusion pattern — GEMM bias+activation
+SeeAI ships exactly **one** fusion pattern — GEMM bias+activation
 epilogues, forward-only (1a, shipped) — while `elementwise.cc` itself
 declares the runtime CPU-bandwidth-bound. Every unfused elementwise op is
 a full arena round trip. The Frontier Bridge names fusion depth as the

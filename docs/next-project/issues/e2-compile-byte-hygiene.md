@@ -12,7 +12,7 @@ plan assembly — the loaded `SmfModel`, the packed `rodata` vector, and the
 assembled plan blob (`update_compiler.cc:510-522`) — **≈84 GB peak for a
 7B-f32 model**, and the emitter then peaks at ≈11× plan size. This is the
 difference between compiling a 7B model and an OOM on the very devices
-SeeML targets. None of it is doctrinal; it is copy hygiene
+SeeAI targets. None of it is doctrinal; it is copy hygiene
 (Performance Audit finding #2, the highest-value compile-side item).
 
 ## Design — all bitwise-safe

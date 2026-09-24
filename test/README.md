@@ -1,8 +1,8 @@
-# The SeeML Test Tree
+# The SeeAI Test Tree
 
 ## How do you trust a compiler?
 
-Think about what SeeML claims: that it can differentiate your model correctly, plan every byte of memory without collisions, survive power cuts, and produce identical bits at any thread count. Extraordinary claims, and each one is *checkable* — which is what this tree is for. It's organized in the same fashion as the `compiler/` and `runtime/` subsystems: the harness and fixtures are partitioned per discipline behind façade headers, and the suites mirror the subsystem partition of the code they verify — **a suite lives where its subject lives**, so if you can find the code, you can find its tests, and vice versa.
+Think about what SeeAI claims: that it can differentiate your model correctly, plan every byte of memory without collisions, survive power cuts, and produce identical bits at any thread count. Extraordinary claims, and each one is *checkable* — which is what this tree is for. It's organized in the same fashion as the `compiler/` and `runtime/` subsystems: the harness and fixtures are partitioned per discipline behind façade headers, and the suites mirror the subsystem partition of the code they verify — **a suite lives where its subject lives**, so if you can find the code, you can find its tests, and vice versa.
 
 ```
 test/
@@ -12,7 +12,7 @@ test/
     assert.h            the TEST / EXPECT_* / ASSERT_* macro surface
     seetest_main.cc     the runner main linked into every suite
   support/              shared fixtures (façade: builders.h)
-    models.cc           deterministic SMF (SeeML Model Format) model builders + BaseConfig
+    models.cc           deterministic SMF (SeeAI Model Format) model builders + BaseConfig
     corpora.cc          synthetic datasets (classification/regression/unlabeled)
     probes.cc           engine-arena introspection + the test-run environment
     scoped_temp_dir     filesystem sandbox for I/O suites

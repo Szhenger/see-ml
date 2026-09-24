@@ -1,4 +1,4 @@
-# Building SeeML
+# Building SeeAI
 
 ## What does it even mean to "build" a program?
 
@@ -23,14 +23,14 @@ two steps.
 ## Why not just type the compiler commands yourself?
 
 You could. For one file, `clang++ hello.cc -o hello` is the whole build. But
-SeeML has ~90 source files and two dozen test programs. Typing ninety compile
+SeeAI has ~90 source files and two dozen test programs. Typing ninety compile
 commands and then a link command by hand, every time you change one line,
 would be miserable and error-prone. Worse, if you change *one* file, you'd
 want to recompile only *that* file and re-link — not redo all ninety.
 
 A **build system** is a program that knows the list of files, the commands,
 and (sometimes) which outputs are stale, so `build` becomes one word instead
-of ninety commands. SeeML gives you two, and they produce the identical
+of ninety commands. SeeAI gives you two, and they produce the identical
 result.
 
 ## What's actually in this folder

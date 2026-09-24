@@ -1,8 +1,8 @@
-# Using SeeML
+# Using SeeAI
 
 ## The Shape of the Workflow
 
-SeeML compiles an on-device model update *ahead of time*: LoRA adapters are grafted onto a frozen model, the backward pass and optimizer are synthesized as a fixed instruction stream bound to a pre-planned arena, and the result is executed on-device by a zero-dependency VM. One `.seeu` plan = one complete, gated, resumable, atomically-committed update.
+SeeAI compiles an on-device model update *ahead of time*: LoRA adapters are grafted onto a frozen model, the backward pass and optimizer are synthesized as a fixed instruction stream bound to a pre-planned arena, and the result is executed on-device by a zero-dependency VM. One `.seeu` plan = one complete, gated, resumable, atomically-committed update.
 
 The workflow has three steps on two machines:
 
@@ -55,7 +55,7 @@ python3 tool/export_model.py --hf <model_dir> smollm.smf --seq-len 128 \
   --text-corpus docs.txt docs.sds --hf-parity
 ```
 
-The walk transposes every Linear to `MatMul(x, W)` layout, repeats grouped-query k/v heads to one per query head (the format carries no KV heads yet), permutes q/k features within each head from Hugging Face's rotate-half RoPE pairs `(c, c + d/2)` to SeeML's interleaved `(2c, 2c+1)` (the scores are a dot product over `d`, so a permutation applied to both sides is exact), carries `rope_theta` per Rope op, adds Qwen2's q/k/v biases as `AddBias` ops, and ties `w_head` to the embedding when the checkpoint does. What it refuses, loudly: a non-SwiGLU block, `rope_scaling`, MLP biases, a `--seq-len` past `max_position_embeddings`, and an `rms_norm_eps` other than the runtime's fixed `1e-5` (Qwen2's `1e-6` is a drift; `--allow-eps-drift` accepts it knowing step 0 will not equal the source model — the attribute is P7, #96). Two tier-2 extras: `--text-corpus` tokenizes a UTF-8 file with the checkpoint's `tokenizer.json` into `S + 1`-token records (needs `tokenizers`), and `--hf-parity` runs a NumPy forward with SeeML's exact semantics against `transformers` on seeded random tokens and prints the max logit delta (SmolLM-135M: `6.4e-05` at `S = 128`; needs torch + transformers). Neither is needed to import.
+The walk transposes every Linear to `MatMul(x, W)` layout, repeats grouped-query k/v heads to one per query head (the format carries no KV heads yet), permutes q/k features within each head from Hugging Face's rotate-half RoPE pairs `(c, c + d/2)` to SeeAI's interleaved `(2c, 2c+1)` (the scores are a dot product over `d`, so a permutation applied to both sides is exact), carries `rope_theta` per Rope op, adds Qwen2's q/k/v biases as `AddBias` ops, and ties `w_head` to the embedding when the checkpoint does. What it refuses, loudly: a non-SwiGLU block, `rope_scaling`, MLP biases, a `--seq-len` past `max_position_embeddings`, and an `rms_norm_eps` other than the runtime's fixed `1e-5` (Qwen2's `1e-6` is a drift; `--allow-eps-drift` accepts it knowing step 0 will not equal the source model — the attribute is P7, #96). Two tier-2 extras: `--text-corpus` tokenizes a UTF-8 file with the checkpoint's `tokenizer.json` into `S + 1`-token records (needs `tokenizers`), and `--hf-parity` runs a NumPy forward with SeeAI's exact semantics against `transformers` on seeded random tokens and prints the max logit delta (SmolLM-135M: `6.4e-05` at `S = 128`; needs torch + transformers). Neither is needed to import.
 
 Each corpus record is `S + 1` ids: the runtime feeds the first `S` and derives next-token labels from the shifted view, and the embedding gathers on-device. `python3 tool/export_model.py --demo-decoder out/` writes a working example of both files — `decoder.smf` and `decoder_corpus.sds` (NumPy only — no PyTorch needed); the corpus is deliberately *not* named `corpus.sds`, so both demos can share one output directory. Pass those names to the compile and update steps below in place of `model.smf` / `corpus.sds`. Remember that `--data-batch` counts *rows* (tokens), so it must be a multiple of `seq_len`.
 
@@ -74,7 +74,7 @@ seeml-update-compile \
   --steps 1000 --report pkg/report.json --build
 ```
 
-**What to train on.** `--data-batch` (default 32) fixes the batch size — how many samples are processed together in each training step — *into the plan*; shapes are compile-time facts in SeeML, so this isn't a runtime knob. `--loss` picks the objective, the measure of wrongness that training drives down: `xent` (softmax cross-entropy, needs class labels), `mse` (mean squared error, dense labels), `kl` (**distillation**: the model learns to imitate a teacher model's output probabilities rather than hard labels — add `--teacher teacher.smf` and use an unlabeled corpus), or `xent+kl` (both, blended by `--distill-weight`, default 0.5; `--temperature`, default 2.0, softens both distributions, and the KL term is scaled by `T²` so that `--distill-weight` means the same thing at every temperature — see [runtime.md](runtime.md) for why).
+**What to train on.** `--data-batch` (default 32) fixes the batch size — how many samples are processed together in each training step — *into the plan*; shapes are compile-time facts in SeeAI, so this isn't a runtime knob. `--loss` picks the objective, the measure of wrongness that training drives down: `xent` (softmax cross-entropy, needs class labels), `mse` (mean squared error, dense labels), `kl` (**distillation**: the model learns to imitate a teacher model's output probabilities rather than hard labels — add `--teacher teacher.smf` and use an unlabeled corpus), or `xent+kl` (both, blended by `--distill-weight`, default 0.5; `--temperature`, default 2.0, softens both distributions, and the KL term is scaled by `T²` so that `--distill-weight` means the same thing at every temperature — see [runtime.md](runtime.md) for why).
 
 **What to adapt.** `--lora-rank` (default 8) and `--lora-alpha` (default 16) set the adapter geometry — the update lives in `r·(K+M)` parameters per adapted matmul instead of `K·M` ([compiler.md](compiler.md) does the math). `--targets substr1,substr2` restricts grafting to weights whose names match a substring; by default every eligible frozen matmul is adapted. Every substring must match at least one weight LoRA can adapt, or the compile fails and says why: a weight read any other way — above all an LM head tied to the embedding table, which the gather also reads — cannot take `W + Δ` without changing that other site, so `--targets emb` on a tied model is an error rather than a silently unmet filter. `--lora-seed` (default 42) makes the adapter initialization reproducible.
 
@@ -170,7 +170,7 @@ re-proves every kernel family bit-for-bit across thread counts.
 
 ## Development
 
-Working on SeeML itself:
+Working on SeeAI itself:
 
 ```bash
 cmake -S . -B build && cmake --build build -j && ctest --test-dir build

@@ -1,7 +1,7 @@
-# The SeeML Journey: From SeeC to SeeML
+# The SeeAI Journey: From SeeC to SeeAI
 
 This document traces the evolution of the project across its full git history —
-635 commits from the initial commit on April 30, 2025 to the SeeML update
+635 commits from the initial commit on April 30, 2025 to the SeeAI update
 compiler of July 2026. The work arrived in three big bursts (June 2025,
 May 2026, July 2026) separated by long quiet stretches, and the project
 reinvented itself twice along the way.
@@ -57,13 +57,13 @@ Engineering discipline arrived alongside: CMake, `.clang-format` and
 `.clang-tidy` (Google style), and in early June, integration/unit tests and
 architecture documentation.
 
-## Phase 4 — SeeML: the update compiler (July 2026)
+## Phase 4 — SeeAI: the update compiler (July 2026)
 
-On **July 12, 2026** the project was formally renamed SeeC++ → **SeeML**, and
-days later it was re-scoped once more: "Engineer the SeeML Model Update
+On **July 12, 2026** the project was formally renamed SeeC++ → **SeeAI**, and
+days later it was re-scoped once more: "Engineer the SeeAI Model Update
 Compiler" (July 16) removed the legacy inference-pipeline sources and
 reoriented the product around model updates and training — captured by the
-README title, "SeeML: An ML Update Compiler (How to Train Your Local Model)".
+README title, "SeeAI: An ML Update Compiler (How to Train Your Local Model)".
 
 The rest of July was rapid maturation:
 
@@ -134,6 +134,6 @@ closed with a clean `-Wall -Wextra -Werror` rebuild and all 24 suites —
 
 The repo evolved from a hand-rolled C compiler (SeeC, completed July 2025),
 through a C++ rewrite that pivoted mid-stream into an ONNX inference compiler
-(SeeC++, October 2025 – June 2026), into today's SeeML — a training and
+(SeeC++, October 2025 – June 2026), into today's SeeAI — a training and
 model-update compiler with a fully partitioned compiler/runtime/test
 architecture, adversarially audited and hardened end to end in July 2026.

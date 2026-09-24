@@ -47,7 +47,7 @@
 // the trace can never claim less than the instruction was allowed to write.
 // Every instruction is validated before anything executes, and the plan's
 // self-hash is verified: the probe refuses what the engine would refuse.
-// Strict arguments, as in every SeeML tool: exit 2 for a bad command line,
+// Strict arguments, as in every SeeAI tool: exit 2 for a bad command line,
 // 1 for a bad input.
 //
 // Paths. This is a build-host tool run with its invoker's own privileges,
@@ -508,7 +508,7 @@ std::string RunProgram(rt::ExecutorBackend& backend, const Program& program,
 }  // namespace
 
 int main(int argc, char** argv) {
-  // --version short-circuits, as in every SeeML tool.
+  // --version short-circuits, as in every SeeAI tool.
   for (int i = 1; i < argc; ++i)
     if (std::strcmp(argv[i], "--version") == 0) {
       std::printf("seeml-plan-probe %s\n", up::kSeemlVersion);

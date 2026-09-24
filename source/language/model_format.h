@@ -22,7 +22,7 @@
 #endif
 
 // =============================================================================
-// SMF — SeeML Model Format: the on-disk contract and its in-memory form.
+// SMF — SeeAI Model Format: the on-disk contract and its in-memory form.
 //
 // A minimal, dependency-free binary container for the feed-forward models the
 // update compiler operates on. It plays the role ONNX ingestion plays on the

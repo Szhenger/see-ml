@@ -347,7 +347,7 @@ class PackTest(unittest.TestCase):
 
 
 class CliTest(unittest.TestCase):
-    """Strict like every SeeML tool: exit 2, never a default."""
+    """Strict like every SeeAI tool: exit 2, never a default."""
 
     def assert_exit_2(self, argv):
         with redirect_stderr(io.StringIO()):

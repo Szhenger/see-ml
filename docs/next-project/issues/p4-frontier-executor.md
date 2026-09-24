@@ -8,12 +8,12 @@ priority: P1
 ## Doctrinal root cause
 
 torch reaches the Apple **AMX** matrix coprocessor only via Accelerate
-(there is no public ISA); SeeML's runtime builds with a C++ compiler
+(there is no public ISA); SeeAI's runtime builds with a C++ compiler
 alone, so its CPU ceiling is the NEON peak — **0.84 vs 1.49 TFLOP/s,
 ≈1.8× before a single line of kernel code is compared** (Frontier Bridge
 §02). The audits concluded this is a *product decision* (a dependency
 exception), but today it is unpriced: nobody has measured what
-Accelerate/MLX would actually buy **on SeeML's own plans and shapes**.
+Accelerate/MLX would actually buy **on SeeAI's own plans and shapes**.
 
 ## Python-plane design
 
@@ -30,7 +30,7 @@ ISA, never shipped on device:
 - **Ceiling pricing:** reports per-plan tok/s and MFU under each frontier
   backend next to the C++ numbers, so the Accelerate-exception and
   GPU-priority decisions are data, not vibes — the Frontier Bridge's
-  anchor table (~1,605 tok/s MLX vs 80 tok/s SeeML at 135M) regenerated
+  anchor table (~1,605 tok/s MLX vs 80 tok/s SeeAI at 135M) regenerated
   on demand for *any* plan.
 - Extends the existing Python seam (`export_model.py` already owns
   PyTorch on the on-ramp; this adds the off-ramp).

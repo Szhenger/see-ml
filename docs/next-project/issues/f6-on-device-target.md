@@ -1,16 +1,16 @@
 ---
-title: "SeeRL F6: on-device target — iPhone/iPad package runs, energy per token as a Tier A metric, adapter-only update packages"
+title: "SeeAI F6: on-device target — iPhone/iPad package runs, energy per token as a Tier A metric, adapter-only update packages"
 labels: enhancement,frontier-parity
 plane: Gates & docs
 origin: Frontier Outlook
-milestone: SeeRL v1.0.0.A
+milestone: SeeAI v1.0.0.A
 priority: P2
 ---
 ## Why
 
-SeeML's claim is on-device training with no Python, but every measurement
+SeeAI's claim is on-device training with no Python, but every measurement
 so far is from a MacBook. The frontier frameworks are not designed to run
-on a phone; this is where SeeML's doctrine (one arena, validated plans,
+on a phone; this is where SeeAI's doctrine (one arena, validated plans,
 gates that score what ships, #95) should turn into a product advantage —
 and it is unmeasured.
 

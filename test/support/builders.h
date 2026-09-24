@@ -12,7 +12,7 @@
 #include "source/language/model_format.h"
 
 // =============================================================================
-// Shared fixtures for the SeeML test suites — the support façade. The
+// Shared fixtures for the SeeAI test suites — the support façade. The
 // implementations are partitioned per discipline, in the fashion of the
 // compiler and runtime subsystems:
 //   models.cc   deterministic SMF model builders + the default UpdateConfig

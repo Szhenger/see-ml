@@ -1,10 +1,10 @@
-# The SeeML Update Compiler
+# The SeeAI Update Compiler
 
 ## What is a compiler, anyway?
 
 Recall that a compiler is a program that translates a *source language* into a *target language* — classically, C into machine code. But nothing about that definition requires the source to be C. A compiler is really just a promise: give me something declarative, and I will hand you back something executable, having made every decision that could possibly be made early, so that nothing is left to chance later.
 
-SeeML's compiler makes exactly that promise about *training a neural network*. Its source language is a frozen model (an `.smf` file) plus a configuration — "adapt this model with rank-8 LoRA, cross-entropy loss, AdamW, 1,000 steps." Its target language is a `.seeu` **update plan**: three flat streams of 64-byte instructions (one to train, one to evaluate, one to merge), plus every constant and every byte of memory layout the job will ever need. The device that eventually runs the plan doesn't plan anything. It just executes.
+SeeAI's compiler makes exactly that promise about *training a neural network*. Its source language is a frozen model (an `.smf` file) plus a configuration — "adapt this model with rank-8 LoRA, cross-entropy loss, AdamW, 1,000 steps." Its target language is a `.seeu` **update plan**: three flat streams of 64-byte instructions (one to train, one to evaluate, one to merge), plus every constant and every byte of memory layout the job will ever need. The device that eventually runs the plan doesn't plan anything. It just executes.
 
 Why go to all this trouble? Because everything a compiler decides ahead of time is something that *cannot go wrong on the device*. A shape mismatch, an out-of-memory surprise, a subtle difference between the graph you trained and the graph you evaluated — all of these become compile-time errors on your build machine instead of runtime failures in the field.
 
@@ -63,7 +63,7 @@ activations = Σ over ops (batch × output_width × 4 bytes)   (+ 8·batch per L
 
 Here's a question worth pausing on: why do compilers bother with an *intermediate* representation at all? Why not translate the input directly to output instructions?
 
-Because an IR is the one data structure every stage can agree on. The parser produces it, autodiff rewrites it, the memory planner walks it, the lowerer consumes it — and each of those stages can be written, tested, and verified against the IR's invariants alone, in blissful ignorance of the others. SeeML's IR is called **SIR**, and it lives in `compiler/frontend/representation/` (façade: `sir.h`, with `type` / `value` / `operation` / `block` behind it).
+Because an IR is the one data structure every stage can agree on. The parser produces it, autodiff rewrites it, the memory planner walks it, the lowerer consumes it — and each of those stages can be written, tested, and verified against the IR's invariants alone, in blissful ignorance of the others. SeeAI's IR is called **SIR**, and it lives in `compiler/frontend/representation/` (façade: `sir.h`, with `type` / `value` / `operation` / `block` behind it).
 
 SIR is in **SSA form** — *static single assignment* — which sounds fancier than it is: every value is defined exactly once, and used any number of times afterward. Think of it as a spreadsheet where each cell is computed once from earlier cells and never overwritten. This one rule buys us a lot:
 
@@ -95,7 +95,7 @@ If a teacher model is in play — **distillation** trains a model to imitate a l
 
 ## The analysis phase: deriving the training program
 
-This is the heart of the compiler, and the most mathematical part of SeeML. Everything in `compiler/analysis/` is re-exported by the `update_passes.h` façade. We'll take the passes in the order the driver runs them.
+This is the heart of the compiler, and the most mathematical part of SeeAI. Everything in `compiler/analysis/` is re-exported by the `update_passes.h` façade. We'll take the passes in the order the driver runs them.
 
 ### The pass manager: trust, but re-verify
 
@@ -113,7 +113,7 @@ wmat = filter_matrix(filter)  [Cin·KH·KW, Cout]
 y    = col2im(cols @ wmat)    back to [N, Cout, OH, OW]
 ```
 
-You pay memory (patches get duplicated) to buy the one operation the rest of the system already knows how to execute, differentiate, and tile: **GEMM** — *general matrix multiply*, the standard name for the workhorse operation `C = A@B`. Grouped and dilated convolutions don't fit this simple form, so the pass *rejects* them with a clear diagnostic rather than silently mis-lowering — a design rule you'll see everywhere in SeeML.
+You pay memory (patches get duplicated) to buy the one operation the rest of the system already knows how to execute, differentiate, and tile: **GEMM** — *general matrix multiply*, the standard name for the workhorse operation `C = A@B`. Grouped and dilated convolutions don't fit this simple form, so the pass *rejects* them with a clear diagnostic rather than silently mis-lowering — a design rule you'll see everywhere in SeeAI.
 
 ### LoRA grafting: the linear algebra of small updates
 
@@ -148,7 +148,7 @@ One subtlety: a weight *tied* across several matmuls gets **one** adapter pair, 
 
 ### Automatic differentiation: the chain rule, run in reverse, by a compiler
 
-Here is the pass that earns the word "calculus" in its folder name. Training needs gradients — the direction in which each trainable parameter should move to reduce the loss. Frameworks like PyTorch compute these dynamically, by taping operations at runtime. SeeML cannot afford a tape (the device executes a *fixed* instruction stream), so `TrainableAutodiff` (`analysis/calculus/autodiff.cc`) does something more interesting: it **synthesizes the backward pass as more SIR**, at compile time. Differentiation becomes a graph rewrite.
+Here is the pass that earns the word "calculus" in its folder name. Training needs gradients — the direction in which each trainable parameter should move to reduce the loss. Frameworks like PyTorch compute these dynamically, by taping operations at runtime. SeeAI cannot afford a tape (the device executes a *fixed* instruction stream), so `TrainableAutodiff` (`analysis/calculus/autodiff.cc`) does something more interesting: it **synthesizes the backward pass as more SIR**, at compile time. Differentiation becomes a graph rewrite.
 
 First, the math. Recall the chain rule: if `L = f(g(h(x)))`, then `dL/dx = f′·g′·h′`. For a network, `L` is a scalar loss and there are many inputs, so the object of interest is the gradient `∂L/∂v` for every value `v` — called the **adjoint** of `v`. Reverse-mode autodiff computes adjoints by one backward sweep: start with `∂L/∂L = 1`, and walk the graph *backward*, applying to each op a **VJP** — vector-Jacobian product — rule that converts the adjoint of its output into adjoint contributions for its inputs. (The *Jacobian* is the matrix of every partial derivative of an op's outputs with respect to its inputs; a VJP multiplies the upstream adjoint through it without ever building it explicitly.) It turns out that one forward pass plus one backward pass gives you *every* parameter's gradient, no matter how many parameters there are — this is why reverse mode (and not forward mode) powers all of deep learning.
 
@@ -241,7 +241,7 @@ One more thing, and it's the punchline of the whole quantization story: the emit
 
 ### Arena binding: memory planning as a compile-time problem
 
-Ask yourself: what does `malloc` cost you on a device? Not just cycles — *unpredictability*. Fragmentation, allocation failure at step 900 of 1,000, nondeterministic addresses. SeeML's answer is to compile memory away: `arena_binder.cc` (`backend/trainer/`) assigns every tensor a fixed byte offset in a single **arena**, sized at compile time, allocated exactly once on the device.
+Ask yourself: what does `malloc` cost you on a device? Not just cycles — *unpredictability*. Fragmentation, allocation failure at step 900 of 1,000, nondeterministic addresses. SeeAI's answer is to compile memory away: `arena_binder.cc` (`backend/trainer/`) assigns every tensor a fixed byte offset in a single **arena**, sized at compile time, allocated exactly once on the device.
 
 The arena has three segments, in order:
 
@@ -304,7 +304,7 @@ It took a wrong model to get here, and the mistake is worth keeping (#90, the 20
 
 ### The kernel policy: measured offline, decided at compile time
 
-Analytical models are good; measurements are better. But a measurement made *inside* the compiler is a measurement the compiler cannot reproduce or explain, and it costs every compile a wall-clock budget the build host may not have. So SeeML draws the line where the Two-Plane Overhaul (`docs/next-project/`) draws it: **the compiler never measures.** Tuning lives on the build host, offline, in Python — `tool/autotune.py` — and the compiler consumes one decided fact per host.
+Analytical models are good; measurements are better. But a measurement made *inside* the compiler is a measurement the compiler cannot reproduce or explain, and it costs every compile a wall-clock budget the build host may not have. So SeeAI draws the line where the Two-Plane Overhaul (`docs/next-project/`) draws it: **the compiler never measures.** Tuning lives on the build host, offline, in Python — `tool/autotune.py` — and the compiler consumes one decided fact per host.
 
 The fact is the CPU GEMM **tile geometry**: the K panel a pass over C folds in and the N sweep width (`runtime/executor/kernel_policy.h`). It is a throughput knob and *only* a throughput knob: the N tile picks traversal order, not reduction grouping, and the K tile keeps the kernel's 4-wide unroll groups aligned as long as it stays a multiple of 4 — so every geometry the kernels accept computes **bit-identical** results (`kernels_test` proves it across a ragged shape at every tile boundary, `update_engine_test` across whole training runs). That is what lets a table pick among them without touching the determinism contract.
 

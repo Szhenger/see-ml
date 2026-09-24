@@ -10,7 +10,7 @@ priority: P0
 100% of training FLOPs go through two autovectorized blocked loop nests —
 zero intrinsics in the repo, no panel packing, no M register blocking.
 Vendor BLAS (what `torch.compile` calls) packs panels and holds C in an
-MR×NR register block at 60–90% of peak; SeeML sits at **4–13% MFU**. The
+MR×NR register block at 60–90% of peak; SeeAI sits at **4–13% MFU**. The
 Frontier Bridge prices this single factor at **≈3–5×** — the largest
 *engineering* (non-doctrinal) term in the CPU gap.
 

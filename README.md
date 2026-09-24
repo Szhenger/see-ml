@@ -1,4 +1,4 @@
-# SeeML: An ML Update Compiler (How to Train a Model)
+# SeeAI: An ML Update Compiler (How to Train a Model)
 
 ## This is Machine Learning
 
@@ -50,7 +50,7 @@ Exit code `0` means the model improved and was committed. Exit code `3` means it
 
 ## How to Read these Documents
 
-These documents aim to be educational as well as descriptive. SeeML happens to be a small, complete instance of several of computer science's greatest hits — compilers, virtual machines, calculus done by a program, cache-aware algorithms, crash-safe storage — and the docs teach each idea from first principles before showing you SeeML's implementation of it. That includes the machine learning: if you've completed CS50x (or equivalent), you have every prerequisite; the ML itself is taught here, with the compiler as the textbook.
+These documents aim to be educational as well as descriptive. SeeAI happens to be a small, complete instance of several of computer science's greatest hits — compilers, virtual machines, calculus done by a program, cache-aware algorithms, crash-safe storage — and the docs teach each idea from first principles before showing you SeeAI's implementation of it. That includes the machine learning: if you've completed CS50x (or equivalent), you have every prerequisite; the ML itself is taught here, with the compiler as the textbook.
 
 Read them in this order:
 
@@ -75,7 +75,7 @@ If you remember nothing else, remember these five, because every file in this re
 
 ## Scope and Limitations
 
-What SeeML can train today, stated up front:
+What SeeAI can train today, stated up front:
 
 - **Models.** Feed-forward and decoder-transformer graphs over twelve
   operator kinds: `MatMul`, `AddBias`, `Relu`, `Gelu`, `Silu`, `Mul`,

@@ -7,7 +7,7 @@
 #include <vector>
 
 // =============================================================================
-// SEKP — the SeeML checkpoint container.
+// SEKP — the SeeAI checkpoint container.
 //
 // A checkpoint is the arena's persistent segment (LoRA adapters + optimizer
 // moments) plus the training step, hash-bound to the exact plan that laid the
