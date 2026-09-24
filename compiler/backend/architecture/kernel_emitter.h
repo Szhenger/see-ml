@@ -6,7 +6,7 @@
 #include "compiler/backend/architecture/host_arch.h"
 
 // =============================================================================
-// Kernel emitter — the GPU half of the trainer's code generation. Emits
+// Kernel emitter — the GPU half of the target description. Emits
 // Metal Shading Language source for the GEMM-family kernels the training
 // program spends its time in (forward matmul, the dX/dW backward variants,
 // and the merge's scaled GEMM-accumulate), threadgroup-tiled from the same

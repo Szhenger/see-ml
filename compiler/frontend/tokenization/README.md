@@ -23,6 +23,12 @@ data (security at every layer):
 6. **pack** — concatenate documents with EOS and cut fixed S+1 windows;
    never pad, because every position is a loss target.
 
+Where the code lives: the normalize, sanitize, deduplicate, encode and pack
+functions are implemented under `source/` (beside the contract check), the
+only tree the packaging phase vendors into a package; this directory is the
+compile-time driver that runs them over the user's corpus and fills the
+accountant's statistics. Code placed here alone would never reach the device.
+
 Artifact: a canonical SDS, its manifest, and its hash. The tokenizer
 definition's hash binds every corpus on both layers (plan header, SDS
 header). What this directory does **not** defend against, and says so on

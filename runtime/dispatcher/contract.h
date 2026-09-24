@@ -13,7 +13,7 @@
 // =============================================================================
 // Subsystem usage contracts — the engine's verification layer, mirroring
 // compiler/driver/contract.h. Each runtime subsystem guards its own
-// invariants (the validator's per-instruction sweep, the custodian's
+// invariants (the verifier's per-instruction sweep, storage's
 // checkpoint binding, the feeder's format checks); these contracts check
 // the *seams*: that the engine hands each subsystem what it requires and
 // that what the compiler's driver promised at emit time still holds at

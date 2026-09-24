@@ -15,7 +15,7 @@ namespace seeml::update_rt {
 inline constexpr uint32_t kCkptMagic = 0x504B4553;  // "SEKP"
 // v3: payload_hash uses ContentHash64 — the deterministic parallel identity
 // hash — instead of serial byte-at-a-time Fnv1a64. The persistent segment
-// (parameters + AdamW moments) is the largest thing the custodian hashes,
+// (parameters + AdamW moments) is the largest thing the storage role hashes,
 // every checkpoint_every steps; the buffer is immutable for the duration of
 // the call, so the chunked hash is race-free. v2 checkpoints are rejected
 // by the version gate (resume restarts from the plan's initial state).

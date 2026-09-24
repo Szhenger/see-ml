@@ -20,7 +20,7 @@
 // are unsupported and error (the im2col patch geometry does not model them).
 //
 // Scope: a structural SIR rewrite only — the staked-out lowering for a
-// conv-capable frontend, exercised today at the SIR level by the updater
+// conv-capable frontend, exercised today at the SIR level by the pass_manager
 // suite. The rest of the update pipeline cannot yet train through it: the
 // sc_low.im2col / filter_matrix / col2im primitives have no autodiff VJP
 // rules and no UpdateInstruction lowering, and LoRA grafting targets only
