@@ -9,7 +9,7 @@
 
 // =============================================================================
 // validating/ — errors formed during load-time verification of a .seeu
-// plan's instruction streams (runtime/validator/). After this process
+// plan's instruction streams (runtime/verifier/). After this process
 // accepts a plan, the executor dispatches it blindly — so the discipline is
 // total coverage: every operand ref of every instruction is bounds-checked
 // against its address space, writes may only target the mutable arena, and

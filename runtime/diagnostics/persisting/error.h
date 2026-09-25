@@ -9,7 +9,7 @@
 
 // =============================================================================
 // persisting/ — errors formed while putting durable state on disk or taking
-// it back (runtime/custodian/): the fsync'd atomic write path shared by
+// it back (runtime/storage/): the fsync'd atomic write path shared by
 // model commits and checkpoints, and the checkpoint container's binding
 // checks. Failure discipline: name the path for I/O failures (the fix is on
 // disk), and reject a foreign or corrupt checkpoint before a single byte

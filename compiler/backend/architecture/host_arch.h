@@ -11,7 +11,7 @@
 // Host architecture analysis — the backend's view of the machine the update
 // program will run on. Detection reads the ISA and SIMD capability from the
 // compilation target and the cache/core geometry from the OS, and the
-// derived tiling hints tell the trainer what microarchitecture details
+// derived tiling hints tell allocation, selection and the driver what microarchitecture details
 // matter for efficient code generation (and give the tuner its starting
 // point). Everything derived is a pure function of the reported info, so
 // hints are reproducible for a given host description.

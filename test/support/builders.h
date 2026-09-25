@@ -7,8 +7,8 @@
 #include <vector>
 
 #include "source/plan/update_types.h"
-#include "runtime/feeder/dataset.h"
-#include "runtime/engine/update_engine.h"
+#include "runtime/pipeline/dataset.h"
+#include "runtime/dispatcher/update_engine.h"
 #include "source/language/model_format.h"
 
 // =============================================================================

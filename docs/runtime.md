@@ -10,19 +10,23 @@ But "boring" has to be *earned*. The runtime's real job, beyond executing, is re
 
 ```
 runtime/
-  engine/       orchestrates the update process, verifies every boundary
-  feeder/       corpus decode and pipelined batch staging
+  host/         the package entry point (contract only until S7)
+  loader/       plan load and the resource contract (contract only until S7)
+  verifier/     load-time bounds proof of every instruction
+  pipeline/     corpus decode and pipelined batch staging
+  dispatcher/   the VM dispatch loop; orchestrates the update, verifies every boundary
   executor/     the kernel library the dispatcher executes
-  validator/    load-time bounds proof of every instruction
-  custodian/    durable state — checkpoints, atomic commits
+  gating/       the accept-or-refuse decision (contract only until S7)
+  storage/      durable state — checkpoints, atomic commits
+  profiler/     instrumentation and the runtime screen (contract only until S7)
   diagnostics/  error handling, partitioned by process
 ```
 
-The partition mirrors the compiler's — subsystems named for their role, façade headers where units split — with `engine/` playing the driver's role: it owns the *process* and verifies every boundary it crosses.
+The partition mirrors the compiler's — subsystems named for their role, façade headers where units split — with `dispatcher/` playing the driver's role: it owns the *process* and verifies every boundary it crosses.
 
 ## The update process, end to end
 
-`UpdateEngine` (`runtime/engine/update_engine.h`) runs the ML analog of an OS software update:
+`UpdateEngine` (`runtime/dispatcher/update_engine.h`) runs the ML analog of an OS software update:
 
 ```
 Load    ──▶ header identity + integrity (magic, version, whole-plan hash)
@@ -35,7 +39,7 @@ Commit  ──▶ hash-checked source copy + deltas, fsync'd, atomically renamed
 
 Let's take each phase seriously.
 
-## engine/ — orchestration and verification
+## dispatcher/ — orchestration and verification
 
 ### Loading: paranoia as a protocol
 
@@ -80,11 +84,11 @@ Would you install a software update that made your phone worse? Neither would Se
 
 1. Read the source `.smf` file and recompute its `ContentHash64`; if the plan carries a source hash (nonzero), a mismatch **refuses the commit**. You cannot patch the wrong file, or a modified one.
 2. For each emit-table entry — after bounds-checking it against the actual file size — add the delta onto the file's pristine f32 weights: `W′ᵢ = Wᵢ + Δᵢ`. Note the source: the *file's* weights, not the (possibly int8-quantized) rodata copy. Quantization error never reaches the committed model.
-3. Write the result durably (fsync + atomic rename — see custodian below) to the output path. The source file itself is never modified.
+3. Write the result durably (fsync + atomic rename — see storage below) to the output path. The source file itself is never modified.
 
-## validator/ — the load-time proof
+## verifier/ — the load-time proof
 
-Here's the mindset shift that makes the executor simple: instead of checking bounds *during* execution (every kernel, every step, millions of times), prove the whole program safe *once*, before running any of it. `ValidateInstruction` (`runtime/validator/plan_validator.cc`) is that proof, run per instruction at load.
+Here's the mindset shift that makes the executor simple: instead of checking bounds *during* execution (every kernel, every step, millions of times), prove the whole program safe *once*, before running any of it. `ValidateInstruction` (`runtime/verifier/plan_validator.cc`) is that proof, run per instruction at load.
 
 For each instruction, the validator knows — per opcode — exactly which operands are read, which are written, and how many elements each must span, with byte extents derived *exactly as the kernels derive their loop bounds* (a GEMM instruction with dims M, N, K implies extents M·K, K·N, M·N). It then checks every operand reference:
 
@@ -169,7 +173,7 @@ dx = rstd · (g − mean(g) − x̂·mean(g·x̂))
 
 `ClipNorm` computes a tensor's L2 norm — its Euclidean length, `√(Σgᵢ²)` — with double partials, chunk-ordered (so even the *decision* to clip is deterministic), and rescales by `max_norm/‖g‖` only if `‖g‖ > max_norm`. `SgdStep` and `AdamWStep` apply the update equations derived in [compiler.md](compiler.md), in place, with the moments living in the persistent segment — which is precisely why a checkpoint can resume mid-optimization without losing Adam's memory. From plan v12 the clip normally rides the step itself (E3, #82): the step instruction carries the threshold, computes the same chunk-ordered norm, and consumes `g·min(1, max_norm/‖g‖)` — the very float `ClipNorm` would have stored, rounded in a statement of its own so no compiler contracts it into the update — without rewriting the gradient, which removes one full read+write pass per tensor per step (1.07–1.19× on the optimizer phase, Apple M5). It is also the one kernel that can refuse: a norm that is not finite returns an executor error before that tensor's parameters or moments are touched, instead of scaling the tensor by `0·∞ = NaN` and letting the *next* step's loss guard find out. `FusedMap` (plan v13, E4) runs an elementwise chain **block-wise**: 1,024 floats at a time, stage by stage, each stage its own loop with the standalone kernel's expression — separate loops are what keep a stage's multiply from being contracted into the next stage's add, so the chain is bit-identical to the sequence, and the block staying in L1 is what removes the arena round trips (1.2–2.0× the sequence at kernel level; the first and last stages are restrict-qualified, the middle ones run in place). On Metal one thread per element interprets the stages, each in a statement of its own. The rest of the batch is the same kind of change — memory traffic, never bits: the RoPE kernels read their cos/sin from a `kRopeTable` result built once per program execution with the identical fp32 recurrence (5.4× on the rotation at one thread, 2.4× at eight, SmolLM geometry), `ReduceRows` accumulates each 256-column tile on the stack and writes `db` once instead of read-modify-writing shared cache lines every row, and the evaluation argmax runs over the standard chunk geometry with per-chunk integer tallies.
 
-## feeder/ — the corpus
+## pipeline/ — the corpus
 
 ### dataset — validation, then randomness done right
 
@@ -188,7 +192,7 @@ While step s computes, someone could already be gathering batch s+1. That someon
 
 (The class-label bound the feeder contract proves is scanned **once per dataset**: `ValidateClassLabels` caches the exact extent of the ids, so the three or four validations an update performs — every `Train` and every `Evaluate` re-checks its corpus — cost one pass, any later bound is answered exactly without a rescan, and a split re-proves the halves it produces. In the worker pool, only the **last** worker out of a job wakes the caller, with `notify_one`: the caller's wait needs every holder gone, so the earlier broadcasts were wake-ups it could only re-check and sleep on, one mutex acquisition each.) Two properties matter more than the concurrency: the staged sequence is **exactly the serial sequence** — pipelining changes *when* batches are materialized, never *which* — and the destructor joins the thread on every exit path (the engine scopes the pipeline so even an error return can't leak it). With `SEEML_THREADS=1`, no thread is created at all and `NextBatch` fills synchronously — serial mode isn't a special case, it's the same code with the overlap removed.
 
-## custodian/ — durable state
+## storage/ — durable state
 
 ### Why "just write the file" is a bug
 
@@ -230,4 +234,4 @@ Every unit above (plus the `source/plan/` ABI headers, `source/identity/hash.h`,
 
 ## Testing
 
-Runtime suites, organized to mirror this partition (`test/runtime/<subsystem>/*_test.cc` — see [test/README.md](../test/README.md)): `executor/kernels` (per-family numeric checks against references), `feeder/dataset` and `feeder/batch_pipeline` (the staged sequence is exactly the serial one), `validator/validator` (per-opcode bounds proofs, plus the regression that every compiled instruction validates), `custodian/custodian` (durable writes, checkpoint binding and corruption rejection), `engine/engine` (the boundary contracts and the unit registry), and `engine/update_engine` (the VM lifecycle end to end, gradient checks, checkpoint resume), plus the cross-half `system/update_system_test` and the emitter suite that verifies the vendored package layout.
+Runtime suites, organized to mirror this partition (`test/runtime/<subsystem>/*_test.cc` — see [test/README.md](../test/README.md)): `executor/kernels` (per-family numeric checks against references), `pipeline/dataset` and `pipeline/batch_pipeline` (the staged sequence is exactly the serial one), `verifier/verifier` (per-opcode bounds proofs, plus the regression that every compiled instruction validates), `storage/storage` (durable writes, checkpoint binding and corruption rejection), `dispatcher/engine` (the boundary contracts and the unit registry), and `dispatcher/update_engine` (the VM lifecycle end to end, gradient checks, checkpoint resume), plus the cross-half `system/update_system_test` and the emitter suite that verifies the vendored package layout.

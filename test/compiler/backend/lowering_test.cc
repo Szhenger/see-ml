@@ -1,5 +1,5 @@
 // =============================================================================
-// trainer/ unit tests: arena alignment, the liveness-driven transient
+// allocation/ + selection/ unit tests: arena alignment, the liveness-driven transient
 // allocator (correct reuse — the efficiency regression guard — and pinning),
 // and instruction lowering (opcode mapping, storage-op elision, q8
 // selection, unloweable-op rejection).

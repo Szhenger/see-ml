@@ -12,7 +12,7 @@
 
 #include "compiler/backend/packaging/native_emitter.h"
 #include "compiler/driver/update_compiler.h"
-#include "runtime/engine/update_engine.h"
+#include "runtime/dispatcher/update_engine.h"
 #include "source/language/model_format.h"
 #include "test/framework/seetest.h"
 #include "test/support/builders.h"
@@ -72,15 +72,15 @@ TEST(NativeEmitter, EmitsCompletePackage) {
   // the build script compiles them from the package directory, never from
   // the repository checkout.
   for (const char* rel :
-       {"runtime/engine/update_engine.cc", "runtime/engine/contract.cc",
+       {"runtime/dispatcher/update_engine.cc", "runtime/dispatcher/contract.cc",
         "runtime/executor/update_kernels.h", "runtime/executor/gemm.cc",
         "runtime/executor/elementwise.cc", "runtime/executor/activation.cc",
         "runtime/executor/normalization.cc", "runtime/executor/loss.cc",
         "runtime/executor/optimizer.cc", "runtime/executor/attention.cc",
-        "runtime/feeder/dataset.cc",
-        "runtime/feeder/batch_pipeline.cc", "runtime/custodian/durable_io.cc",
-        "runtime/validator/plan_validator.cc",
-        "runtime/custodian/checkpoint.cc",
+        "runtime/pipeline/dataset.cc",
+        "runtime/pipeline/batch_pipeline.cc", "runtime/storage/durable_io.cc",
+        "runtime/verifier/plan_validator.cc",
+        "runtime/storage/checkpoint.cc",
         "runtime/diagnostics/diagnostic.h",
         "runtime/diagnostics/executing/error.h", "source/plan/update_types.h",
         "source/plan/config.h", "source/plan/instruction.h",
@@ -91,11 +91,11 @@ TEST(NativeEmitter, EmitsCompletePackage) {
         std::filesystem::path(out_dir) / rel));
   }
   const std::string script = ReadText(paths.build_script);
-  EXPECT_STR_CONTAINS(script, "engine/update_engine");
+  EXPECT_STR_CONTAINS(script, "dispatcher/update_engine");
   // The vendored runtime is threaded: the script must compile the parallel
   // substrate and link with -pthread.
   EXPECT_STR_CONTAINS(script, "source/parallel/parallel_for.cc");
-  EXPECT_STR_CONTAINS(script, "feeder/batch_pipeline");
+  EXPECT_STR_CONTAINS(script, "pipeline/batch_pipeline");
   EXPECT_STR_CONTAINS(script, "-pthread");
 
   // The GEMM tile geometry travels in the plan header (v11), decided by
@@ -149,7 +149,7 @@ TEST(NativeEmitter, SkipsTheDecimalTUOnRequest) {
   EXPECT_TRUE(std::filesystem::exists(paths.plan_file));
   EXPECT_TRUE(std::filesystem::exists(paths.main_tu));
   EXPECT_TRUE(std::filesystem::exists(
-      std::filesystem::path(out_dir) / "runtime/engine/update_engine.cc"));
+      std::filesystem::path(out_dir) / "runtime/dispatcher/update_engine.cc"));
   const std::string plan_bytes = ReadText(paths.plan_file);
   EXPECT_EQ(plan_bytes.size(), compiled.plan.size());
   EXPECT_TRUE(std::equal(compiled.plan.begin(), compiled.plan.end(),

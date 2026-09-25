@@ -252,7 +252,7 @@ class Plan:
         return out
 
 
-# --- The SDS corpus and the feeder (runtime/feeder/dataset.cc) ---------------
+# --- The SDS corpus and the feeder (runtime/pipeline/dataset.cc) ---------------
 
 SDS_MAGIC = formats.SDS_MAGIC
 _SDS_HEAD = formats.SDS_HEADER_BYTES

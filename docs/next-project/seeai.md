@@ -37,15 +37,15 @@ prints the measured step beside it, and the ratio is the utilization.
 
 ## §3 Frontend — six sub-subsystems on two paths
 
-*The directory moves of §3–§5 landed on 2026-09-24 (the "today" columns describe the tree before them); the behavioral work of S1, S5 and S6 is unchanged.*
+*The directory moves of §3–§5 landed on 2026-09-24 (PRs #156, #157); the "today" columns name the tree after them. The behavioral work of S1, S5 and S6 is unchanged.*
 
 | stage | role | today | artifact |
 |---|---|---|---|
 | **ingressor** | bounded SMF reader, weight copy, content hash | `frontend/ingressor/model_reader.cc` | decoded model + hash |
-| **accountant** | weights + activations lower bound vs the budget; corpus statistics before and after sanitization; the identity manifest | `ingressor/resource_analyzer.cc` | estimate + manifest |
-| **topology** | well-formedness: dependency order, unique names, output exists, every shape agrees with its op; cross-input checks (student↔teacher, corpus↔model, adapter↔weight, tokenizer vocab == embedding rows == head width) | `parser/sema.cc` (per-op shape checks are interleaved in the build loop today and must be lifted out so topology completes first) | verdict + inferred shapes |
-| **computation** | mechanical translation of the verified op list into the SIR computation graph, then `Block::verify()`; teacher prefixed `t::` | `parser/parser.cc`, `value_resolver.cc`, `graph_build.h` | the SIR forward graph |
-| **tokenizer** | the training subsystem: raw text in; normalize → sanitize/filter → deduplicate (exact, by hash) → encode (byte-level BPE, zero-dependency) → pack (concatenate with EOS, cut fixed S+1 windows, never pad) | new | canonical SDS + manifest of drops + hash |
+| **accountant** | weights + activations lower bound vs the budget; corpus statistics before and after sanitization; the identity manifest | `frontend/accountant/resource_analyzer.cc` | estimate + manifest |
+| **topology** | well-formedness: dependency order, unique names, output exists, every shape agrees with its op; cross-input checks (student↔teacher, corpus↔model, adapter↔weight, tokenizer vocab == embedding rows == head width) | `frontend/topology/sema.cc` (per-op shape checks are still interleaved in computation's build loop and must be lifted out so topology completes first) | verdict + inferred shapes |
+| **computation** | mechanical translation of the verified op list into the SIR computation graph, then `Block::verify()`; teacher prefixed `t::` | `frontend/computation/parser.cc`, `value_resolver.cc`, `graph_build.h` | the SIR forward graph |
+| **tokenization** | the training subsystem: raw text in; normalize → sanitize/filter → deduplicate (exact, by hash) → encode (byte-level BPE, zero-dependency) → pack (concatenate with EOS, cut fixed S+1 windows, never pad) | `frontend/tokenization/README.md` (the contract; code in S2) | canonical SDS + manifest of drops + hash |
 | **validation** | "what counts": the held-out split (seeded partition after dedup, or `--val-data` through the same tokenizer; seed, indices and hashes into the plan) and the loss mask (chat template from the SMF tokenizer section; response positions are targets) | new; today a runtime `--val-frac` | two canonical corpora with masks |
 
 Shared infrastructure beside the six, not stages: `representation/` (SIR),
@@ -65,7 +65,7 @@ Frontend doctrine lines:
   BPE first; SentencePiece refused loudly until implemented.
 - Sanitizer, contract check and tokenizer are pure deterministic C++
   functions in `source/`, vendored into the package so the feeder re-runs
-  them on device data. The contract function leaves `runtime/engine/`.
+  them on device data. The contract function leaves `runtime/dispatcher/`.
 - Threat model, stated on the screen: the sanitizer covers malformed bytes,
   out-of-contract records, degenerate records and exact duplicates. It does
   **not** cover well-formed poisoned data; the gate and a held-out set the
@@ -111,12 +111,12 @@ against frontier LoRA practice: AdamW already; learning rate 1e-3 constant →
 
 | phase | does | today |
 |---|---|---|
-| **architecture** | target description (ISA, SIMD, cores, caches, host key; a GPU half: device family, cores, Metal 4 capability, peak); analytic tiling; reads the measured kernel-policy table | `architecture/host_arch.cc` + `tuner/kernel_policy_table.cc` |
-| **allocation** | arena binder: three segments, SSA liveness, first-fit, rodata layout | `trainer/arena_binder.cc` |
-| **selection** | SIR op → one 64-byte instruction; ISA loses MSE and conv, gains masked xent and the attention segment operand | `trainer/instruction_lowering.cc` |
+| **architecture** | target description (ISA, SIMD, cores, caches, host key; a GPU half: device family, cores, Metal 4 capability, peak); analytic tiling; reads the measured kernel-policy table | `architecture/host_arch.cc`, `kernel_policy_table.cc`, `kernel_emitter.cc` |
+| **allocation** | arena binder: three segments, SSA liveness, first-fit, rodata layout | `allocation/arena_binder.cc` |
+| **selection** | SIR op → one 64-byte instruction; ISA loses MSE and conv, gains masked xent and the attention segment operand | `selection/instruction_lowering.cc` |
 | **scheduling** (candidate) | instruction order for the target; earns a directory only if F8 (#139) measures the step time outside kernels as real; schedule before allocate | none |
 | **assembly** | plan layout: header with the identity manifest, kernel policy and reduction-order ledger; streams; rodata written once; seeded persistent image; emit table; seal | the driver's persist-init / assemble / seal phases (misfiled) |
-| **packaging** | the self-contained package: embedded plan, generated main, vendored runtime **plus the shared `source/` contract check, sanitizer and tokenizer**, build script | `trainer/native_emitter.cc`; Python twin `tool/pack_update.py` |
+| **packaging** | the self-contained package: embedded plan, generated main, vendored runtime **plus the shared `source/` contract check, sanitizer and tokenizer**, build script | `packaging/native_emitter.cc`; Python twin `tool/pack_update.py` |
 
 `tuner/` folds into architecture; `kernel_emitter.cc` (tests only since the
 runtime owns the kernel library) retires or moves its GPU tiling clamp under
@@ -126,6 +126,8 @@ permission (the `kFlagRelaxed` model), never a requirement, because the
 build host is not the device.
 
 ## §6 Runtime — nine roles, in lifecycle order
+
+*The directory renames landed on 2026-09-24 (PR #157): verifier, pipeline, dispatcher, storage; host, loader, gating and profiler exist as contract READMEs until S7 extracts their code from the dispatcher. The prose below names the tree after the renames.*
 
 **host** (package entry: generated main, flags, exit codes, cooperative
 cancellation; thread and affinity policy) → **loader** (map the plan, seal
@@ -139,9 +141,9 @@ and backends behind the executor seam) → **gating** (evaluate before/after,
 best state, patience, exit 0 or 3) → **storage** (checkpoints, the durable
 atomic commit) — **profiler** throughout (step split, per-kernel spans, peak
 RSS, energy per token; measured beside predicted) and **diagnostics**
-cross-cutting. Today `engine/` holds loader, dispatcher, gating and profiler
-together; `validator/`, `feeder/`, `custodian/` are verifier, pipeline,
-storage. Shared infrastructure outside: `source/parallel` (the deterministic
+cross-cutting. Today `dispatcher/update_engine.cc` still holds the loader,
+the gate and the profiler together; `verifier/`, `pipeline/` and `storage/`
+are in place. Shared infrastructure outside: `source/parallel` (the deterministic
 pool), `source/plan`, `source/identity`, and a `source/platform/` seam to be
 created.
 

@@ -9,7 +9,7 @@
 
 // =============================================================================
 // feeding/ — errors formed while decoding the SDS dataset and staging
-// batches (runtime/feeder/). The lexical layer of the update: nothing here
+// batches (runtime/pipeline/). The lexical layer of the update: nothing here
 // understands the plan, only the corpus — magic, geometry, label bounds.
 // Failure discipline: reject the file before the first sample is served;
 // the pipeline itself cannot fail (staging is allocation-free and joined on

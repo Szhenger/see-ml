@@ -20,17 +20,17 @@ test/
     parallel/           parallel_for
     identity/           hash
   compiler/             one folder per compiler subsystem
-    frontend/           model_io  resource_analyzer  sir  operator  parser
-    analysis/           update_passes  updater  reviewer
-    backend/            tuner  trainer  native_emitter
+    frontend/           model_io  resource_analyzer  sir  operator  parser  golden_fixture
+    analysis/           update_passes  pass_manager  statistics
+    backend/            architecture  lowering  native_emitter
     driver/             update_compiler  driver
     diagnostics/        diagnostics
   runtime/              one folder per runtime subsystem
-    feeder/             dataset  batch_pipeline
-    executor/           kernels
-    validator/          validator
-    custodian/          custodian
-    engine/             engine  update_engine
+    pipeline/           dataset  batch_pipeline
+    executor/           kernels  metal_gemm  metal_backend
+    verifier/           verifier
+    storage/            storage
+    dispatcher/         engine  update_engine
   system/               the cross-half end-to-end update
     update_system_test
   fuzz/                 libFuzzer harnesses (built with -DSEEML_FUZZ=ON)
@@ -49,7 +49,7 @@ The `support/` fixtures earn their keep the same way: **deterministic** model bu
 
 Worth knowing the flavors, because they answer different questions:
 
-- **Unit suites** pin one module's behavior — `sir` proves `Block::verify()` catches each corruption it claims to; `validator` proves each opcode's bounds math, including the overflow cases; `hash` pins the digests so an accidental algorithm change can't slip by.
+- **Unit suites** pin one module's behavior — `sir` proves `Block::verify()` catches each corruption it claims to; `verifier` proves each opcode's bounds math, including the overflow cases; `hash` pins the digests so an accidental algorithm change can't slip by.
 - **Numeric suites** check kernels against independent references — and the autodiff machinery is verified by **finite-difference gradient checking**: nudge a parameter by ε, watch the loss, and compare `(L(θ+ε) − L(θ−ε)) / 2ε` against the gradient the compiled backward pass computes. Calculus, cross-examined by arithmetic. (This is why the compiler can emit a plan *without* the optimizer step — a pure forward+backward program exists precisely to be gradient-checked.)
 - **Property/regression suites** pin the invariants the docs promise: the pipelined batch sequence is *exactly* the serial one; every instruction the compiler emits passes the runtime's validator; corrupted checkpoints are rejected; parallel results match serial bit-for-bit.
 - **The system suite** (`system/update_system_test`) runs the whole story — export-shaped model in, train, gate, merge, commit — proving the two halves agree about every format and contract between them.

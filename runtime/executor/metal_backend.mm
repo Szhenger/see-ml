@@ -21,7 +21,7 @@
 
 #include "runtime/executor/kernel_policy.h"
 #include "runtime/executor/metal_kernels.h"
-#include "runtime/validator/plan_validator.h"
+#include "runtime/verifier/plan_validator.h"
 #include "source/parallel/parallel_for.h"
 
 // =============================================================================

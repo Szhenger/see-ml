@@ -103,7 +103,7 @@ std::expected<std::vector<UpdateInstruction>, std::string> LowerOps(
                          ? quant_scales.find(op->operand(1))
                          : quant_scales.end();
       const bool q8 = q != quant_scales.end();
-      // bf16 frozen weights (v10) take the widening opcodes; the reviewer
+      // bf16 frozen weights (v10) take the widening opcodes; the quantization review
       // never selects a weight for both storages.
       const bool bf16 = !q8 && m != "sc_low.matmul_tn" &&
                         bf16_weights.contains(op->operand(1));

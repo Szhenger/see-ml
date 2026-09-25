@@ -9,9 +9,9 @@
 #include "compiler/diagnostics/diagnostic.h"
 
 // =============================================================================
-// architecting/ — handling for local device analysis
-// (compiler/backend/architecture/) and the kernel-policy table the offline
-// tuner measured for it (compiler/backend/architecture/). Detection can never
+// architecting/ — handling for local device analysis and the kernel-policy
+// table the offline tuner measured for it (both compiler/backend/
+// architecture/). Detection can never
 // hard-fail — a machine that hides its cache geometry must still compile —
 // so this process has two disciplines:
 //

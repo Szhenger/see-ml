@@ -17,7 +17,7 @@ Cross-cutting ground rules, all now in place and to be leaned on:
 - **New SIR rewrites** land in pass phase B/C under the `PassManager`
   verify gate, with `DeadCodeElimination` sweeping what they orphan.
 - **New instruction semantics** must be provable by the validator
-  (`runtime/validator/plan_validator.cc`), including its operand-overlap
+  (`runtime/verifier/plan_validator.cc`), including its operand-overlap
   discipline, before `Execute()` may dispatch them blindly.
 - **Bitwise determinism is a contract**: any change must either preserve
   per-element expression order exactly or be introduced as a new opcode the

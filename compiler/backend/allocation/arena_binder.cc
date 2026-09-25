@@ -8,7 +8,7 @@
 #include <cstring>
 
 // For kWeightSweepGrain: the int8 pack below sweeps with the same chunk
-// geometry as the reviewer's max-abs scan that selected the weights.
+// geometry as the quantization review's max-abs scan that selected the weights.
 #include "compiler/analysis/statistics/quantization.h"
 #include "compiler/diagnostics/generating/error.h"
 #include "source/parallel/parallel_for.h"
